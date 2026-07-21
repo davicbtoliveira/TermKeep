@@ -19,10 +19,10 @@ It combines a Go CLI/TUI, offline-first encrypted storage, and a multi-account G
 
 ## Design documents
 
+- [MVP product requirements](docs/prd/0001-termkeep-mvp.md)
 - [Domain glossary](docs/glossary.md)
 - [Architecture Decision Records](docs/adr/README.md)
 
 ## License
 
 TermKeep is licensed under the GNU Affero General Public License v3.0 or later.
-
