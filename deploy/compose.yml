@@ -1,0 +1,88 @@
+# TermKeep reference self-hosted deployment: Traefik, server, PostgreSQL.
+#
+#   cp deploy/.env.example deploy/.env   # then edit secrets
+#   deploy/generate-dev-certs.sh
+#   docker compose -f deploy/compose.yml --env-file deploy/.env up -d
+#
+# See docs/deployment.md for configuration, secrets, and volume details.
+# This stack is pre-production; do not store real credentials yet.
+
+services:
+  traefik:
+    image: traefik:v3.4
+    restart: unless-stopped
+    networks:
+      proxy:
+        # Fixed IP: the server trusts forwarded headers from this exact
+        # address, and from nothing else.
+        ipv4_address: 10.90.0.2
+    volumes:
+      - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./traefik/dynamic.yml:/etc/traefik/dynamic.yml:ro
+      - ${TERMKEEP_CERTS_DIR:-./certs}:/certs:ro
+    ports:
+      - "${TERMKEEP_HTTPS_PORT:-443}:443"
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  server:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.server
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://termkeep:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@db:5432/termkeep?sslmode=disable
+      TRUSTED_PROXIES: 10.90.0.2/32
+      LISTEN_ADDR: :8080
+    networks:
+      - internal
+      - proxy
+    ports:
+      # Loopback-only: direct access for operators and the black-box
+      # harness. Proxy-header trust does not extend to this path.
+      - "127.0.0.1:${TERMKEEP_SERVER_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/api/v1/status"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: termkeep
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: termkeep
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U termkeep -d termkeep"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+networks:
+  # Server <-> database only; never published.
+  internal:
+  # Client-facing network shared with Traefik. Fixed name and subnet so
+  # the server can pin its trusted proxy to an exact address.
+  proxy:
+    name: termkeep-proxy
+    ipam:
+      config:
+        - subnet: 10.90.0.0/24
+
+volumes:
+  # The only state that matters: PostgreSQL data. Back this up; everything
+  # else in the stack is disposable.
+  pgdata:

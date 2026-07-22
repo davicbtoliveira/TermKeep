@@ -1,0 +1,19 @@
+# Traefik static configuration for the TermKeep reference deployment.
+# Traefik terminates TLS; the server only trusts forwarded headers from
+# Traefik's fixed proxy IP (see TRUSTED_PROXIES in compose.yml).
+
+entryPoints:
+  websecure:
+    address: ":443"
+
+# Internal health endpoint used by the compose healthcheck.
+ping: {}
+
+# File provider only: routing lives in dynamic.yml and the Docker socket
+# is never mounted into this container.
+providers:
+  file:
+    filename: /etc/traefik/dynamic.yml
+
+log:
+  level: INFO

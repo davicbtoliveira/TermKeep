@@ -1,0 +1,27 @@
+# Traefik dynamic configuration for the TermKeep reference deployment.
+# Routing is declared here (file provider) instead of Docker labels, so
+# the proxy never needs access to the Docker socket.
+
+http:
+  routers:
+    termkeep:
+      rule: "Host(`localhost`)"
+      entryPoints: ["websecure"]
+      service: termkeep
+      tls: true
+  services:
+    termkeep:
+      loadBalancer:
+        servers:
+          # Service name on the compose "proxy" network.
+          - url: "http://server:8080"
+
+tls:
+  certificates:
+    - certFile: /certs/tls.crt
+      keyFile: /certs/tls.key
+  stores:
+    default:
+      defaultCertificate:
+        certFile: /certs/tls.crt
+        keyFile: /certs/tls.key
