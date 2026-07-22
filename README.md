@@ -22,6 +22,7 @@ It combines a Go CLI/TUI, offline-first encrypted storage, and a multi-account G
 - [MVP product requirements](docs/prd/0001-termkeep-mvp.md)
 - [Domain glossary](docs/glossary.md)
 - [Architecture Decision Records](docs/adr/README.md)
+- [Reference self-hosted deployment](docs/deployment.md)
 
 ## License
 
