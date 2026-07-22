@@ -61,8 +61,11 @@ func statusHandler(version string, schema SchemaStore, trusted []netip.Prefix) h
 	}
 }
 
-// clientIP resolves the effective client address. X-Forwarded-For is only
-// read when the direct peer belongs to a configured trusted proxy range.
+// clientIP resolves the effective client address. The header is read only
+// when the direct peer is a trusted proxy; resolution then walks
+// X-Forwarded-For right to left, skipping trusted hops, and stops at the
+// first address outside the trusted set. This defeats clients that prepend
+// forged entries, which a pass-through proxy would otherwise preserve.
 func clientIP(r *http.Request, trusted []netip.Prefix) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -72,15 +75,30 @@ func clientIP(r *http.Request, trusted []netip.Prefix) string {
 	if err != nil {
 		return host
 	}
+	if !isTrusted(remote, trusted) {
+		return remote.String()
+	}
 
-	for _, p := range trusted {
-		if p.Contains(remote) {
-			if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-				// Leftmost entry is the original client; later entries are
-				// the proxies that appended themselves.
-				return strings.TrimSpace(strings.Split(xff, ",")[0])
-			}
+	xff := r.Header.Get("X-Forwarded-For")
+	if xff == "" {
+		return remote.String()
+	}
+	parts := strings.Split(xff, ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		candidate := strings.TrimSpace(parts[i])
+		ip, err := netip.ParseAddr(candidate)
+		if err != nil || !isTrusted(ip, trusted) {
+			return candidate
 		}
 	}
 	return remote.String()
+}
+
+func isTrusted(ip netip.Addr, trusted []netip.Prefix) bool {
+	for _, p := range trusted {
+		if p.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }

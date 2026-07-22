@@ -112,3 +112,19 @@ func TestStatusHonorsForwardedHeaderFromTrustedProxy(t *testing.T) {
 		t.Errorf("client_ip: want 203.0.113.99, got %q", body.ClientIP)
 	}
 }
+
+func TestStatusStopsForwardingAtFirstUntrustedHop(t *testing.T) {
+	// Only the proxy's exact address is trusted, like the fixed Traefik IP
+	// in the reference deployment. A client that prepends a forged
+	// X-Forwarded-For entry must be unmasked: resolution walks right to
+	// left and stops at the first address outside the trusted set.
+	trusted := mustPrefixes(t, "10.0.0.2/32")
+	h := NewHandler("dev", stubSchema{version: 1}, trusted)
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	_, body := getStatus(t, srv, "10.0.0.2:443", "203.0.113.99, 10.0.0.1")
+	if body.ClientIP != "10.0.0.1" {
+		t.Errorf("forged leftmost entry honored: client_ip = %q, want 10.0.0.1", body.ClientIP)
+	}
+}
