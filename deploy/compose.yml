@@ -40,6 +40,8 @@ services:
       DATABASE_URL: postgres://termkeep:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@db:5432/termkeep?sslmode=disable
       TRUSTED_PROXIES: 10.90.0.2/32
       LISTEN_ADDR: :8080
+      OPAQUE_SERVER_KEY: ${OPAQUE_SERVER_KEY:?set OPAQUE_SERVER_KEY}
+      OPAQUE_OPRF_SEED: ${OPAQUE_OPRF_SEED:?set OPAQUE_OPRF_SEED}
     networks:
       - internal
       - proxy

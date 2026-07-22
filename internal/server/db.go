@@ -35,3 +35,80 @@ type DBStore struct {
 func (s DBStore) SchemaVersion(ctx context.Context) (int, error) {
 	return SchemaVersion(ctx, s.DB)
 }
+
+// InstanceEmpty reports whether the instance can accept its sole bootstrap
+// registration. The transaction in CreateBootstrap is the authoritative race
+// check; this is only the early rejection path.
+func (s DBStore) InstanceEmpty(ctx context.Context) (bool, error) {
+	var empty bool
+	if err := s.DB.QueryRowContext(ctx, "SELECT NOT EXISTS (SELECT 1 FROM accounts)").Scan(&empty); err != nil {
+		return false, fmt.Errorf("check bootstrap state: %w", err)
+	}
+	return empty, nil
+}
+
+// CreateBootstrap atomically creates the first administrator and stores only
+// OPAQUE registration material plus client-encrypted vault envelopes.
+func (s DBStore) CreateBootstrap(ctx context.Context, account BootstrapAccount) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin bootstrap: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// PostgreSQL advisory locks serialize bootstrap attempts without a global
+	// table lock. Future invitation-based registration does not use this path.
+	if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(7345821)"); err != nil {
+		return fmt.Errorf("lock bootstrap: %w", err)
+	}
+	var exists bool
+	if err := tx.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM accounts)").Scan(&exists); err != nil {
+		return fmt.Errorf("check bootstrap account: %w", err)
+	}
+	if exists {
+		return ErrBootstrapClosed
+	}
+	if _, err := tx.ExecContext(ctx,
+		"INSERT INTO accounts (uuid, email, is_administrator) VALUES ($1, $2, $3)",
+		account.AccountID, account.Email, account.Administrator); err != nil {
+		return fmt.Errorf("create bootstrap account: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		"INSERT INTO opaque_records (account_uuid, record) VALUES ($1, $2)",
+		account.AccountID, account.OpaqueRecord); err != nil {
+		return fmt.Errorf("store OPAQUE record: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO vault_envelopes (account_uuid, password_vault_envelope, recovery_vault_envelope)
+		VALUES ($1, $2, $3)`, account.AccountID, account.PasswordVaultEnvelope, account.RecoveryVaultEnvelope); err != nil {
+		return fmt.Errorf("store vault envelopes: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit bootstrap: %w", err)
+	}
+	return nil
+}
+
+// FindAccount loads only opaque authentication and encrypted vault material.
+func (s DBStore) FindAccount(ctx context.Context, email string) (StoredAccount, error) {
+	var account StoredAccount
+	err := s.DB.QueryRowContext(ctx, `
+		SELECT a.uuid::text, a.email, r.record, v.password_vault_envelope, v.recovery_vault_envelope
+		FROM accounts a
+		JOIN opaque_records r ON r.account_uuid = a.uuid
+		JOIN vault_envelopes v ON v.account_uuid = a.uuid
+		WHERE a.email = $1`, email).Scan(
+		&account.AccountID,
+		&account.Email,
+		&account.OpaqueRecord,
+		&account.PasswordVaultEnvelope,
+		&account.RecoveryVaultEnvelope,
+	)
+	if err == sql.ErrNoRows {
+		return StoredAccount{}, ErrAccountNotFound
+	}
+	if err != nil {
+		return StoredAccount{}, fmt.Errorf("load account authentication material: %w", err)
+	}
+	return account, nil
+}

@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"os"
 
+	"golang.org/x/term"
+
 	"github.com/davicbtoliveira/TermKeep/internal/client"
 	"github.com/davicbtoliveira/TermKeep/internal/tui"
 )
@@ -33,18 +35,109 @@ func run(args []string) int {
 
 	// Parse flags preceding the subcommand; `termkeep status` has no flags
 	// of its own yet.
-	_ = fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return exitUsageFailure
+	}
 
 	cfg := client.Config{ServerURL: *serverURL, CACertFile: *caCert}
 
 	switch fs.Arg(0) {
 	case "status":
 		return runStatus(cfg)
+	case "bootstrap":
+		return runBootstrap(cfg, fs.Args()[1:])
+	case "login":
+		return runLogin(cfg, fs.Args()[1:])
 	case "":
 		return runTUI(cfg)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n\nusage: termkeep [--server URL] [--ca-cert FILE] [status]\n", fs.Arg(0))
+		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n\nusage: termkeep [--server URL] [--ca-cert FILE] [status|bootstrap --email EMAIL|login --email EMAIL]\n", fs.Arg(0))
 		return exitUsageFailure
+	}
+}
+
+func runBootstrap(cfg client.Config, args []string) int {
+	fs := flag.NewFlagSet("bootstrap", flag.ContinueOnError)
+	email := fs.String("email", "", "administrator email")
+	if err := fs.Parse(args); err != nil || *email == "" || fs.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "usage: termkeep bootstrap --email EMAIL")
+		return exitUsageFailure
+	}
+	password, err := readMasterPassword("Master password: ")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return exitUsageFailure
+	}
+	confirmation, err := readMasterPassword("Confirm master password: ")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return exitUsageFailure
+	}
+	result, err := client.Bootstrap(context.Background(), cfg, client.BootstrapInput{
+		Email:                 *email,
+		MasterPassword:        password,
+		ConfirmMasterPassword: confirmation,
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return exitUsageFailure
+	}
+	defer result.Vault.Clear()
+
+	fmt.Fprintln(os.Stdout, "Recovery key — save it now. It will not be shown again:")
+	fmt.Fprintln(os.Stdout, result.RecoveryKey)
+	return runVaultTUI(cfg)
+}
+
+func runLogin(cfg client.Config, args []string) int {
+	fs := flag.NewFlagSet("login", flag.ContinueOnError)
+	email := fs.String("email", "", "account email")
+	if err := fs.Parse(args); err != nil || *email == "" || fs.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "usage: termkeep login --email EMAIL")
+		return exitUsageFailure
+	}
+	password, err := readMasterPassword("Master password: ")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return exitUsageFailure
+	}
+	result, err := client.Login(context.Background(), cfg, client.LoginInput{
+		Email:          *email,
+		MasterPassword: password,
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return exitUsageFailure
+	}
+	defer result.Clear()
+	return runVaultTUI(cfg)
+}
+
+func runVaultTUI(cfg client.Config) int {
+	if err := tui.RunVault(cfg); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	return 0
+}
+
+func readMasterPassword(prompt string) (string, error) {
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return "", fmt.Errorf("master password input requires a TTY")
+	}
+	fmt.Fprint(os.Stderr, prompt)
+	value, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Fprintln(os.Stderr)
+	if err != nil {
+		return "", err
+	}
+	defer clearPassword(value)
+	return string(value), nil
+}
+
+func clearPassword(value []byte) {
+	for i := range value {
+		value[i] = 0
 	}
 }
 

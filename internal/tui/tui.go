@@ -19,15 +19,25 @@ type errMsg error
 
 // model is the single-screen state: the shared status lines plus keys.
 type model struct {
-	cfg    client.Config
-	lines  []string
-	err    error
-	loaded bool
+	cfg       client.Config
+	lines     []string
+	err       error
+	loaded    bool
+	vaultOpen bool
 }
 
 // Run starts the Bubble Tea program on the controlling terminal.
 func Run(cfg client.Config) error {
 	m := model{cfg: cfg}
+	p := tea.NewProgram(m)
+	_, err := p.Run()
+	return err
+}
+
+// RunVault opens the minimal vault screen after client-side unlock. The key
+// stays with the caller; this package receives no secret material.
+func RunVault(cfg client.Config) error {
+	m := model{cfg: cfg, vaultOpen: true}
 	p := tea.NewProgram(m)
 	_, err := p.Run()
 	return err
@@ -78,6 +88,9 @@ func (m model) View() string {
 		for _, line := range m.lines {
 			b.WriteString(line + "\n")
 		}
+	}
+	if m.vaultOpen {
+		b.WriteString("Vault:    unlocked (empty)\n")
 	}
 	b.WriteString("\n[r] refresh  [q] quit\n")
 	return b.String()

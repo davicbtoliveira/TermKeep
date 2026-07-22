@@ -30,9 +30,12 @@ type StatusResponse struct {
 // NewHandler builds the /api/v1 mux. trustedProxies lists the CIDR ranges
 // (e.g. the Docker network Traefik lives in) whose X-Forwarded-For headers
 // are honored; the header is ignored from any other source.
-func NewHandler(version string, schema SchemaStore, trustedProxies []netip.Prefix) http.Handler {
+func NewHandler(version string, schema SchemaStore, trustedProxies []netip.Prefix, auth ...*AuthService) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/api/v1/status", statusHandler(version, schema, trustedProxies))
+	if len(auth) != 0 && auth[0] != nil {
+		auth[0].register(mux)
+	}
 	return mux
 }
 

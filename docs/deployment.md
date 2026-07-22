@@ -5,13 +5,14 @@ Docker Compose stack with three services: **Traefik** (TLS termination),
 
 > [!WARNING]
 > TermKeep is pre-production. This deployment proves the architecture; it
-> is **not ready for real credentials**. Registration, encryption, and an
-> independent security review do not exist yet.
+> is **not ready for real credentials**. OPAQUE integration and encryption
+> still require an independent security review before any production use.
 
 ## First boot
 
 ```sh
-cp deploy/.env.example deploy/.env     # edit POSTGRES_PASSWORD
+cp deploy/.env.example deploy/.env
+go run ./cmd/termkeep-server opaque-keygen  # copy both outputs into deploy/.env
 deploy/generate-dev-certs.sh           # development CA + localhost certificate
 docker compose -f deploy/compose.yml --env-file deploy/.env up -d --build
 ```
@@ -32,6 +33,8 @@ All configuration is environment-driven; see `deploy/.env.example`.
 | Variable              | Default     | Purpose                                            |
 | --------------------- | ----------- | -------------------------------------------------- |
 | `POSTGRES_PASSWORD`   | (required)  | Password of the `termkeep` PostgreSQL role         |
+| `OPAQUE_SERVER_KEY`   | (required)  | Persistent OPAQUE server private key               |
+| `OPAQUE_OPRF_SEED`    | (required)  | Persistent per-account OPRF derivation seed        |
 | `TERMKEEP_HTTPS_PORT` | `443`       | Host port publishing Traefik's HTTPS endpoint      |
 | `TERMKEEP_SERVER_PORT`| `8080`      | Loopback-only direct server port (debugging/tests) |
 | `TERMKEEP_CERTS_DIR`  | `./certs`   | Directory with `ca.pem`, `tls.crt`, `tls.key`      |
@@ -62,6 +65,10 @@ Client-side flags/environment:
 - `ca.key` signs the development server certificate. It grants nothing
   against the database, but any client that trusts `ca.pem` will trust
   certificates it signs — keep it local.
+- `OPAQUE_SERVER_KEY` and `OPAQUE_OPRF_SEED` authenticate all OPAQUE records.
+  Generate them once with `termkeep-server opaque-keygen`; back them up with
+  the database. Rotating or losing either prevents existing accounts from
+  logging in.
 
 ## Volumes and networks
 

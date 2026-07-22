@@ -24,6 +24,15 @@ import (
 var version = "dev"
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "opaque-keygen" {
+		privateKey, oprfSeed, err := server.GenerateOPAQUEKeyMaterial()
+		if err != nil {
+			slog.Error("generate OPAQUE key material", "error", err)
+			os.Exit(1)
+		}
+		fmt.Printf("OPAQUE_SERVER_KEY=%s\nOPAQUE_OPRF_SEED=%s\n", privateKey, oprfSeed)
+		return
+	}
 	if err := run(); err != nil {
 		slog.Error("fatal", "error", err)
 		os.Exit(1)
@@ -37,6 +46,13 @@ func run() error {
 	}
 
 	trusted, err := parseProxies(os.Getenv("TRUSTED_PROXIES"))
+	if err != nil {
+		return err
+	}
+	opaqueServer, err := server.NewOPAQUEServer(
+		os.Getenv("OPAQUE_SERVER_KEY"),
+		os.Getenv("OPAQUE_OPRF_SEED"),
+	)
 	if err != nil {
 		return err
 	}
@@ -61,9 +77,10 @@ func run() error {
 	}
 	slog.Info("migrations applied", "schema_version", schemaVersion)
 
+	auth := server.NewAuthService(opaqueServer, server.DBStore{DB: db})
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           server.NewHandler(version, server.DBStore{DB: db}, trusted),
+		Handler:           server.NewHandler(version, server.DBStore{DB: db}, trusted, auth),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

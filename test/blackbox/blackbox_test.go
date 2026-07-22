@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	"github.com/davicbtoliveira/TermKeep/internal/server"
 )
 
 // stack holds everything a test needs to reach the ephemeral deployment.
@@ -59,6 +60,7 @@ func TestBlackbox(t *testing.T) {
 	t.Run("status reports unavailability when server is down", s.testStatusUnavailable)
 	t.Run("proxy headers ignored from untrusted sources", s.testTrustedProxyEnforcement)
 	t.Run("bare invocation opens TUI with instance state", s.testTUI)
+	t.Run("bootstrap creates only encrypted administrator vault material", s.testBootstrap)
 }
 
 // newStack boots the ephemeral deployment once for the whole test run.
@@ -85,11 +87,17 @@ func newStack(t *testing.T) *stack {
 	s.binary = filepath.Join(t.TempDir(), "termkeep")
 	run(t, repoRoot, nil, "go", "build", "-o", s.binary, "./cmd/termkeep")
 
+	opaqueServerKey, oprfSeed, err := server.GenerateOPAQUEKeyMaterial()
+	if err != nil {
+		t.Fatal(err)
+	}
 	s.env = append(os.Environ(),
 		"TERMKEEP_CERTS_DIR="+s.certsDir,
 		"TERMKEEP_HTTPS_PORT="+s.httpsPort,
 		"TERMKEEP_SERVER_PORT="+s.serverPort,
 		"POSTGRES_PASSWORD=blackbox-postgres-password",
+		"OPAQUE_SERVER_KEY="+opaqueServerKey,
+		"OPAQUE_OPRF_SEED="+oprfSeed,
 	)
 
 	t.Cleanup(func() {
@@ -160,8 +168,8 @@ func (s *stack) testMigrationsApplied(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query schema_migrations: %v\n%s", err, out)
 	}
-	if strings.TrimSpace(string(out)) != "1" {
-		t.Errorf("schema version: want 1, got %q", strings.TrimSpace(string(out)))
+	if strings.TrimSpace(string(out)) != "2" {
+		t.Errorf("schema version: want 2, got %q", strings.TrimSpace(string(out)))
 	}
 
 	cmd = s.composeCmd(context.Background(),
@@ -186,7 +194,7 @@ func (s *stack) testStatusHealthy(t *testing.T) {
 	if !strings.Contains(stdout, "Status:   healthy") {
 		t.Errorf("stdout missing healthy state:\n%s", stdout)
 	}
-	if !strings.Contains(stdout, "schema v1") {
+	if !strings.Contains(stdout, "schema v2") {
 		t.Errorf("stdout missing schema version:\n%s", stdout)
 	}
 }
@@ -325,6 +333,121 @@ func (s *stack) testTUI(t *testing.T) {
 		time.Sleep(250 * time.Millisecond)
 	}
 	t.Fatalf("TUI did not render a healthy instance state in time; got:\n%s", stripANSI(buf.String()))
+}
+
+// testBootstrap drives the compiled CLI through a real terminal, then checks
+// PostgreSQL and server logs for a known plaintext fixture. It proves the
+// first account is an administrator, repeated registration is closed, and
+// neither encrypted persistence nor observability contains the password.
+func (s *stack) testBootstrap(t *testing.T) {
+	const (
+		email    = "admin@example.com"
+		password = "TermKeep#2026"
+	)
+
+	output, code := s.runBootstrap(t, email, password)
+	if code != 0 {
+		t.Fatalf("bootstrap exit code: want 0, got %d\n%s", code, output)
+	}
+	if !strings.Contains(output, "Recovery key — save it now") {
+		t.Fatalf("bootstrap did not warn about one-time recovery key:\n%s", output)
+	}
+	if !strings.Contains(output, "Vault:    unlocked (empty)") {
+		t.Fatalf("bootstrap did not open empty vault:\n%s", output)
+	}
+
+	cmd := s.composeCmd(context.Background(),
+		"exec", "-T", "db", "psql", "-U", "termkeep", "-d", "termkeep", "-tAc", `
+			SELECT a.email || ':' || a.is_administrator || ':' ||
+				(position(convert_to('TermKeep#2026', 'UTF8') in r.record) = 0 AND
+				 position(convert_to('TermKeep#2026', 'UTF8') in v.password_vault_envelope) = 0 AND
+				 position(convert_to('TermKeep#2026', 'UTF8') in v.recovery_vault_envelope) = 0)
+			FROM accounts a
+			JOIN opaque_records r ON r.account_uuid = a.uuid
+			JOIN vault_envelopes v ON v.account_uuid = a.uuid`)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("query bootstrap persistence: %v\n%s", err, out)
+	}
+	if strings.TrimSpace(string(out)) != "admin@example.com:true:true" {
+		t.Fatalf("unexpected bootstrap persistence: %q", strings.TrimSpace(string(out)))
+	}
+
+	logs, err := s.composeCmd(context.Background(), "logs", "server").CombinedOutput()
+	if err != nil {
+		t.Fatalf("read server logs: %v\n%s", err, logs)
+	}
+	if bytes.Contains(logs, []byte(password)) {
+		t.Fatal("server logs contain master password fixture")
+	}
+
+	_, retryCode := s.runBootstrap(t, "another@example.com", password)
+	if retryCode == 0 {
+		t.Fatal("second bootstrap unexpectedly succeeded")
+	}
+}
+
+func (s *stack) runBootstrap(t *testing.T, email, password string) (string, int) {
+	t.Helper()
+	cmd := exec.Command(s.binary,
+		"--server", s.serverURL,
+		"--ca-cert", filepath.Join(s.certsDir, "ca.pem"),
+		"bootstrap", "--email", email)
+	cmd.Env = withoutEnv(os.Environ(), "TERM", "TERMKEEP_SERVER", "TERMKEEP_CA_CERT")
+	cmd.Env = append(cmd.Env, "TERM=dumb")
+
+	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 24, Cols: 80})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ptmx.Close() }()
+
+	var mu sync.Mutex
+	var buf bytes.Buffer
+	go func() { _, _ = io.Copy(&lockedWriter{&mu, &buf}, ptmx) }()
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+
+	stage := 0
+	deadline := time.Now().Add(45 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case err := <-done:
+			mu.Lock()
+			output := stripANSI(buf.String())
+			mu.Unlock()
+			return output, exitCode(err)
+		default:
+		}
+		mu.Lock()
+		plain := stripANSI(buf.String())
+		mu.Unlock()
+		switch stage {
+		case 0:
+			if strings.Contains(plain, "Master password:") {
+				write(t, ptmx, password+"\n")
+				stage++
+			}
+		case 1:
+			if strings.Contains(plain, "Confirm master password:") {
+				write(t, ptmx, password+"\n")
+				stage++
+			}
+		case 2:
+			if strings.Contains(plain, "Vault:    unlocked (empty)") {
+				write(t, ptmx, "q")
+				stage++
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	mu.Lock()
+	output := stripANSI(buf.String())
+	mu.Unlock()
+	if cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
+	return output, -1
 }
 
 // lockedWriter serializes PTY reads with test-side inspection.
