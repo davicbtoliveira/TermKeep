@@ -4,6 +4,7 @@ go 1.26.3
 
 require (
 	github.com/charmbracelet/bubbletea v1.3.10
+	github.com/creack/pty v1.1.24
 	github.com/jackc/pgx/v5 v5.10.0
 )
 
