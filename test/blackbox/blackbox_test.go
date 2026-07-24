@@ -11,6 +11,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bytemare/opaque"
 	"github.com/creack/pty"
 	"github.com/davicbtoliveira/TermKeep/internal/client"
 	"github.com/davicbtoliveira/TermKeep/internal/server"
@@ -63,6 +65,8 @@ func TestBlackbox(t *testing.T) {
 	t.Run("bare invocation opens TUI with instance state", s.testTUI)
 	t.Run("bootstrap creates only encrypted administrator vault material", s.testBootstrap)
 	t.Run("invited user registers an isolated vault", s.testInvitedRegistration)
+	t.Run("expired invitation cannot register", s.testExpiredInvitation)
+	t.Run("concurrent invitation consumption registers once", s.testConcurrentInvitationConsumption)
 }
 
 // newStack boots the ephemeral deployment once for the whole test run.
@@ -405,9 +409,9 @@ func (s *stack) testInvitedRegistration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer admin.Clear()
-	inviteToken := s.createInvite(t, admin.AccessToken, userEmail)
+	invite := s.createInvite(t, admin.AccessToken, userEmail)
 
-	output, code := s.runRegistration(t, userEmail, userPassword, inviteToken)
+	output, code := s.runRegistration(t, userEmail, userPassword, invite.Token)
 	if code != 0 {
 		t.Fatalf("registration exit code: want 0, got %d\n%s", code, output)
 	}
@@ -432,6 +436,258 @@ func (s *stack) testInvitedRegistration(t *testing.T) {
 	if bytes.Equal(admin.VaultKey, user.VaultKey) {
 		t.Fatal("administrator and invited user share a vault key")
 	}
+
+	reused, err := client.Register(context.Background(), s.clientConfig(), client.RegisterInput{
+		Email:                 userEmail,
+		InviteToken:           invite.Token,
+		MasterPassword:        "Another#Pass2026",
+		ConfirmMasterPassword: "Another#Pass2026",
+	})
+	if err == nil {
+		reused.Vault.Clear()
+		t.Fatal("consumed invitation registered a second account")
+	}
+
+	httpClient := &http.Client{Transport: &http.Transport{
+		TLSClientConfig: tlsConfigWithCA(t, filepath.Join(s.certsDir, "ca.pem")),
+	}}
+	request, err := http.NewRequest(http.MethodGet, s.serverURL+"/api/v1/accounts", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+admin.AccessToken)
+	response, err := httpClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK {
+		response.Body.Close()
+		t.Fatalf("list accounts status: want 200, got %d", response.StatusCode)
+	}
+	var accountList struct {
+		Accounts []map[string]any `json:"accounts"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&accountList); err != nil {
+		response.Body.Close()
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if len(accountList.Accounts) != 2 {
+		t.Fatalf("account list length: want 2, got %d", len(accountList.Accounts))
+	}
+	for _, account := range accountList.Accounts {
+		if len(account) != 3 {
+			t.Fatalf("account list exposed unexpected metadata: %#v", account)
+		}
+		for _, field := range []string{"uuid", "email", "status"} {
+			if account[field] == nil || account[field] == "" {
+				t.Fatalf("account list missing %s: %#v", field, account)
+			}
+		}
+	}
+
+	request, err = http.NewRequest(http.MethodGet, s.serverURL+"/api/v1/accounts", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+user.AccessToken)
+	response, err = httpClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("non-administrator account list status: want 401, got %d", response.StatusCode)
+	}
+}
+
+func (s *stack) testExpiredInvitation(t *testing.T) {
+	const (
+		adminEmail    = "admin@example.com"
+		adminPassword = "TermKeep#2026"
+		userEmail     = "expired@example.com"
+	)
+	admin, err := client.Login(context.Background(), s.clientConfig(), client.LoginInput{
+		Email:          adminEmail,
+		MasterPassword: adminPassword,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Clear()
+	invite := s.createInvite(t, admin.AccessToken, userEmail)
+
+	cmd := s.composeCmd(context.Background(),
+		"exec", "-T", "db", "psql", "-U", "termkeep", "-d", "termkeep", "-v", "ON_ERROR_STOP=1", "-c",
+		"UPDATE invites SET expires_at = now() - interval '1 minute' WHERE uuid = '"+invite.InviteID+"'")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("expire invite: %v\n%s", err, out)
+	}
+
+	registered, err := client.Register(context.Background(), s.clientConfig(), client.RegisterInput{
+		Email:                 userEmail,
+		InviteToken:           invite.Token,
+		MasterPassword:        "Expired#Pass2026",
+		ConfirmMasterPassword: "Expired#Pass2026",
+	})
+	if err == nil {
+		registered.Vault.Clear()
+		t.Fatal("expired invitation registered an account")
+	}
+}
+
+func (s *stack) testConcurrentInvitationConsumption(t *testing.T) {
+	const (
+		adminEmail    = "admin@example.com"
+		adminPassword = "TermKeep#2026"
+		userEmail     = "concurrent@example.com"
+	)
+	admin, err := client.Login(context.Background(), s.clientConfig(), client.LoginInput{
+		Email:          adminEmail,
+		MasterPassword: adminPassword,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Clear()
+	invite := s.createInvite(t, admin.AccessToken, userEmail)
+
+	password := []byte("Concurrent#Pass2026")
+	first := s.prepareRegistration(t, userEmail, password, invite.Token)
+	second := s.prepareRegistration(t, userEmail, password, invite.Token)
+	httpClient := &http.Client{Transport: &http.Transport{
+		TLSClientConfig: tlsConfigWithCA(t, filepath.Join(s.certsDir, "ca.pem")),
+	}}
+
+	start := make(chan struct{})
+	statuses := make(chan int, 2)
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	for _, body := range []map[string]string{first, second} {
+		wg.Add(1)
+		go func(body map[string]string) {
+			defer wg.Done()
+			<-start
+			status, err := postJSONStatus(httpClient, s.serverURL+"/api/v1/register/finish", body)
+			if err != nil {
+				errs <- err
+				return
+			}
+			statuses <- status
+		}(body)
+	}
+	close(start)
+	wg.Wait()
+	close(statuses)
+	close(errs)
+
+	for err := range errs {
+		t.Error(err)
+	}
+	var created, rejected int
+	for status := range statuses {
+		switch status {
+		case http.StatusCreated:
+			created++
+		case http.StatusUnauthorized:
+			rejected++
+		default:
+			t.Errorf("concurrent registration returned HTTP %d", status)
+		}
+	}
+	if created != 1 || rejected != 1 {
+		t.Fatalf("concurrent results: want one 201 and one 401, got %d and %d", created, rejected)
+	}
+
+	cmd := s.composeCmd(context.Background(),
+		"exec", "-T", "db", "psql", "-U", "termkeep", "-d", "termkeep", "-tAc",
+		"SELECT count(*) FROM accounts WHERE email = '"+userEmail+"'")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("count concurrent accounts: %v\n%s", err, out)
+	}
+	if strings.TrimSpace(string(out)) != "1" {
+		t.Fatalf("concurrent account count: want 1, got %q", strings.TrimSpace(string(out)))
+	}
+}
+
+func (s *stack) prepareRegistration(t *testing.T, email string, password []byte, inviteToken string) map[string]string {
+	t.Helper()
+	opaqueClient, err := opaque.NewClient(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := opaqueClient.RegistrationInit(password)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startResponse, err := postJSONResponse(
+		&http.Client{Transport: &http.Transport{
+			TLSClientConfig: tlsConfigWithCA(t, filepath.Join(s.certsDir, "ca.pem")),
+		}},
+		s.serverURL+"/api/v1/register/start",
+		map[string]string{
+			"email":                email,
+			"invite_token":         inviteToken,
+			"registration_request": base64.RawStdEncoding.EncodeToString(request.Serialize()),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer startResponse.Body.Close()
+	if startResponse.StatusCode != http.StatusOK {
+		t.Fatalf("registration start status: want 200, got %d", startResponse.StatusCode)
+	}
+	var startBody struct {
+		AccountID            string `json:"account_id"`
+		RegistrationResponse string `json:"registration_response"`
+	}
+	if err := json.NewDecoder(startResponse.Body).Decode(&startBody); err != nil {
+		t.Fatal(err)
+	}
+	responseBytes, err := base64.RawStdEncoding.DecodeString(startBody.RegistrationResponse)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := opaqueClient.Deserialize.RegistrationResponse(responseBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, _, err := opaqueClient.RegistrationFinalize(response, []byte(email), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return map[string]string{
+		"account_id":              startBody.AccountID,
+		"email":                   email,
+		"invite_token":            inviteToken,
+		"registration_record":     base64.RawStdEncoding.EncodeToString(record.Serialize()),
+		"password_vault_envelope": base64.RawStdEncoding.EncodeToString([]byte("concurrent-password-envelope")),
+		"recovery_vault_envelope": base64.RawStdEncoding.EncodeToString([]byte("concurrent-recovery-envelope")),
+	}
+}
+
+func postJSONResponse(httpClient *http.Client, url string, body any) (*http.Response, error) {
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	request, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	return httpClient.Do(request)
+}
+
+func postJSONStatus(httpClient *http.Client, url string, body any) (int, error) {
+	response, err := postJSONResponse(httpClient, url, body)
+	if err != nil {
+		return 0, err
+	}
+	defer response.Body.Close()
+	return response.StatusCode, nil
 }
 
 func (s *stack) clientConfig() client.Config {
@@ -441,7 +697,12 @@ func (s *stack) clientConfig() client.Config {
 	}
 }
 
-func (s *stack) createInvite(t *testing.T, accessToken, email string) string {
+type inviteBody struct {
+	InviteID string `json:"invite_id"`
+	Token    string `json:"token"`
+}
+
+func (s *stack) createInvite(t *testing.T, accessToken, email string) inviteBody {
 	t.Helper()
 	payload, err := json.Marshal(map[string]string{"email": email})
 	if err != nil {
@@ -464,16 +725,14 @@ func (s *stack) createInvite(t *testing.T, accessToken, email string) string {
 	if response.StatusCode != http.StatusCreated {
 		t.Fatalf("create invite status: want 201, got %d", response.StatusCode)
 	}
-	var body struct {
-		Token string `json:"token"`
-	}
+	var body inviteBody
 	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
 		t.Fatal(err)
 	}
 	if body.Token == "" {
 		t.Fatal("create invite response omitted token")
 	}
-	return body.Token
+	return body
 }
 
 func (s *stack) runBootstrap(t *testing.T, email, password string) (string, int) {
