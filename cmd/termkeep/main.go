@@ -46,12 +46,14 @@ func run(args []string) int {
 		return runStatus(cfg)
 	case "bootstrap":
 		return runBootstrap(cfg, fs.Args()[1:])
+	case "register":
+		return runRegister(cfg, fs.Args()[1:])
 	case "login":
 		return runLogin(cfg, fs.Args()[1:])
 	case "":
 		return runTUI(cfg)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n\nusage: termkeep [--server URL] [--ca-cert FILE] [status|bootstrap --email EMAIL|login --email EMAIL]\n", fs.Arg(0))
+		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n\nusage: termkeep [--server URL] [--ca-cert FILE] [status|bootstrap|register|login]\n", fs.Arg(0))
 		return exitUsageFailure
 	}
 }
@@ -75,6 +77,41 @@ func runBootstrap(cfg client.Config, args []string) int {
 	}
 	result, err := client.Bootstrap(context.Background(), cfg, client.BootstrapInput{
 		Email:                 *email,
+		MasterPassword:        password,
+		ConfirmMasterPassword: confirmation,
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return exitUsageFailure
+	}
+	defer result.Vault.Clear()
+
+	fmt.Fprintln(os.Stdout, "Recovery key — save it now. It will not be shown again:")
+	fmt.Fprintln(os.Stdout, result.RecoveryKey)
+	return runVaultTUI(cfg)
+}
+
+func runRegister(cfg client.Config, args []string) int {
+	fs := flag.NewFlagSet("register", flag.ContinueOnError)
+	email := fs.String("email", "", "invited account email")
+	inviteToken := fs.String("invite-token", "", "single-use invitation token")
+	if err := fs.Parse(args); err != nil || *email == "" || *inviteToken == "" || fs.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "usage: termkeep register --email EMAIL --invite-token TOKEN")
+		return exitUsageFailure
+	}
+	password, err := readMasterPassword("Master password: ")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return exitUsageFailure
+	}
+	confirmation, err := readMasterPassword("Confirm master password: ")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return exitUsageFailure
+	}
+	result, err := client.Register(context.Background(), cfg, client.RegisterInput{
+		Email:                 *email,
+		InviteToken:           *inviteToken,
 		MasterPassword:        password,
 		ConfirmMasterPassword: confirmation,
 	})

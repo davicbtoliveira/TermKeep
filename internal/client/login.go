@@ -20,8 +20,9 @@ type LoginInput struct {
 
 // LoginResult contains an unlocked vault key held only by the caller.
 type LoginResult struct {
-	AccountID string
-	VaultKey  []byte
+	AccountID   string
+	VaultKey    []byte
+	AccessToken string
 }
 
 type loginStartBody struct {
@@ -32,6 +33,7 @@ type loginStartBody struct {
 type loginFinishBody struct {
 	AccountID             string `json:"account_id"`
 	PasswordVaultEnvelope string `json:"password_vault_envelope"`
+	AccessToken           string `json:"access_token"`
 }
 
 // Login proves the master password with OPAQUE, then decrypts the returned
@@ -101,6 +103,9 @@ func Login(ctx context.Context, cfg Config, input LoginInput) (*LoginResult, err
 	if finish.AccountID == "" {
 		return nil, errors.New("login response missing account ID")
 	}
+	if finish.AccessToken == "" {
+		return nil, errors.New("login response missing access token")
+	}
 	envelope, err := base64.RawStdEncoding.DecodeString(finish.PasswordVaultEnvelope)
 	if err != nil {
 		return nil, errors.New("login response contains invalid vault envelope")
@@ -109,11 +114,16 @@ func Login(ctx context.Context, cfg Config, input LoginInput) (*LoginResult, err
 	if err != nil {
 		return nil, errors.New("invalid email, master password, or vault envelope")
 	}
-	return &LoginResult{AccountID: finish.AccountID, VaultKey: vaultKey}, nil
+	return &LoginResult{
+		AccountID:   finish.AccountID,
+		VaultKey:    vaultKey,
+		AccessToken: finish.AccessToken,
+	}, nil
 }
 
 // Clear makes a best-effort attempt to erase the unlocked vault key.
 func (r *LoginResult) Clear() {
 	clearBytes(r.VaultKey)
 	r.VaultKey = nil
+	r.AccessToken = ""
 }

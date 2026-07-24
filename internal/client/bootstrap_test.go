@@ -63,6 +63,9 @@ func TestBootstrapCreatesZeroKnowledgeVault(t *testing.T) {
 	if !bytes.Equal(login.VaultKey, result.Vault.Key) {
 		t.Fatal("OPAQUE login did not unlock bootstrap vault")
 	}
+	if login.AccessToken == "" {
+		t.Fatal("OPAQUE login did not return an access token")
+	}
 	if _, err := Login(context.Background(), Config{ServerURL: srv.URL}, LoginInput{
 		Email:          "admin@example.com",
 		MasterPassword: "WrongPassword#2026",
@@ -77,6 +80,8 @@ func (schemaVersion) SchemaVersion(context.Context) (int, error) { return 2, nil
 
 type bootstrapStore struct {
 	account      *server.BootstrapAccount
+	accounts     map[string]*server.BootstrapAccount
+	invites      []server.StoredInvite
 	accessTokens map[string]server.StoredAccessToken
 }
 
@@ -89,20 +94,22 @@ func (s *bootstrapStore) CreateBootstrap(_ context.Context, account server.Boots
 		return server.ErrBootstrapClosed
 	}
 	s.account = &account
+	s.accounts = map[string]*server.BootstrapAccount{account.Email: &account}
 	return nil
 }
 
 func (s *bootstrapStore) FindAccount(_ context.Context, email string) (server.StoredAccount, error) {
-	if s.account == nil || s.account.Email != email {
+	account, ok := s.accounts[email]
+	if !ok {
 		return server.StoredAccount{}, server.ErrAccountNotFound
 	}
 	return server.StoredAccount{
-		AccountID:             s.account.AccountID,
-		Email:                 s.account.Email,
-		Administrator:         s.account.Administrator,
-		OpaqueRecord:          s.account.OpaqueRecord,
-		PasswordVaultEnvelope: s.account.PasswordVaultEnvelope,
-		RecoveryVaultEnvelope: s.account.RecoveryVaultEnvelope,
+		AccountID:             account.AccountID,
+		Email:                 account.Email,
+		Administrator:         account.Administrator,
+		OpaqueRecord:          account.OpaqueRecord,
+		PasswordVaultEnvelope: account.PasswordVaultEnvelope,
+		RecoveryVaultEnvelope: account.RecoveryVaultEnvelope,
 	}, nil
 }
 
@@ -121,11 +128,31 @@ func (s *bootstrapStore) FindAccessToken(_ context.Context, tokenHash []byte) (s
 	return server.StoredAccessToken{}, server.ErrAccessTokenNotFound
 }
 
-func (s *bootstrapStore) ValidateInvite(context.Context, []byte, string, time.Time) error {
+func (s *bootstrapStore) ValidateInvite(_ context.Context, tokenHash []byte, email string, now time.Time) error {
+	for _, invite := range s.invites {
+		if bytes.Equal(invite.TokenHash, tokenHash) &&
+			invite.Email == email &&
+			invite.ConsumedBy == "" &&
+			invite.RevokedAt.IsZero() &&
+			now.Before(invite.ExpiresAt) {
+			return nil
+		}
+	}
 	return server.ErrInvalidInvite
 }
 
-func (s *bootstrapStore) CreateInvitedAccount(context.Context, []byte, server.BootstrapAccount, time.Time) error {
+func (s *bootstrapStore) CreateInvitedAccount(_ context.Context, tokenHash []byte, account server.BootstrapAccount, now time.Time) error {
+	if err := s.ValidateInvite(context.Background(), tokenHash, account.Email, now); err != nil {
+		return err
+	}
+	s.accounts[account.Email] = &account
+	for i := range s.invites {
+		if bytes.Equal(s.invites[i].TokenHash, tokenHash) {
+			s.invites[i].ConsumedBy = account.AccountID
+			s.invites[i].ConsumedAt = now
+			return nil
+		}
+	}
 	return server.ErrInvalidInvite
 }
 

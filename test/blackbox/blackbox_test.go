@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	"github.com/davicbtoliveira/TermKeep/internal/client"
 	"github.com/davicbtoliveira/TermKeep/internal/server"
 )
 
@@ -61,6 +62,7 @@ func TestBlackbox(t *testing.T) {
 	t.Run("proxy headers ignored from untrusted sources", s.testTrustedProxyEnforcement)
 	t.Run("bare invocation opens TUI with instance state", s.testTUI)
 	t.Run("bootstrap creates only encrypted administrator vault material", s.testBootstrap)
+	t.Run("invited user registers an isolated vault", s.testInvitedRegistration)
 }
 
 // newStack boots the ephemeral deployment once for the whole test run.
@@ -387,12 +389,162 @@ func (s *stack) testBootstrap(t *testing.T) {
 	}
 }
 
+func (s *stack) testInvitedRegistration(t *testing.T) {
+	const (
+		adminEmail    = "admin@example.com"
+		adminPassword = "TermKeep#2026"
+		userEmail     = "friend@example.com"
+		userPassword  = "Friend#Pass2026"
+	)
+
+	admin, err := client.Login(context.Background(), s.clientConfig(), client.LoginInput{
+		Email:          adminEmail,
+		MasterPassword: adminPassword,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Clear()
+	inviteToken := s.createInvite(t, admin.AccessToken, userEmail)
+
+	output, code := s.runRegistration(t, userEmail, userPassword, inviteToken)
+	if code != 0 {
+		t.Fatalf("registration exit code: want 0, got %d\n%s", code, output)
+	}
+	if !strings.Contains(output, "Recovery key — save it now") {
+		t.Fatalf("registration did not warn about one-time recovery key:\n%s", output)
+	}
+	if !strings.Contains(output, "Vault:    unlocked (empty)") {
+		t.Fatalf("registration did not open empty vault:\n%s", output)
+	}
+
+	user, err := client.Login(context.Background(), s.clientConfig(), client.LoginInput{
+		Email:          userEmail,
+		MasterPassword: userPassword,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer user.Clear()
+	if admin.AccountID == user.AccountID {
+		t.Fatal("administrator and invited user share an account UUID")
+	}
+	if bytes.Equal(admin.VaultKey, user.VaultKey) {
+		t.Fatal("administrator and invited user share a vault key")
+	}
+}
+
+func (s *stack) clientConfig() client.Config {
+	return client.Config{
+		ServerURL:  s.serverURL,
+		CACertFile: filepath.Join(s.certsDir, "ca.pem"),
+	}
+}
+
+func (s *stack) createInvite(t *testing.T, accessToken, email string) string {
+	t.Helper()
+	payload, err := json.Marshal(map[string]string{"email": email})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequest(http.MethodPost, s.serverURL+"/api/v1/invites", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+accessToken)
+	request.Header.Set("Content-Type", "application/json")
+	httpClient := &http.Client{Transport: &http.Transport{
+		TLSClientConfig: tlsConfigWithCA(t, filepath.Join(s.certsDir, "ca.pem")),
+	}}
+	response, err := httpClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("create invite status: want 201, got %d", response.StatusCode)
+	}
+	var body struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Token == "" {
+		t.Fatal("create invite response omitted token")
+	}
+	return body.Token
+}
+
 func (s *stack) runBootstrap(t *testing.T, email, password string) (string, int) {
 	t.Helper()
 	cmd := exec.Command(s.binary,
 		"--server", s.serverURL,
 		"--ca-cert", filepath.Join(s.certsDir, "ca.pem"),
 		"bootstrap", "--email", email)
+	cmd.Env = withoutEnv(os.Environ(), "TERM", "TERMKEEP_SERVER", "TERMKEEP_CA_CERT")
+	cmd.Env = append(cmd.Env, "TERM=dumb")
+
+	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 24, Cols: 80})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ptmx.Close() }()
+
+	var mu sync.Mutex
+	var buf bytes.Buffer
+	go func() { _, _ = io.Copy(&lockedWriter{&mu, &buf}, ptmx) }()
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+
+	stage := 0
+	deadline := time.Now().Add(45 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case err := <-done:
+			mu.Lock()
+			output := stripANSI(buf.String())
+			mu.Unlock()
+			return output, exitCode(err)
+		default:
+		}
+		mu.Lock()
+		plain := stripANSI(buf.String())
+		mu.Unlock()
+		switch stage {
+		case 0:
+			if strings.Contains(plain, "Master password:") {
+				write(t, ptmx, password+"\n")
+				stage++
+			}
+		case 1:
+			if strings.Contains(plain, "Confirm master password:") {
+				write(t, ptmx, password+"\n")
+				stage++
+			}
+		case 2:
+			if strings.Contains(plain, "Vault:    unlocked (empty)") {
+				write(t, ptmx, "q")
+				stage++
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	mu.Lock()
+	output := stripANSI(buf.String())
+	mu.Unlock()
+	if cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
+	return output, -1
+}
+
+func (s *stack) runRegistration(t *testing.T, email, password, inviteToken string) (string, int) {
+	t.Helper()
+	cmd := exec.Command(s.binary,
+		"--server", s.serverURL,
+		"--ca-cert", filepath.Join(s.certsDir, "ca.pem"),
+		"register", "--email", email, "--invite-token", inviteToken)
 	cmd.Env = withoutEnv(os.Environ(), "TERM", "TERMKEEP_SERVER", "TERMKEEP_CA_CERT")
 	cmd.Env = append(cmd.Env, "TERM=dumb")
 
