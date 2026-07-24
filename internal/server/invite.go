@@ -101,11 +101,15 @@ type listInvitesResponse struct {
 }
 
 func (s *InviteService) authenticateAdmin(r *http.Request) (StoredAccessToken, error) {
+	return authenticateAdministrator(s.auth, r)
+}
+
+func authenticateAdministrator(auth *AuthService, r *http.Request) (StoredAccessToken, error) {
 	tokenStr := bearerToken(r)
 	if tokenStr == "" {
 		return StoredAccessToken{}, errInvalidAccessToken
 	}
-	token, err := s.auth.AuthenticateToken(r.Context(), tokenStr)
+	token, err := auth.AuthenticateToken(r.Context(), tokenStr)
 	if err != nil {
 		return StoredAccessToken{}, err
 	}

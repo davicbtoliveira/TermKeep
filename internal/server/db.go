@@ -287,3 +287,29 @@ func (s DBStore) CreateInvitedAccount(ctx context.Context, tokenHash []byte, acc
 	}
 	return nil
 }
+
+// ListAccounts returns only the UUID, email, and lifecycle status permitted
+// on the administrative surface.
+func (s DBStore) ListAccounts(ctx context.Context) ([]AccountSummary, error) {
+	rows, err := s.DB.QueryContext(ctx, `
+		SELECT uuid::text, email, 'active'
+		FROM accounts
+		ORDER BY created_at, uuid`)
+	if err != nil {
+		return nil, fmt.Errorf("list accounts: %w", err)
+	}
+	defer rows.Close()
+
+	var accounts []AccountSummary
+	for rows.Next() {
+		var account AccountSummary
+		if err := rows.Scan(&account.AccountID, &account.Email, &account.Status); err != nil {
+			return nil, fmt.Errorf("scan account: %w", err)
+		}
+		accounts = append(accounts, account)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate accounts: %w", err)
+	}
+	return accounts, nil
+}

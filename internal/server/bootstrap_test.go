@@ -230,6 +230,18 @@ func (s *memoryBootstrapStore) CreateInvitedAccount(_ context.Context, tokenHash
 	return ErrInvalidInvite
 }
 
+func (s *memoryBootstrapStore) ListAccounts(context.Context) ([]AccountSummary, error) {
+	accounts := make([]AccountSummary, 0, len(s.accounts))
+	for _, account := range s.accounts {
+		accounts = append(accounts, AccountSummary{
+			AccountID: account.AccountID,
+			Email:     account.Email,
+			Status:    "active",
+		})
+	}
+	return accounts, nil
+}
+
 func newTestAuthService(t *testing.T, store AuthStore) *AuthService {
 	t.Helper()
 	configuration := opaque.DefaultConfiguration()

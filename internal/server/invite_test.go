@@ -83,6 +83,30 @@ func TestInviteEndpointsRejectUnauthenticated(t *testing.T) {
 	}
 }
 
+func TestNonAdministratorCannotCreateInvite(t *testing.T) {
+	store := &memoryBootstrapStore{}
+	auth := newTestAuthService(t, store)
+	h := NewHandler("test", stubSchema{version: 1}, nil, auth, NewInviteService(store, auth))
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	adminPassword := []byte("TermKeep#2026")
+	mustBootstrap(t, srv, "admin@example.com", adminPassword)
+	adminToken := mustLogin(t, srv, "admin@example.com", adminPassword)
+	invite := mustCreateInvite(t, srv, adminToken, "friend@example.com")
+	userPassword := []byte("Friend#Pass2026")
+	mustRegister(t, srv, "friend@example.com", userPassword, invite.Token)
+	userToken := mustLogin(t, srv, "friend@example.com", userPassword)
+
+	response := postJSONWithAuth(t, srv.URL+"/api/v1/invites", map[string]string{
+		"email": "another@example.com",
+	}, userToken)
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("non-administrator create invite status: want 401, got %d", response.StatusCode)
+	}
+	response.Body.Close()
+}
+
 // mustBootstrap drives the public bootstrap endpoints with a real OPAQUE
 // client, exactly as the compiled CLI does.
 func mustBootstrap(t *testing.T, srv *httptest.Server, email string, password []byte) {

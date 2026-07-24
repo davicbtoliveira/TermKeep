@@ -80,9 +80,10 @@ func run() error {
 	dbStore := server.DBStore{DB: db}
 	auth := server.NewAuthService(opaqueServer, dbStore)
 	invites := server.NewInviteService(dbStore, auth)
+	accounts := server.NewAccountService(dbStore, auth)
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           server.NewHandler(version, dbStore, trusted, auth, invites),
+		Handler:           server.NewHandler(version, dbStore, trusted, auth, invites, accounts),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
