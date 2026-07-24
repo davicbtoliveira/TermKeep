@@ -43,10 +43,18 @@ type AccessTokenStore interface {
 	FindAccessToken(ctx context.Context, tokenHash []byte) (StoredAccessToken, error)
 }
 
+// InvitedRegistrationStore validates and atomically consumes invitations
+// while creating non-administrator accounts.
+type InvitedRegistrationStore interface {
+	ValidateInvite(ctx context.Context, tokenHash []byte, email string, now time.Time) error
+	CreateInvitedAccount(ctx context.Context, tokenHash []byte, account BootstrapAccount, now time.Time) error
+}
+
 // AuthStore is the full persistence boundary of AuthService.
 type AuthStore interface {
 	BootstrapStore
 	AccessTokenStore
+	InvitedRegistrationStore
 }
 
 // StoredAccessToken resolves a bearer token hash to its account. The
@@ -112,6 +120,8 @@ func NewAuthService(opaqueServer *opaque.Server, store AuthStore) *AuthService {
 func (a *AuthService) register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/bootstrap/start", a.startBootstrap)
 	mux.HandleFunc("POST /api/v1/bootstrap/finish", a.finishBootstrap)
+	mux.HandleFunc("POST /api/v1/register/start", a.startRegistration)
+	mux.HandleFunc("POST /api/v1/register/finish", a.finishRegistration)
 	mux.HandleFunc("POST /api/v1/login/start", a.startLogin)
 	mux.HandleFunc("POST /api/v1/login/finish", a.finishLogin)
 }
@@ -129,6 +139,21 @@ type bootstrapStartResponse struct {
 type bootstrapFinishRequest struct {
 	AccountID             string `json:"account_id"`
 	Email                 string `json:"email"`
+	RegistrationRecord    string `json:"registration_record"`
+	PasswordVaultEnvelope string `json:"password_vault_envelope"`
+	RecoveryVaultEnvelope string `json:"recovery_vault_envelope"`
+}
+
+type registrationStartRequest struct {
+	Email               string `json:"email"`
+	InviteToken         string `json:"invite_token"`
+	RegistrationRequest string `json:"registration_request"`
+}
+
+type registrationFinishRequest struct {
+	AccountID             string `json:"account_id"`
+	Email                 string `json:"email"`
+	InviteToken           string `json:"invite_token"`
 	RegistrationRecord    string `json:"registration_record"`
 	PasswordVaultEnvelope string `json:"password_vault_envelope"`
 	RecoveryVaultEnvelope string `json:"recovery_vault_envelope"`
@@ -197,6 +222,100 @@ func (a *AuthService) finishBootstrap(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusCreated)
 }
 
+func (a *AuthService) startRegistration(w http.ResponseWriter, r *http.Request) {
+	var request registrationStartRequest
+	if !decodeRequest(w, r, &request) {
+		return
+	}
+	email, err := canonicalEmail(request.Email)
+	if err != nil {
+		http.Error(w, "invalid registration request", http.StatusBadRequest)
+		return
+	}
+	tokenHash, err := inviteTokenHash(request.InviteToken)
+	if err != nil {
+		http.Error(w, "invalid invitation", http.StatusUnauthorized)
+		return
+	}
+	if err := a.store.ValidateInvite(r.Context(), tokenHash, email, time.Now()); err != nil {
+		writeRegistrationError(w, err)
+		return
+	}
+	encoded, err := base64.RawStdEncoding.DecodeString(request.RegistrationRequest)
+	if err != nil {
+		http.Error(w, "invalid registration request", http.StatusBadRequest)
+		return
+	}
+	response, err := a.registrationResponse(email, encoded)
+	if err != nil {
+		http.Error(w, "invalid registration request", http.StatusBadRequest)
+		return
+	}
+	accountID, err := newAccountID()
+	if err != nil {
+		http.Error(w, "registration unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	writeJSON(w, http.StatusOK, bootstrapStartResponse{
+		AccountID:            accountID,
+		RegistrationResponse: base64.RawStdEncoding.EncodeToString(response),
+	})
+}
+
+func (a *AuthService) finishRegistration(w http.ResponseWriter, r *http.Request) {
+	var request registrationFinishRequest
+	if !decodeRequest(w, r, &request) {
+		return
+	}
+	email, err := canonicalEmail(request.Email)
+	if err != nil {
+		http.Error(w, "invalid registration request", http.StatusBadRequest)
+		return
+	}
+	tokenHash, err := inviteTokenHash(request.InviteToken)
+	if err != nil {
+		http.Error(w, "invalid invitation", http.StatusUnauthorized)
+		return
+	}
+	record, err := base64.RawStdEncoding.DecodeString(request.RegistrationRecord)
+	if err != nil {
+		http.Error(w, "invalid registration request", http.StatusBadRequest)
+		return
+	}
+	passwordEnvelope, err := base64.RawStdEncoding.DecodeString(request.PasswordVaultEnvelope)
+	if err != nil || len(passwordEnvelope) == 0 {
+		http.Error(w, "invalid registration request", http.StatusBadRequest)
+		return
+	}
+	recoveryEnvelope, err := base64.RawStdEncoding.DecodeString(request.RecoveryVaultEnvelope)
+	if err != nil || len(recoveryEnvelope) == 0 {
+		http.Error(w, "invalid registration request", http.StatusBadRequest)
+		return
+	}
+	registrationRecord, err := a.opaque.Deserialize.RegistrationRecord(record)
+	if err != nil {
+		http.Error(w, "invalid registration request", http.StatusBadRequest)
+		return
+	}
+	if request.AccountID == "" {
+		http.Error(w, "invalid registration request", http.StatusBadRequest)
+		return
+	}
+	err = a.store.CreateInvitedAccount(r.Context(), tokenHash, BootstrapAccount{
+		AccountID:             request.AccountID,
+		Email:                 email,
+		Administrator:         false,
+		OpaqueRecord:          registrationRecord.Serialize(),
+		PasswordVaultEnvelope: passwordEnvelope,
+		RecoveryVaultEnvelope: recoveryEnvelope,
+	}, time.Now())
+	if err != nil {
+		writeRegistrationError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusCreated)
+}
+
 func (a *AuthService) start(ctx context.Context, email string, encodedRequest []byte) ([]byte, error) {
 	empty, err := a.store.InstanceEmpty(ctx)
 	if err != nil {
@@ -205,6 +324,10 @@ func (a *AuthService) start(ctx context.Context, email string, encodedRequest []
 	if !empty {
 		return nil, ErrBootstrapClosed
 	}
+	return a.registrationResponse(email, encodedRequest)
+}
+
+func (a *AuthService) registrationResponse(email string, encodedRequest []byte) ([]byte, error) {
 	request, err := a.opaque.Deserialize.RegistrationRequest(encodedRequest)
 	if err != nil {
 		return nil, err
@@ -442,6 +565,15 @@ func canonicalEmail(value string) (string, error) {
 	return value, nil
 }
 
+func inviteTokenHash(value string) ([]byte, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil || len(raw) != 32 {
+		return nil, ErrInvalidInvite
+	}
+	hash := sha256.Sum256([]byte(value))
+	return hash[:], nil
+}
+
 func decodeRequest(w http.ResponseWriter, r *http.Request, target any) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, 128<<10)
 	decoder := json.NewDecoder(r.Body)
@@ -463,6 +595,14 @@ func writeBootstrapError(w http.ResponseWriter, err error) {
 		return
 	}
 	http.Error(w, "invalid bootstrap request", http.StatusBadRequest)
+}
+
+func writeRegistrationError(w http.ResponseWriter, err error) {
+	if errors.Is(err, ErrInvalidInvite) {
+		http.Error(w, "invalid invitation", http.StatusUnauthorized)
+		return
+	}
+	http.Error(w, "registration unavailable", http.StatusServiceUnavailable)
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

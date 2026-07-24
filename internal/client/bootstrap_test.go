@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/bytemare/opaque"
 	"github.com/davicbtoliveira/TermKeep/internal/server"
@@ -118,6 +119,14 @@ func (s *bootstrapStore) FindAccessToken(_ context.Context, tokenHash []byte) (s
 		return token, nil
 	}
 	return server.StoredAccessToken{}, server.ErrAccessTokenNotFound
+}
+
+func (s *bootstrapStore) ValidateInvite(context.Context, []byte, string, time.Time) error {
+	return server.ErrInvalidInvite
+}
+
+func (s *bootstrapStore) CreateInvitedAccount(context.Context, []byte, server.BootstrapAccount, time.Time) error {
+	return server.ErrInvalidInvite
 }
 
 func bootstrapAuthService(t *testing.T, store server.AuthStore) *server.AuthService {

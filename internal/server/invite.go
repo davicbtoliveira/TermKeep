@@ -14,6 +14,10 @@ import (
 // ErrInviteNotFound reports an unknown invitation identifier.
 var ErrInviteNotFound = errors.New("invite not found")
 
+// ErrInvalidInvite reports a token that is unknown, expired, revoked,
+// consumed, or bound to another email.
+var ErrInvalidInvite = errors.New("invalid invite")
+
 // StoredInvite is the server-visible invitation record. It carries only the
 // token hash and lifecycle metadata — never the plaintext token and never
 // any vault material.

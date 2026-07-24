@@ -136,6 +136,15 @@ func mustBootstrap(t *testing.T, srv *httptest.Server, email string, password []
 // returns the short-lived access token authorizing later requests.
 func mustLogin(t *testing.T, srv *httptest.Server, email string, password []byte) string {
 	t.Helper()
+	response := mustLoginResponse(t, srv, email, password)
+	if response.AccessToken == "" {
+		t.Fatal("login finish did not return an access token")
+	}
+	return response.AccessToken
+}
+
+func mustLoginResponse(t *testing.T, srv *httptest.Server, email string, password []byte) loginFinishResponse {
+	t.Helper()
 	client, err := opaque.NewClient(nil)
 	if err != nil {
 		t.Fatal(err)
@@ -175,14 +184,9 @@ func mustLogin(t *testing.T, srv *httptest.Server, email string, password []byte
 	if finish.StatusCode != http.StatusOK {
 		t.Fatalf("login finish status: want 200, got %d", finish.StatusCode)
 	}
-	var finishBody struct {
-		AccessToken string `json:"access_token"`
-	}
+	var finishBody loginFinishResponse
 	decodeJSON(t, finish, &finishBody)
-	if finishBody.AccessToken == "" {
-		t.Fatal("login finish did not return an access token")
-	}
-	return finishBody.AccessToken
+	return finishBody
 }
 
 func getJSONWithAuth(t *testing.T, url string, accessToken string) *http.Response {

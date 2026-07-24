@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -131,6 +132,7 @@ func TestBootstrapRegistersExactlyOneAdministrator(t *testing.T) {
 
 type memoryBootstrapStore struct {
 	account      *BootstrapAccount
+	accounts     map[string]*BootstrapAccount
 	invites      []StoredInvite
 	accessTokens map[string]StoredAccessToken
 }
@@ -144,20 +146,22 @@ func (s *memoryBootstrapStore) CreateBootstrap(_ context.Context, account Bootst
 		return ErrBootstrapClosed
 	}
 	s.account = &account
+	s.accounts = map[string]*BootstrapAccount{account.Email: &account}
 	return nil
 }
 
 func (s *memoryBootstrapStore) FindAccount(_ context.Context, email string) (StoredAccount, error) {
-	if s.account == nil || s.account.Email != email {
+	account, ok := s.accounts[email]
+	if !ok {
 		return StoredAccount{}, ErrAccountNotFound
 	}
 	return StoredAccount{
-		AccountID:             s.account.AccountID,
-		Email:                 s.account.Email,
-		Administrator:         s.account.Administrator,
-		OpaqueRecord:          s.account.OpaqueRecord,
-		PasswordVaultEnvelope: s.account.PasswordVaultEnvelope,
-		RecoveryVaultEnvelope: s.account.RecoveryVaultEnvelope,
+		AccountID:             account.AccountID,
+		Email:                 account.Email,
+		Administrator:         account.Administrator,
+		OpaqueRecord:          account.OpaqueRecord,
+		PasswordVaultEnvelope: account.PasswordVaultEnvelope,
+		RecoveryVaultEnvelope: account.RecoveryVaultEnvelope,
 	}, nil
 }
 
@@ -193,6 +197,37 @@ func (s *memoryBootstrapStore) RevokeInvite(_ context.Context, inviteID string) 
 		}
 	}
 	return ErrInviteNotFound
+}
+
+func (s *memoryBootstrapStore) ValidateInvite(_ context.Context, tokenHash []byte, email string, now time.Time) error {
+	for _, invite := range s.invites {
+		if bytes.Equal(invite.TokenHash, tokenHash) &&
+			invite.Email == email &&
+			invite.ConsumedBy == "" &&
+			invite.RevokedAt.IsZero() &&
+			now.Before(invite.ExpiresAt) {
+			return nil
+		}
+	}
+	return ErrInvalidInvite
+}
+
+func (s *memoryBootstrapStore) CreateInvitedAccount(_ context.Context, tokenHash []byte, account BootstrapAccount, now time.Time) error {
+	if err := s.ValidateInvite(context.Background(), tokenHash, account.Email, now); err != nil {
+		return err
+	}
+	if _, exists := s.accounts[account.Email]; exists {
+		return errors.New("account already exists")
+	}
+	s.accounts[account.Email] = &account
+	for i := range s.invites {
+		if bytes.Equal(s.invites[i].TokenHash, tokenHash) {
+			s.invites[i].ConsumedBy = account.AccountID
+			s.invites[i].ConsumedAt = now
+			return nil
+		}
+	}
+	return ErrInvalidInvite
 }
 
 func newTestAuthService(t *testing.T, store AuthStore) *AuthService {

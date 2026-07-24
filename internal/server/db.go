@@ -211,3 +211,79 @@ func (s DBStore) RevokeInvite(ctx context.Context, inviteID string) error {
 	}
 	return nil
 }
+
+// ValidateInvite checks that a token is active and bound to the supplied
+// canonical email. CreateInvitedAccount repeats this check transactionally.
+func (s DBStore) ValidateInvite(ctx context.Context, tokenHash []byte, email string, now time.Time) error {
+	var exists bool
+	err := s.DB.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM invites
+			WHERE token_hash = $1
+			  AND email = $2
+			  AND consumed_at IS NULL
+			  AND revoked_at IS NULL
+			  AND expires_at > $3
+		)`, tokenHash, email, now).Scan(&exists)
+	if err != nil {
+		return fmt.Errorf("validate invite: %w", err)
+	}
+	if !exists {
+		return ErrInvalidInvite
+	}
+	return nil
+}
+
+// CreateInvitedAccount creates the account material and consumes its invite
+// in one transaction. Locking the invite row makes concurrent finishes
+// resolve to exactly one successful registration.
+func (s DBStore) CreateInvitedAccount(ctx context.Context, tokenHash []byte, account BootstrapAccount, now time.Time) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin invited registration: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var inviteID string
+	err = tx.QueryRowContext(ctx, `
+		SELECT uuid::text
+		FROM invites
+		WHERE token_hash = $1
+		  AND email = $2
+		  AND consumed_at IS NULL
+		  AND revoked_at IS NULL
+		  AND expires_at > $3
+		FOR UPDATE`, tokenHash, account.Email, now).Scan(&inviteID)
+	if err == sql.ErrNoRows {
+		return ErrInvalidInvite
+	}
+	if err != nil {
+		return fmt.Errorf("lock invite: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		"INSERT INTO accounts (uuid, email, is_administrator) VALUES ($1, $2, FALSE)",
+		account.AccountID, account.Email); err != nil {
+		return fmt.Errorf("create invited account: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		"INSERT INTO opaque_records (account_uuid, record) VALUES ($1, $2)",
+		account.AccountID, account.OpaqueRecord); err != nil {
+		return fmt.Errorf("store invited OPAQUE record: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO vault_envelopes (account_uuid, password_vault_envelope, recovery_vault_envelope)
+		VALUES ($1, $2, $3)`, account.AccountID, account.PasswordVaultEnvelope, account.RecoveryVaultEnvelope); err != nil {
+		return fmt.Errorf("store invited vault envelopes: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE invites
+		SET consumed_by = $1, consumed_at = $2
+		WHERE uuid = $3`, account.AccountID, now, inviteID); err != nil {
+		return fmt.Errorf("consume invite: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit invited registration: %w", err)
+	}
+	return nil
+}
