@@ -27,14 +27,22 @@ type StatusResponse struct {
 	ClientIP      string `json:"client_ip"`
 }
 
+// routeRegistrar is the seam every API surface implements to mount its
+// endpoints on the versioned mux.
+type routeRegistrar interface {
+	register(mux *http.ServeMux)
+}
+
 // NewHandler builds the /api/v1 mux. trustedProxies lists the CIDR ranges
 // (e.g. the Docker network Traefik lives in) whose X-Forwarded-For headers
 // are honored; the header is ignored from any other source.
-func NewHandler(version string, schema SchemaStore, trustedProxies []netip.Prefix, auth ...*AuthService) http.Handler {
+func NewHandler(version string, schema SchemaStore, trustedProxies []netip.Prefix, services ...routeRegistrar) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/api/v1/status", statusHandler(version, schema, trustedProxies))
-	if len(auth) != 0 && auth[0] != nil {
-		auth[0].register(mux)
+	for _, service := range services {
+		if service != nil {
+			service.register(mux)
+		}
 	}
 	return mux
 }

@@ -93,13 +93,14 @@ func (s DBStore) CreateBootstrap(ctx context.Context, account BootstrapAccount) 
 func (s DBStore) FindAccount(ctx context.Context, email string) (StoredAccount, error) {
 	var account StoredAccount
 	err := s.DB.QueryRowContext(ctx, `
-		SELECT a.uuid::text, a.email, r.record, v.password_vault_envelope, v.recovery_vault_envelope
+		SELECT a.uuid::text, a.email, a.is_administrator, r.record, v.password_vault_envelope, v.recovery_vault_envelope
 		FROM accounts a
 		JOIN opaque_records r ON r.account_uuid = a.uuid
 		JOIN vault_envelopes v ON v.account_uuid = a.uuid
 		WHERE a.email = $1`, email).Scan(
 		&account.AccountID,
 		&account.Email,
+		&account.Administrator,
 		&account.OpaqueRecord,
 		&account.PasswordVaultEnvelope,
 		&account.RecoveryVaultEnvelope,
@@ -111,4 +112,102 @@ func (s DBStore) FindAccount(ctx context.Context, email string) (StoredAccount, 
 		return StoredAccount{}, fmt.Errorf("load account authentication material: %w", err)
 	}
 	return account, nil
+}
+
+// CreateAccessToken stores a hashed access token.
+func (s DBStore) CreateAccessToken(ctx context.Context, token StoredAccessToken) error {
+	_, err := s.DB.ExecContext(ctx, `
+		INSERT INTO access_tokens (token_hash, account_uuid, email, administrator, expires_at)
+		VALUES ($1, $2, $3, $4, $5)`,
+		token.TokenHash, token.AccountID, token.Email, token.Administrator, token.ExpiresAt,
+	)
+	if err != nil {
+		return fmt.Errorf("create access token: %w", err)
+	}
+	return nil
+}
+
+// FindAccessToken loads an access token record by token hash.
+func (s DBStore) FindAccessToken(ctx context.Context, tokenHash []byte) (StoredAccessToken, error) {
+	var token StoredAccessToken
+	err := s.DB.QueryRowContext(ctx, `
+		SELECT token_hash, account_uuid::text, email, administrator, expires_at
+		FROM access_tokens
+		WHERE token_hash = $1`, tokenHash).Scan(
+		&token.TokenHash, &token.AccountID, &token.Email, &token.Administrator, &token.ExpiresAt,
+	)
+	if err == sql.ErrNoRows {
+		return StoredAccessToken{}, ErrAccessTokenNotFound
+	}
+	if err != nil {
+		return StoredAccessToken{}, fmt.Errorf("find access token: %w", err)
+	}
+	return token, nil
+}
+
+// CreateInvite persists an invitation.
+func (s DBStore) CreateInvite(ctx context.Context, invite StoredInvite) error {
+	_, err := s.DB.ExecContext(ctx, `
+		INSERT INTO invites (uuid, email, token_hash, created_by, created_at, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		invite.InviteID, invite.Email, invite.TokenHash, invite.CreatedBy, invite.CreatedAt, invite.ExpiresAt,
+	)
+	if err != nil {
+		return fmt.Errorf("create invite: %w", err)
+	}
+	return nil
+}
+
+// ListInvites returns all invitations ordered by creation timestamp.
+func (s DBStore) ListInvites(ctx context.Context) ([]StoredInvite, error) {
+	rows, err := s.DB.QueryContext(ctx, `
+		SELECT uuid::text, email, token_hash, created_by::text, created_at, expires_at,
+		       COALESCE(consumed_by::text, ''), consumed_at, revoked_at
+		FROM invites
+		ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("list invites: %w", err)
+	}
+	defer rows.Close()
+
+	var out []StoredInvite
+	for rows.Next() {
+		var inv StoredInvite
+		var consumedBy string
+		var consumedAt, revokedAt sql.NullTime
+		if err := rows.Scan(&inv.InviteID, &inv.Email, &inv.TokenHash, &inv.CreatedBy, &inv.CreatedAt, &inv.ExpiresAt, &consumedBy, &consumedAt, &revokedAt); err != nil {
+			return nil, fmt.Errorf("scan invite: %w", err)
+		}
+		inv.ConsumedBy = consumedBy
+		if consumedAt.Valid {
+			inv.ConsumedAt = consumedAt.Time
+		}
+		if revokedAt.Valid {
+			inv.RevokedAt = revokedAt.Time
+		}
+		out = append(out, inv)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate invites: %w", err)
+	}
+	return out, nil
+}
+
+// RevokeInvite marks an unconsumed invitation as revoked.
+func (s DBStore) RevokeInvite(ctx context.Context, inviteID string) error {
+	res, err := s.DB.ExecContext(ctx, `
+		UPDATE invites SET revoked_at = now() WHERE uuid = $1 AND revoked_at IS NULL AND consumed_at IS NULL`,
+		inviteID,
+	)
+	if err != nil {
+		return fmt.Errorf("revoke invite: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("revoke invite rows affected: %w", err)
+	}
+	if n == 0 {
+		return ErrInviteNotFound
+	}
+	return nil
 }

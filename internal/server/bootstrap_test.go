@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/bytemare/opaque"
 )
@@ -129,7 +130,9 @@ func TestBootstrapRegistersExactlyOneAdministrator(t *testing.T) {
 }
 
 type memoryBootstrapStore struct {
-	account *BootstrapAccount
+	account      *BootstrapAccount
+	invites      []StoredInvite
+	accessTokens map[string]StoredAccessToken
 }
 
 func (s *memoryBootstrapStore) InstanceEmpty(context.Context) (bool, error) {
@@ -151,13 +154,48 @@ func (s *memoryBootstrapStore) FindAccount(_ context.Context, email string) (Sto
 	return StoredAccount{
 		AccountID:             s.account.AccountID,
 		Email:                 s.account.Email,
+		Administrator:         s.account.Administrator,
 		OpaqueRecord:          s.account.OpaqueRecord,
 		PasswordVaultEnvelope: s.account.PasswordVaultEnvelope,
 		RecoveryVaultEnvelope: s.account.RecoveryVaultEnvelope,
 	}, nil
 }
 
-func newTestAuthService(t *testing.T, store BootstrapStore) *AuthService {
+func (s *memoryBootstrapStore) CreateAccessToken(_ context.Context, token StoredAccessToken) error {
+	if s.accessTokens == nil {
+		s.accessTokens = make(map[string]StoredAccessToken)
+	}
+	s.accessTokens[string(token.TokenHash)] = token
+	return nil
+}
+
+func (s *memoryBootstrapStore) FindAccessToken(_ context.Context, tokenHash []byte) (StoredAccessToken, error) {
+	if token, ok := s.accessTokens[string(tokenHash)]; ok {
+		return token, nil
+	}
+	return StoredAccessToken{}, ErrAccessTokenNotFound
+}
+
+func (s *memoryBootstrapStore) CreateInvite(_ context.Context, invite StoredInvite) error {
+	s.invites = append(s.invites, invite)
+	return nil
+}
+
+func (s *memoryBootstrapStore) ListInvites(context.Context) ([]StoredInvite, error) {
+	return s.invites, nil
+}
+
+func (s *memoryBootstrapStore) RevokeInvite(_ context.Context, inviteID string) error {
+	for i := range s.invites {
+		if s.invites[i].InviteID == inviteID {
+			s.invites[i].RevokedAt = time.Now()
+			return nil
+		}
+	}
+	return ErrInviteNotFound
+}
+
+func newTestAuthService(t *testing.T, store AuthStore) *AuthService {
 	t.Helper()
 	configuration := opaque.DefaultConfiguration()
 	opaqueServer, err := opaque.NewServer(configuration)
@@ -177,11 +215,25 @@ func newTestAuthService(t *testing.T, store BootstrapStore) *AuthService {
 
 func postJSON(t *testing.T, url string, body any) *http.Response {
 	t.Helper()
+	return postJSONWithAuth(t, url, body, "")
+}
+
+// postJSONWithAuth posts a JSON body, attaching a bearer token when given.
+func postJSONWithAuth(t *testing.T, url string, body any, accessToken string) *http.Response {
+	t.Helper()
 	payload, err := json.Marshal(body)
 	if err != nil {
 		t.Fatal(err)
 	}
-	response, err := http.Post(url, "application/json", bytes.NewReader(payload))
+	request, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	if accessToken != "" {
+		request.Header.Set("Authorization", "Bearer "+accessToken)
+	}
+	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}

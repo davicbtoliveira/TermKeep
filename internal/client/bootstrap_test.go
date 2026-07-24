@@ -75,7 +75,8 @@ type schemaVersion struct{}
 func (schemaVersion) SchemaVersion(context.Context) (int, error) { return 2, nil }
 
 type bootstrapStore struct {
-	account *server.BootstrapAccount
+	account      *server.BootstrapAccount
+	accessTokens map[string]server.StoredAccessToken
 }
 
 func (s *bootstrapStore) InstanceEmpty(context.Context) (bool, error) {
@@ -97,13 +98,29 @@ func (s *bootstrapStore) FindAccount(_ context.Context, email string) (server.St
 	return server.StoredAccount{
 		AccountID:             s.account.AccountID,
 		Email:                 s.account.Email,
+		Administrator:         s.account.Administrator,
 		OpaqueRecord:          s.account.OpaqueRecord,
 		PasswordVaultEnvelope: s.account.PasswordVaultEnvelope,
 		RecoveryVaultEnvelope: s.account.RecoveryVaultEnvelope,
 	}, nil
 }
 
-func bootstrapAuthService(t *testing.T, store server.BootstrapStore) *server.AuthService {
+func (s *bootstrapStore) CreateAccessToken(_ context.Context, token server.StoredAccessToken) error {
+	if s.accessTokens == nil {
+		s.accessTokens = make(map[string]server.StoredAccessToken)
+	}
+	s.accessTokens[string(token.TokenHash)] = token
+	return nil
+}
+
+func (s *bootstrapStore) FindAccessToken(_ context.Context, tokenHash []byte) (server.StoredAccessToken, error) {
+	if token, ok := s.accessTokens[string(tokenHash)]; ok {
+		return token, nil
+	}
+	return server.StoredAccessToken{}, server.ErrAccessTokenNotFound
+}
+
+func bootstrapAuthService(t *testing.T, store server.AuthStore) *server.AuthService {
 	t.Helper()
 	configuration := opaque.DefaultConfiguration()
 	opaqueServer, err := opaque.NewServer(configuration)

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -18,8 +19,14 @@ import (
 
 var ErrBootstrapClosed = errors.New("bootstrap registration is closed")
 var ErrAccountNotFound = errors.New("account not found")
+var ErrAccessTokenNotFound = errors.New("access token not found")
 
 var errInvalidLogin = errors.New("invalid login")
+var errInvalidAccessToken = errors.New("invalid access token")
+
+// accessTokenTTL bounds the short-lived bearer token issued at login. It
+// authorizes administrative calls until full online sessions arrive.
+const accessTokenTTL = 15 * time.Minute
 
 // BootstrapStore persists the first account and its opaque client-created
 // vault envelopes. CreateBootstrap must reject concurrent second attempts.
@@ -27,6 +34,29 @@ type BootstrapStore interface {
 	InstanceEmpty(ctx context.Context) (bool, error)
 	CreateBootstrap(ctx context.Context, account BootstrapAccount) error
 	FindAccount(ctx context.Context, email string) (StoredAccount, error)
+}
+
+// AccessTokenStore persists only the SHA-256 hash of bearer tokens. The
+// plaintext token is returned once at login and never stored.
+type AccessTokenStore interface {
+	CreateAccessToken(ctx context.Context, token StoredAccessToken) error
+	FindAccessToken(ctx context.Context, tokenHash []byte) (StoredAccessToken, error)
+}
+
+// AuthStore is the full persistence boundary of AuthService.
+type AuthStore interface {
+	BootstrapStore
+	AccessTokenStore
+}
+
+// StoredAccessToken resolves a bearer token hash to its account. The
+// Administrator flag authorizes the invitation management surface.
+type StoredAccessToken struct {
+	TokenHash     []byte
+	AccountID     string
+	Email         string
+	Administrator bool
+	ExpiresAt     time.Time
 }
 
 // BootstrapAccount is the only account material written during bootstrap.
@@ -45,6 +75,7 @@ type BootstrapAccount struct {
 type StoredAccount struct {
 	AccountID             string
 	Email                 string
+	Administrator         bool
 	OpaqueRecord          []byte
 	PasswordVaultEnvelope []byte
 	RecoveryVaultEnvelope []byte
@@ -55,7 +86,7 @@ type StoredAccount struct {
 type AuthService struct {
 	opaque  *opaque.Server
 	config  *opaque.Configuration
-	store   BootstrapStore
+	store   AuthStore
 	mu      sync.Mutex
 	pending map[string]pendingLogin
 }
@@ -69,7 +100,7 @@ type pendingLogin struct {
 
 // NewAuthService configures the OPAQUE server and persistence boundary used by
 // registration and later authentication flows.
-func NewAuthService(opaqueServer *opaque.Server, store BootstrapStore) *AuthService {
+func NewAuthService(opaqueServer *opaque.Server, store AuthStore) *AuthService {
 	return &AuthService{
 		opaque:  opaqueServer,
 		config:  opaque.DefaultConfiguration(),
@@ -222,6 +253,7 @@ type loginFinishResponse struct {
 	AccountID             string `json:"account_id"`
 	PasswordVaultEnvelope string `json:"password_vault_envelope"`
 	RecoveryVaultEnvelope string `json:"recovery_vault_envelope"`
+	AccessToken           string `json:"access_token"`
 }
 
 func (a *AuthService) startLogin(w http.ResponseWriter, r *http.Request) {
@@ -265,11 +297,52 @@ func (a *AuthService) finishLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid login", http.StatusUnauthorized)
 		return
 	}
+	token, err := a.issueAccessToken(r.Context(), account)
+	if err != nil {
+		http.Error(w, "login unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	writeJSON(w, http.StatusOK, loginFinishResponse{
 		AccountID:             account.AccountID,
 		PasswordVaultEnvelope: base64.RawStdEncoding.EncodeToString(account.PasswordVaultEnvelope),
 		RecoveryVaultEnvelope: base64.RawStdEncoding.EncodeToString(account.RecoveryVaultEnvelope),
+		AccessToken:           token,
 	})
+}
+
+func (a *AuthService) issueAccessToken(ctx context.Context, account *StoredAccount) (string, error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("generate access token: %w", err)
+	}
+	token := base64.RawURLEncoding.EncodeToString(raw)
+	hash := sha256.Sum256([]byte(token))
+	stored := StoredAccessToken{
+		TokenHash:     hash[:],
+		AccountID:     account.AccountID,
+		Email:         account.Email,
+		Administrator: account.Administrator,
+		ExpiresAt:     time.Now().Add(accessTokenTTL),
+	}
+	if err := a.store.CreateAccessToken(ctx, stored); err != nil {
+		return "", fmt.Errorf("store access token: %w", err)
+	}
+	return token, nil
+}
+
+func (a *AuthService) AuthenticateToken(ctx context.Context, rawToken string) (StoredAccessToken, error) {
+	if rawToken == "" {
+		return StoredAccessToken{}, ErrAccessTokenNotFound
+	}
+	hash := sha256.Sum256([]byte(rawToken))
+	token, err := a.store.FindAccessToken(ctx, hash[:])
+	if err != nil {
+		return StoredAccessToken{}, err
+	}
+	if time.Now().After(token.ExpiresAt) {
+		return StoredAccessToken{}, errInvalidAccessToken
+	}
+	return token, nil
 }
 
 func (a *AuthService) beginLogin(ctx context.Context, email string, encodedKE1 []byte) (string, []byte, error) {

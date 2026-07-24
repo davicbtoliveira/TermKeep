@@ -77,10 +77,12 @@ func run() error {
 	}
 	slog.Info("migrations applied", "schema_version", schemaVersion)
 
-	auth := server.NewAuthService(opaqueServer, server.DBStore{DB: db})
+	dbStore := server.DBStore{DB: db}
+	auth := server.NewAuthService(opaqueServer, dbStore)
+	invites := server.NewInviteService(dbStore, auth)
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           server.NewHandler(version, server.DBStore{DB: db}, trusted, auth),
+		Handler:           server.NewHandler(version, dbStore, trusted, auth, invites),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
