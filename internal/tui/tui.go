@@ -90,6 +90,7 @@ type model struct {
 	showLoginForm   bool
 	loginForm       loginForm
 	loginFormErr    error
+	loginSaving     bool
 }
 
 // Run starts the Bubble Tea program on the controlling terminal.
@@ -260,6 +261,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					revision: 1,
 				}
 				m.loginFormErr = nil
+				m.loginSaving = false
 			}
 		case "e":
 			if m.vaultOpen && m.loginStore != nil &&
@@ -269,6 +271,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.showLoginForm = true
 				m.loginForm = formForLogin(m.logins[m.selectedLogin])
 				m.loginFormErr = nil
+				m.loginSaving = false
 			}
 		case "p":
 			if m.showLogin && m.selectedLogin < len(m.logins) {
@@ -378,6 +381,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.logins = []loginRecord(msg)
 		m.showLoginForm = false
 		m.loginFormErr = nil
+		m.loginSaving = false
 		if m.selectedLogin >= len(m.logins) {
 			m.selectedLogin = 0
 		}
@@ -386,6 +390,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loginsErr = msg
 	case loginSaveErrMsg:
 		m.loginFormErr = msg
+		m.loginSaving = false
 	}
 	return m, nil
 }
@@ -444,6 +449,12 @@ func (m model) View() string {
 }
 
 func (m model) updateLoginForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.loginSaving {
+		if msg.String() == "ctrl+c" {
+			return m, tea.Quit
+		}
+		return m, nil
+	}
 	switch msg.String() {
 	case "ctrl+c":
 		return m, tea.Quit
@@ -469,6 +480,8 @@ func (m model) updateLoginForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.loginFormErr = err
 			return m, nil
 		}
+		m.loginSaving = true
+		m.loginFormErr = nil
 		return m, saveLogin(m.loginStore, record)
 	default:
 		if msg.Type == tea.KeyRunes {
@@ -559,7 +572,11 @@ func (m model) loginFormView() string {
 	if m.loginFormErr != nil {
 		fmt.Fprintf(&b, "\nError: %s\n", m.loginFormErr)
 	}
-	b.WriteString("\n[enter] next/save  [ctrl+u] clear field  [esc] cancel  [ctrl+c] quit\n")
+	if m.loginSaving {
+		b.WriteString("\nSaving…  [ctrl+c] quit\n")
+	} else {
+		b.WriteString("\n[enter] next/save  [ctrl+u] clear field  [esc] cancel  [ctrl+c] quit\n")
+	}
 	return b.String()
 }
 

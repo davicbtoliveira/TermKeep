@@ -458,6 +458,32 @@ func TestEditLoginPreservesFieldsAndIncrementsRevision(t *testing.T) {
 	}
 }
 
+func TestLoginFormIgnoresDuplicateSaveWhileSaving(t *testing.T) {
+	store := &fakeLoginStore{}
+	initial := model{
+		loaded:        true,
+		vaultOpen:     true,
+		loginStore:    store,
+		showLoginForm: true,
+		loginForm: loginForm{
+			itemID:   "11111111-1111-4111-8111-111111111111",
+			revision: 1,
+			field:    loginFormFieldCount - 1,
+			values: [loginFormFieldCount]string{
+				"Production database",
+			},
+		},
+	}
+	updated, firstSave := initial.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if firstSave == nil {
+		t.Fatal("first Enter did not save")
+	}
+	_, duplicateSave := updated.(model).Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if duplicateSave != nil {
+		t.Fatal("second Enter started a concurrent save")
+	}
+}
+
 type fakeLoginStore struct {
 	records []loginRecord
 	saved   []loginRecord
