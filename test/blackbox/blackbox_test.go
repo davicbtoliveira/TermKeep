@@ -823,8 +823,8 @@ func (s *stack) testActivityViews(t *testing.T) {
 	userShell.waitFor(45*time.Second, "Vault:    unlocked (empty)")
 	userShell.clear()
 	write(t, userShell.ptmx, "a")
-	_, output := userShell.waitFor(30*time.Second, "login.succeeded")
-	for _, want := range []string{"Activity", "my account", "Actor:", "Source:"} {
+	_, output := userShell.waitFor(30*time.Second, "[r] refresh")
+	for _, want := range []string{"login.succeeded", "Actor:", "Source:"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("user Activity missing %q:\n%s", want, output)
 		}
@@ -848,7 +848,7 @@ func (s *stack) testActivityViews(t *testing.T) {
 	adminShell.waitFor(30*time.Second, "[g] all accounts")
 	adminShell.clear()
 	write(t, adminShell.ptmx, "g")
-	_, output = adminShell.waitFor(30*time.Second, "all accounts")
+	_, output = adminShell.waitFor(30*time.Second, "[g] my account")
 	for _, want := range []string{"Account:", "Actor:"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("administrator Activity missing %q:\n%s", want, output)
