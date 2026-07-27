@@ -64,6 +64,24 @@ credentials, disables core dumps, and memory-locks and clears key material on
 a best-effort basis. These measures do not protect against root or a
 compromised client host.
 
+## Activity audit
+
+Press `a` from the unlocked vault to open Activity. Ordinary accounts see
+only their own authentication, invitation, registration, and session events.
+Administrators can use `g` to switch between their account and all accounts;
+the global view identifies the subject Account and actor by UUID. Use `n` for
+the next page, `r` to refresh, and `v` to return to the vault.
+
+Audit events contain fixed operational fields only: event type, Account,
+actor, session or invitation UUID where applicable, approximate source IP,
+and timestamp. They never contain passwords, Recovery keys, vault content,
+search terms, TOTP values, invitation tokens, access tokens, or raw OPAQUE
+messages.
+
+Events are retained for 90 days by default. Operators can change the positive
+day count with `AUDIT_RETENTION_DAYS`; expired events are removed
+automatically as activity is recorded or queried.
+
 ## License
 
 TermKeep is licensed under the GNU Affero General Public License v3.0 or later.

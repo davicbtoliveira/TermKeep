@@ -30,14 +30,15 @@ termkeep --server https://localhost --ca-cert deploy/certs/ca.pem status
 
 All configuration is environment-driven; see `deploy/.env.example`.
 
-| Variable              | Default     | Purpose                                            |
-| --------------------- | ----------- | -------------------------------------------------- |
-| `POSTGRES_PASSWORD`   | (required)  | Password of the `termkeep` PostgreSQL role         |
-| `OPAQUE_SERVER_KEY`   | (required)  | Persistent OPAQUE server private key               |
-| `OPAQUE_OPRF_SEED`    | (required)  | Persistent per-account OPRF derivation seed        |
-| `TERMKEEP_HTTPS_PORT` | `443`       | Host port publishing Traefik's HTTPS endpoint      |
-| `TERMKEEP_SERVER_PORT`| `8080`      | Loopback-only direct server port (debugging/tests) |
-| `TERMKEEP_CERTS_DIR`  | `./certs`   | Directory with `ca.pem`, `tls.crt`, `tls.key`      |
+| Variable               | Default    | Purpose                                            |
+| ---------------------- | ---------- | -------------------------------------------------- |
+| `POSTGRES_PASSWORD`    | (required) | Password of the `termkeep` PostgreSQL role         |
+| `OPAQUE_SERVER_KEY`    | (required) | Persistent OPAQUE server private key               |
+| `OPAQUE_OPRF_SEED`     | (required) | Persistent per-account OPRF derivation seed        |
+| `AUDIT_RETENTION_DAYS` | `90`       | Positive number of days to retain audit events     |
+| `TERMKEEP_HTTPS_PORT`  | `443`      | Host port publishing Traefik's HTTPS endpoint      |
+| `TERMKEEP_SERVER_PORT` | `8080`     | Loopback-only direct server port (debugging/tests) |
+| `TERMKEEP_CERTS_DIR`   | `./certs`  | Directory with `ca.pem`, `tls.crt`, `tls.key`      |
 
 Server-side environment (set in `compose.yml`, usually unchanged):
 
@@ -47,6 +48,8 @@ Server-side environment (set in `compose.yml`, usually unchanged):
   Pinned to Traefik's fixed address `10.90.0.2/32`; anything else is
   ignored, including requests to the loopback debug port.
 - `LISTEN_ADDR` — bind address inside the container (`:8080`).
+- `AUDIT_RETENTION_DAYS` — audit events older than this positive day count
+  are deleted automatically when activity is recorded or queried.
 
 Client-side flags/environment:
 
