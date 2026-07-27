@@ -90,6 +90,15 @@ func Login(ctx context.Context, cfg Config, input LoginInput) (*LoginResult, err
 	}
 	ke3, sessionKey, exportKey, err := opaqueClient.GenerateKE3(ke2, []byte(email), nil)
 	if err != nil {
+		_ = postBootstrap(
+			ctx,
+			httpClient,
+			cfg.ServerURL,
+			"/api/v1/login/fail",
+			map[string]string{"login_id": start.LoginID},
+			http.StatusNoContent,
+			nil,
+		)
 		return nil, errors.New("invalid email or master password")
 	}
 	defer clearBytes(sessionKey)

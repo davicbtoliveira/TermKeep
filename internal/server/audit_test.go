@@ -1,12 +1,17 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 )
@@ -346,6 +351,47 @@ func TestFailedLoginIsVisibleInAccountActivity(t *testing.T) {
 	t.Fatalf("login failure event missing: %+v", body.Events)
 }
 
+func TestClientReportedLoginFailureIsVisibleInAccountActivity(t *testing.T) {
+	store := &memoryBootstrapStore{}
+	auditStore := &memoryAuditStore{}
+	audit := NewAuditLog(auditStore, defaultAuditRetention)
+	auth := newTestAuthService(t, store)
+	auth.audit = audit
+	activity := NewActivityService(audit, auth)
+	handler := NewHandler("test", stubSchema{version: 1}, nil, auth, activity)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	password := []byte("TermKeep#2026")
+	mustBootstrap(t, server, "admin@example.com", password)
+	start := startLoginAttempt(t, server, "admin@example.com", []byte("Wrong#Pass2026"))
+	var startBody struct {
+		LoginID string `json:"login_id"`
+	}
+	decodeJSON(t, start, &startBody)
+	report := postJSON(t, server.URL+"/api/v1/login/fail", map[string]string{
+		"login_id": startBody.LoginID,
+	})
+	report.Body.Close()
+	if report.StatusCode != http.StatusNoContent {
+		t.Fatalf("report login failure status: want 204, got %d", report.StatusCode)
+	}
+
+	token := mustLogin(t, server, "admin@example.com", password)
+	response := getJSONWithAuth(t, server.URL+"/api/v1/activity", token)
+	var body struct {
+		Events []AuditEvent `json:"events"`
+	}
+	decodeJSON(t, response, &body)
+	for _, event := range body.Events {
+		if event.Type == "login.failed" &&
+			event.AccountID == store.account.AccountID {
+			return
+		}
+	}
+	t.Fatalf("client-reported login failure event missing: %+v", body.Events)
+}
+
 func TestThrottledLoginIsVisibleInAccountActivity(t *testing.T) {
 	store := &memoryBootstrapStore{}
 	auditStore := &memoryAuditStore{}
@@ -549,6 +595,77 @@ func TestSessionRevocationIsVisibleInAccountActivity(t *testing.T) {
 		}
 	}
 	t.Fatalf("session revocation event missing: %+v", body.Events)
+}
+
+func TestAuditExcludesSecretsFromAPIStoreAndLogs(t *testing.T) {
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(previousLogger)
+
+	store := &memoryBootstrapStore{}
+	auditStore := &memoryAuditStore{}
+	audit := NewAuditLog(auditStore, defaultAuditRetention)
+	auth := newTestAuthService(t, store)
+	auth.audit = audit
+	invites := NewInviteService(store, auth, audit)
+	activity := NewActivityService(audit, auth)
+	handler := NewHandler("test", stubSchema{version: 1}, nil, auth, invites, activity)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	const password = "MasterPassword-Sentinel#2026"
+	mustBootstrap(t, server, "admin@example.com", []byte(password))
+	login := mustLoginResponse(t, server, "admin@example.com", []byte(password))
+	invite := mustCreateInvite(t, server, login.AccessToken, "friend@example.com")
+	forbiddenInput := map[string]string{
+		"email":           "another@example.com",
+		"master_password": "Master-Field-Sentinel",
+		"recovery_key":    "Recovery-Key-Sentinel",
+		"item_content":    "Item-Content-Sentinel",
+		"search_term":     "Search-Term-Sentinel",
+		"totp":            "TOTP-Sentinel",
+	}
+	rejected := postJSONWithAuth(
+		t, server.URL+"/api/v1/invites", forbiddenInput, login.AccessToken)
+	rejected.Body.Close()
+	if rejected.StatusCode != http.StatusBadRequest {
+		t.Fatalf("secret-bearing unknown fields: want 400, got %d", rejected.StatusCode)
+	}
+
+	response := getJSONWithAuth(
+		t, server.URL+"/api/v1/admin/activity", login.AccessToken)
+	apiBody, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := json.Marshal(auditStore.events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	surfaces := map[string][]byte{
+		"API":   apiBody,
+		"store": stored,
+		"logs":  logs.Bytes(),
+	}
+	for _, secret := range []string{
+		password,
+		"encrypted-recovery-envelope",
+		login.AccessToken,
+		invite.Token,
+		"Master-Field-Sentinel",
+		"Recovery-Key-Sentinel",
+		"Item-Content-Sentinel",
+		"Search-Term-Sentinel",
+		"TOTP-Sentinel",
+	} {
+		for surface, contents := range surfaces {
+			if strings.Contains(string(contents), secret) {
+				t.Fatalf("%s contains forbidden secret %q", surface, secret)
+			}
+		}
+	}
 }
 
 type memoryAuditStore struct {

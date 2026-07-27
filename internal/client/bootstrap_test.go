@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,7 +18,11 @@ func TestBootstrapCreatesZeroKnowledgeVault(t *testing.T) {
 	store := &bootstrapStore{}
 	h := server.NewHandler("test", schemaVersion{}, nil, bootstrapAuthService(t, store))
 	var traffic bytes.Buffer
+	var failureReports atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/login/fail" {
+			failureReports.Add(1)
+		}
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Fatal(err)
@@ -77,6 +82,9 @@ func TestBootstrapCreatesZeroKnowledgeVault(t *testing.T) {
 		MasterPassword: "WrongPassword#2026",
 	}); err == nil {
 		t.Fatal("wrong master password authenticated")
+	}
+	if failureReports.Load() != 1 {
+		t.Fatalf("wrong password failure reports: want 1, got %d", failureReports.Load())
 	}
 }
 

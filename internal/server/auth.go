@@ -139,6 +139,7 @@ func (a *AuthService) register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/register/finish", a.finishRegistration)
 	mux.HandleFunc("POST /api/v1/login/start", a.startLogin)
 	mux.HandleFunc("POST /api/v1/login/finish", a.finishLogin)
+	mux.HandleFunc("POST /api/v1/login/fail", a.reportLoginFailure)
 }
 
 type bootstrapStartRequest struct {
@@ -396,6 +397,10 @@ type loginFinishRequest struct {
 	KE3     string `json:"ke3"`
 }
 
+type loginFailureRequest struct {
+	LoginID string `json:"login_id"`
+}
+
 type loginFinishResponse struct {
 	AccountID             string `json:"account_id"`
 	PasswordVaultEnvelope string `json:"password_vault_envelope"`
@@ -502,6 +507,31 @@ func (a *AuthService) finishLogin(w http.ResponseWriter, r *http.Request) {
 		RecoveryVaultEnvelope: base64.RawStdEncoding.EncodeToString(login.account.RecoveryVaultEnvelope),
 		AccessToken:           token,
 	})
+}
+
+func (a *AuthService) reportLoginFailure(w http.ResponseWriter, r *http.Request) {
+	var request loginFailureRequest
+	if !decodeRequest(w, r, &request) {
+		return
+	}
+	a.mu.Lock()
+	login, ok := a.pending[request.LoginID]
+	delete(a.pending, request.LoginID)
+	a.mu.Unlock()
+	if ok {
+		clearBytes(login.clientMAC)
+		clearBytes(login.sessionSecret)
+		var accountID string
+		if login.account != nil {
+			accountID = login.account.AccountID
+		}
+		recordAudit(r.Context(), a.audit, AuditEvent{
+			Type:      "login.failed",
+			AccountID: accountID,
+			SourceIP:  login.sourceIP,
+		})
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (a *AuthService) issueAccessToken(ctx context.Context, account *StoredAccount, host, sourceIP string) (string, error) {
