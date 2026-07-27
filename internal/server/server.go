@@ -110,7 +110,10 @@ func clientIP(r *http.Request, trusted []netip.Prefix) string {
 	for i := len(parts) - 1; i >= 0; i-- {
 		candidate := strings.TrimSpace(parts[i])
 		ip, err := netip.ParseAddr(candidate)
-		if err != nil || !isTrusted(ip, trusted) {
+		if err != nil {
+			return remote.String()
+		}
+		if !isTrusted(ip, trusted) {
 			return candidate
 		}
 	}

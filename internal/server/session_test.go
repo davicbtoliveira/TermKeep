@@ -172,3 +172,19 @@ func TestCurrentSessionCanRevokeItself(t *testing.T) {
 		t.Fatalf("revoked current session status: want 401, got %d", rejected.StatusCode)
 	}
 }
+
+func TestLoginRejectsTerminalControlCharactersInHost(t *testing.T) {
+	store := &memoryBootstrapStore{}
+	auth := newTestAuthService(t, store)
+	handler := NewHandler("test", stubSchema{version: 1}, nil, auth)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	password := []byte("TermKeep#2026")
+	mustBootstrap(t, server, "admin@example.com", password)
+	response := startLoginAttemptFromHost(t, server, "admin@example.com", password, "\x1b[31mhost")
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("control-character host status: want 400, got %d", response.StatusCode)
+	}
+}

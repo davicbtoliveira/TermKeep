@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/bytemare/opaque"
 )
@@ -407,7 +408,7 @@ func (a *AuthService) startLogin(w http.ResponseWriter, r *http.Request) {
 	if host == "" {
 		host = "unknown"
 	}
-	if len(host) > 255 {
+	if !validSessionHost(host) {
 		http.Error(w, "invalid login request", http.StatusBadRequest)
 		return
 	}
@@ -428,6 +429,18 @@ func (a *AuthService) startLogin(w http.ResponseWriter, r *http.Request) {
 		LoginID: loginID,
 		KE2:     base64.RawStdEncoding.EncodeToString(response),
 	})
+}
+
+func validSessionHost(host string) bool {
+	if len(host) > 255 {
+		return false
+	}
+	for _, character := range host {
+		if unicode.IsControl(character) {
+			return false
+		}
+	}
+	return true
 }
 
 func (a *AuthService) finishLogin(w http.ResponseWriter, r *http.Request) {

@@ -166,6 +166,10 @@ func TestMissingAndExistingAccountsShareLoginLimitResponse(t *testing.T) {
 }
 
 func startLoginAttempt(t *testing.T, server *httptest.Server, email string, password []byte) *http.Response {
+	return startLoginAttemptFromHost(t, server, email, password, "")
+}
+
+func startLoginAttemptFromHost(t *testing.T, server *httptest.Server, email string, password []byte, host string) *http.Response {
 	t.Helper()
 	client, err := opaque.NewClient(nil)
 	if err != nil {
@@ -175,8 +179,12 @@ func startLoginAttempt(t *testing.T, server *httptest.Server, email string, pass
 	if err != nil {
 		t.Fatal(err)
 	}
-	return postJSON(t, server.URL+"/api/v1/login/start", map[string]string{
+	body := map[string]string{
 		"email": email,
 		"ke1":   base64.RawStdEncoding.EncodeToString(ke1.Serialize()),
-	})
+	}
+	if host != "" {
+		body["host"] = host
+	}
+	return postJSON(t, server.URL+"/api/v1/login/start", body)
 }

@@ -128,3 +128,15 @@ func TestStatusStopsForwardingAtFirstUntrustedHop(t *testing.T) {
 		t.Errorf("forged leftmost entry honored: client_ip = %q, want 10.0.0.1", body.ClientIP)
 	}
 }
+
+func TestStatusRejectsMalformedForwardedOrigin(t *testing.T) {
+	trusted := mustPrefixes(t, "10.0.0.2/32")
+	handler := NewHandler("dev", stubSchema{version: 1}, trusted)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	_, body := getStatus(t, server, "10.0.0.2:443", "not-an-ip")
+	if body.ClientIP != "10.0.0.2" {
+		t.Fatalf("malformed forwarded origin: want direct peer, got %q", body.ClientIP)
+	}
+}
