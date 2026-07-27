@@ -21,6 +21,8 @@ type errMsg error
 type sessionsMsg []client.OnlineSession
 type sessionsErrMsg error
 type sessionRevokedMsg struct{}
+type activityMsg client.ActivityPage
+type activityErrMsg error
 
 // model is the single-screen state: the shared status lines plus keys.
 type model struct {
@@ -35,6 +37,11 @@ type model struct {
 	sessions        []client.OnlineSession
 	selectedSession int
 	sessionsErr     error
+	showActivity    bool
+	activityAll     bool
+	activityLoading bool
+	activityPage    client.ActivityPage
+	activityErr     error
 }
 
 // Run starts the Bubble Tea program on the controlling terminal.
@@ -88,6 +95,17 @@ func revokeSession(cfg client.Config, accessToken, sessionID string) tea.Cmd {
 	}
 }
 
+func loadActivity(cfg client.Config, accessToken string, allAccounts bool, cursor string) tea.Cmd {
+	return func() tea.Msg {
+		page, err := client.ListActivity(
+			context.Background(), cfg, accessToken, allAccounts, cursor)
+		if err != nil {
+			return activityErrMsg(err)
+		}
+		return activityMsg(page)
+	}
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
@@ -96,13 +114,43 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case "s":
 			if m.vaultOpen && m.accessToken != "" {
+				m.showActivity = false
 				m.showSessions = true
 				m.sessionsLoading = true
 				m.sessionsErr = nil
 				return m, loadSessions(m.cfg, m.accessToken)
 			}
+		case "a":
+			if m.vaultOpen && m.accessToken != "" {
+				m.showSessions = false
+				m.showActivity = true
+				m.activityAll = false
+				m.activityLoading = true
+				m.activityErr = nil
+				return m, loadActivity(m.cfg, m.accessToken, false, "")
+			}
+		case "g":
+			if m.showActivity && m.activityPage.CanViewAll {
+				m.activityAll = !m.activityAll
+				m.activityLoading = true
+				m.activityErr = nil
+				return m, loadActivity(
+					m.cfg, m.accessToken, m.activityAll, "")
+			}
+		case "n":
+			if m.showActivity && m.activityPage.NextCursor != "" {
+				m.activityLoading = true
+				m.activityErr = nil
+				return m, loadActivity(
+					m.cfg,
+					m.accessToken,
+					m.activityAll,
+					m.activityPage.NextCursor,
+				)
+			}
 		case "v":
 			m.showSessions = false
+			m.showActivity = false
 			return m, nil
 		case "j", "down":
 			if m.showSessions && m.selectedSession+1 < len(m.sessions) {
@@ -122,6 +170,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, revokeSession(m.cfg, m.accessToken, selected.SessionID)
 			}
 		case "r":
+			if m.showActivity {
+				m.activityLoading = true
+				m.activityErr = nil
+				return m, loadActivity(m.cfg, m.accessToken, m.activityAll, "")
+			}
 			if m.showSessions {
 				m.sessionsLoading = true
 				m.sessionsErr = nil
@@ -150,11 +203,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sessionsLoading = true
 		m.sessionsErr = nil
 		return m, loadSessions(m.cfg, m.accessToken)
+	case activityMsg:
+		m.activityLoading = false
+		m.activityPage = client.ActivityPage(msg)
+	case activityErrMsg:
+		m.activityLoading = false
+		m.activityErr = msg
 	}
 	return m, nil
 }
 
 func (m model) View() string {
+	if m.showActivity {
+		return m.activityView()
+	}
 	if m.showSessions {
 		return m.sessionsView()
 	}
@@ -171,10 +233,63 @@ func (m model) View() string {
 		b.WriteString("Vault:    unlocked (empty)\n")
 	}
 	if m.vaultOpen && m.accessToken != "" {
-		b.WriteString("\n[s] Active Sessions  [r] refresh  [q] quit\n")
+		b.WriteString("\n[a] Activity  [s] Active Sessions  [r] refresh  [q] quit\n")
 	} else {
 		b.WriteString("\n[r] refresh  [q] quit\n")
 	}
+	return b.String()
+}
+
+func (m model) activityView() string {
+	var b strings.Builder
+	b.WriteString("TermKeep — Activity\n\n")
+	if m.activityAll {
+		b.WriteString("Scope: all accounts\n\n")
+	} else {
+		b.WriteString("Scope: my account\n\n")
+	}
+	switch {
+	case m.activityLoading:
+		b.WriteString("Loading activity…\n")
+	case m.activityErr != nil:
+		b.WriteString("Error: " + m.activityErr.Error() + "\n")
+	case len(m.activityPage.Events) == 0:
+		b.WriteString("No activity.\n")
+	default:
+		for _, event := range m.activityPage.Events {
+			fmt.Fprintf(&b, "%s  %s\n",
+				event.OccurredAt.UTC().Format(time.RFC3339), event.Type)
+			if event.AccountID != "" && m.activityAll {
+				fmt.Fprintf(&b, "  Account: %s\n", event.AccountID)
+			}
+			if event.ActorID != "" {
+				fmt.Fprintf(&b, "  Actor: %s\n", event.ActorID)
+			} else {
+				b.WriteString("  Actor: unauthenticated\n")
+			}
+			if event.SourceIP != "" {
+				fmt.Fprintf(&b, "  Source: %s\n", event.SourceIP)
+			}
+			if event.SessionID != "" {
+				fmt.Fprintf(&b, "  Session: %s\n", event.SessionID)
+			}
+			if event.InviteID != "" {
+				fmt.Fprintf(&b, "  Invite: %s\n", event.InviteID)
+			}
+			b.WriteString("\n")
+		}
+	}
+	if m.activityPage.CanViewAll {
+		if m.activityAll {
+			b.WriteString("[g] my account  ")
+		} else {
+			b.WriteString("[g] all accounts  ")
+		}
+	}
+	if m.activityPage.NextCursor != "" {
+		b.WriteString("[n] next page  ")
+	}
+	b.WriteString("[r] refresh  [v] vault  [q] quit\n")
 	return b.String()
 }
 

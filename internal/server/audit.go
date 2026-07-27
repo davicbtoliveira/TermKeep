@@ -122,7 +122,7 @@ func (s *ActivityService) listOwn(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	s.list(w, r, token.AccountID)
+	s.list(w, r, token.AccountID, token.Administrator)
 }
 
 func (s *ActivityService) listAll(w http.ResponseWriter, r *http.Request) {
@@ -130,10 +130,15 @@ func (s *ActivityService) listAll(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	s.list(w, r, "")
+	s.list(w, r, "", true)
 }
 
-func (s *ActivityService) list(w http.ResponseWriter, r *http.Request, accountID string) {
+func (s *ActivityService) list(
+	w http.ResponseWriter,
+	r *http.Request,
+	accountID string,
+	canViewAll bool,
+) {
 	query, err := auditQuery(r, accountID)
 	if err != nil {
 		http.Error(w, "invalid activity query", http.StatusBadRequest)
@@ -151,8 +156,9 @@ func (s *ActivityService) list(w http.ResponseWriter, r *http.Request, accountID
 		nextCursor = encodeAuditCursor(events[len(events)-1])
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"events":      events,
-		"next_cursor": nextCursor,
+		"events":       events,
+		"next_cursor":  nextCursor,
+		"can_view_all": canViewAll,
 	})
 }
 
