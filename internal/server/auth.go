@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/mail"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -97,6 +98,7 @@ type AuthService struct {
 	opaque  *opaque.Server
 	config  *opaque.Configuration
 	store   AuthStore
+	limiter *LoginLimiter
 	mu      sync.Mutex
 	pending map[string]pendingLogin
 }
@@ -107,6 +109,7 @@ type pendingLogin struct {
 	sessionSecret []byte
 	host          string
 	sourceIP      string
+	rateAccount   string
 	expiresAt     time.Time
 }
 
@@ -117,6 +120,7 @@ func NewAuthService(opaqueServer *opaque.Server, store AuthStore) *AuthService {
 		opaque:  opaqueServer,
 		config:  opaque.DefaultConfiguration(),
 		store:   store,
+		limiter: NewLoginLimiter(time.Now),
 		pending: make(map[string]pendingLogin),
 	}
 }
@@ -407,11 +411,19 @@ func (a *AuthService) startLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid login request", http.StatusBadRequest)
 		return
 	}
-	loginID, response, err := a.beginLogin(r.Context(), email, encoded, host, requestClientIP(r))
+	sourceIP := requestClientIP(r)
+	if retry := a.limiter.RetryAfter(email, sourceIP); retry > 0 {
+		seconds := (retry + time.Second - 1) / time.Second
+		w.Header().Set("Retry-After", strconv.FormatInt(int64(seconds), 10))
+		http.Error(w, "login temporarily delayed", http.StatusTooManyRequests)
+		return
+	}
+	loginID, response, err := a.beginLogin(r.Context(), email, encoded, host, sourceIP)
 	if err != nil {
 		http.Error(w, "invalid login request", http.StatusBadRequest)
 		return
 	}
+	a.limiter.RecordFailure(email, sourceIP)
 	writeJSON(w, http.StatusOK, loginStartResponse{
 		LoginID: loginID,
 		KE2:     base64.RawStdEncoding.EncodeToString(response),
@@ -433,6 +445,7 @@ func (a *AuthService) finishLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid login", http.StatusUnauthorized)
 		return
 	}
+	a.limiter.Reset(login.rateAccount, login.sourceIP)
 	token, err := a.issueAccessToken(r.Context(), login.account, login.host, login.sourceIP)
 	if err != nil {
 		http.Error(w, "login unavailable", http.StatusServiceUnavailable)
@@ -540,6 +553,7 @@ func (a *AuthService) beginLogin(ctx context.Context, email string, encodedKE1 [
 		sessionSecret: output.SessionSecret,
 		host:          host,
 		sourceIP:      sourceIP,
+		rateAccount:   email,
 		expiresAt:     time.Now().Add(5 * time.Minute),
 	}
 	a.mu.Unlock()
