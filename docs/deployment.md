@@ -93,6 +93,12 @@ docker compose -f deploy/compose.yml down -v          # stop, DELETE data
 
 Stack upgrades run pending migrations automatically at server boot.
 
+Migration 6 adds `vault_items`. Its server-visible columns are limited to the
+owning account UUID, item UUID, schema version, revision, opaque envelope, and
+timestamps. Login fields are never separate columns or indexes. Revision 1
+creates an item; later writes must advance exactly one revision or receive
+HTTP 409.
+
 ## Testing
 
 ```sh

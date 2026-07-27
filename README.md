@@ -64,6 +64,31 @@ credentials, disables core dumps, and memory-locks and clears key material on
 a best-effort basis. These measures do not protect against root or a
 compromised client host.
 
+## Login items
+
+An unlocked online vault lists Login names and usernames. Use `j`/`k` to
+select an item and `enter` to open it. Passwords are masked by default; press
+`p` in the detail view to reveal or hide the selected password.
+
+Press `c` in the vault to create a Login or `e` on an existing Login to edit
+it. The form captures name, username, password, comma-separated URLs, notes,
+and comma-separated custom fields in `name=value` form. `enter` advances
+through the fields and saves the final field. A successful edit writes the
+next item revision; concurrent duplicate saves are ignored while the first
+save is running.
+
+Login content is serialized and encrypted on the client with
+XChaCha20-Poly1305. Each item UUID gets a derived key and each encryption gets
+a random nonce. Account UUID, item UUID, schema version, and revision are
+authenticated as associated data. The vault key remains in the per-terminal
+session agent; its local IPC exposes only seal/open operations.
+
+The server stores and returns the opaque envelope plus account ownership,
+item UUID, schema version, and revision. It cannot inspect or index Login
+names, usernames, passwords, URLs, notes, or custom fields. This first item
+flow requires an online unlocked session; offline mutation queues and
+reconciliation are implemented by the later synchronization work.
+
 ## Activity audit
 
 Press `a` from the unlocked vault to open Activity. Ordinary accounts see
