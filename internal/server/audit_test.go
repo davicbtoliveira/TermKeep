@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -264,6 +265,290 @@ func TestActivityAutomaticallyDeletesExpiredEvents(t *testing.T) {
 	if len(auditStore.events) != 1 {
 		t.Fatalf("expired activity remained stored: %+v", auditStore.events)
 	}
+}
+
+func TestSuccessfulLoginAuditsLoginAndSessionCreation(t *testing.T) {
+	store := &memoryBootstrapStore{}
+	auditStore := &memoryAuditStore{}
+	audit := NewAuditLog(auditStore, defaultAuditRetention)
+	auth := newTestAuthService(t, store)
+	auth.audit = audit
+	activity := NewActivityService(audit, auth)
+	handler := NewHandler("test", stubSchema{version: 1}, nil, auth, activity)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	password := []byte("TermKeep#2026")
+	mustBootstrap(t, server, "admin@example.com", password)
+	token := mustLogin(t, server, "admin@example.com", password)
+
+	response := getJSONWithAuth(t, server.URL+"/api/v1/activity", token)
+	var body struct {
+		Events []AuditEvent `json:"events"`
+	}
+	decodeJSON(t, response, &body)
+	eventTypes := make(map[string]AuditEvent)
+	for _, event := range body.Events {
+		eventTypes[event.Type] = event
+	}
+	login, ok := eventTypes["login.succeeded"]
+	if !ok || login.AccountID != store.account.AccountID ||
+		login.ActorID != store.account.AccountID {
+		t.Fatalf("login success event missing or incomplete: %+v", body.Events)
+	}
+	session, ok := eventTypes["session.created"]
+	if !ok || session.SessionID == "" ||
+		session.AccountID != store.account.AccountID {
+		t.Fatalf("session creation event missing or incomplete: %+v", body.Events)
+	}
+}
+
+func TestFailedLoginIsVisibleInAccountActivity(t *testing.T) {
+	store := &memoryBootstrapStore{}
+	auditStore := &memoryAuditStore{}
+	audit := NewAuditLog(auditStore, defaultAuditRetention)
+	auth := newTestAuthService(t, store)
+	auth.audit = audit
+	activity := NewActivityService(audit, auth)
+	handler := NewHandler("test", stubSchema{version: 1}, nil, auth, activity)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	password := []byte("TermKeep#2026")
+	mustBootstrap(t, server, "admin@example.com", password)
+	start := startLoginAttempt(t, server, "admin@example.com", password)
+	var startBody struct {
+		LoginID string `json:"login_id"`
+	}
+	decodeJSON(t, start, &startBody)
+	failed := postJSON(t, server.URL+"/api/v1/login/finish", map[string]string{
+		"login_id": startBody.LoginID,
+		"ke3":      base64.RawStdEncoding.EncodeToString([]byte("invalid KE3")),
+	})
+	failed.Body.Close()
+	if failed.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("failed login status: want 401, got %d", failed.StatusCode)
+	}
+
+	token := mustLogin(t, server, "admin@example.com", password)
+	response := getJSONWithAuth(t, server.URL+"/api/v1/activity", token)
+	var body struct {
+		Events []AuditEvent `json:"events"`
+	}
+	decodeJSON(t, response, &body)
+	for _, event := range body.Events {
+		if event.Type == "login.failed" &&
+			event.AccountID == store.account.AccountID &&
+			event.ActorID == "" {
+			return
+		}
+	}
+	t.Fatalf("login failure event missing: %+v", body.Events)
+}
+
+func TestThrottledLoginIsVisibleInAccountActivity(t *testing.T) {
+	store := &memoryBootstrapStore{}
+	auditStore := &memoryAuditStore{}
+	audit := NewAuditLog(auditStore, defaultAuditRetention)
+	auth := newTestAuthService(t, store)
+	auth.audit = audit
+	activity := NewActivityService(audit, auth)
+	handler := NewHandler("test", stubSchema{version: 1}, nil, auth, activity)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	password := []byte("TermKeep#2026")
+	mustBootstrap(t, server, "admin@example.com", password)
+	token := mustLogin(t, server, "admin@example.com", password)
+	for range 5 {
+		response := startLoginAttempt(t, server, "admin@example.com", password)
+		response.Body.Close()
+	}
+	throttled := startLoginAttempt(t, server, "admin@example.com", password)
+	throttled.Body.Close()
+	if throttled.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("throttled login status: want 429, got %d", throttled.StatusCode)
+	}
+
+	response := getJSONWithAuth(t, server.URL+"/api/v1/activity", token)
+	var body struct {
+		Events []AuditEvent `json:"events"`
+	}
+	decodeJSON(t, response, &body)
+	for _, event := range body.Events {
+		if event.Type == "login.throttled" &&
+			event.AccountID == store.account.AccountID &&
+			event.SourceIP == "127.0.0.1" {
+			return
+		}
+	}
+	t.Fatalf("login throttling event missing: %+v", body.Events)
+}
+
+func TestInviteCreationIsVisibleInAdministratorActivity(t *testing.T) {
+	store := &memoryBootstrapStore{}
+	auditStore := &memoryAuditStore{}
+	audit := NewAuditLog(auditStore, defaultAuditRetention)
+	auth := newTestAuthService(t, store)
+	auth.audit = audit
+	invites := NewInviteService(store, auth)
+	invites.audit = audit
+	activity := NewActivityService(audit, auth)
+	handler := NewHandler("test", stubSchema{version: 1}, nil, auth, invites, activity)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	password := []byte("TermKeep#2026")
+	mustBootstrap(t, server, "admin@example.com", password)
+	token := mustLogin(t, server, "admin@example.com", password)
+	invite := mustCreateInvite(t, server, token, "friend@example.com")
+
+	response := getJSONWithAuth(t, server.URL+"/api/v1/admin/activity", token)
+	var body struct {
+		Events []AuditEvent `json:"events"`
+	}
+	decodeJSON(t, response, &body)
+	for _, event := range body.Events {
+		if event.Type == "invite.created" &&
+			event.ActorID == store.account.AccountID &&
+			event.InviteID == invite.InviteID {
+			return
+		}
+	}
+	t.Fatalf("invite creation event missing: %+v", body.Events)
+}
+
+func TestInvitedRegistrationIsVisibleInNewAccountActivity(t *testing.T) {
+	store := &memoryBootstrapStore{}
+	auditStore := &memoryAuditStore{}
+	audit := NewAuditLog(auditStore, defaultAuditRetention)
+	auth := newTestAuthService(t, store)
+	auth.audit = audit
+	invites := NewInviteService(store, auth, audit)
+	activity := NewActivityService(audit, auth)
+	handler := NewHandler("test", stubSchema{version: 1}, nil, auth, invites, activity)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	adminPassword := []byte("TermKeep#2026")
+	userPassword := []byte("Friend#Pass2026")
+	mustBootstrap(t, server, "admin@example.com", adminPassword)
+	adminToken := mustLogin(t, server, "admin@example.com", adminPassword)
+	invite := mustCreateInvite(t, server, adminToken, "friend@example.com")
+	mustRegister(t, server, "friend@example.com", userPassword, invite.Token)
+	userToken := mustLogin(t, server, "friend@example.com", userPassword)
+	user := store.accounts["friend@example.com"]
+
+	response := getJSONWithAuth(t, server.URL+"/api/v1/activity", userToken)
+	var body struct {
+		Events []AuditEvent `json:"events"`
+	}
+	decodeJSON(t, response, &body)
+	for _, event := range body.Events {
+		if event.Type == "registration.succeeded" &&
+			event.AccountID == user.AccountID &&
+			event.ActorID == user.AccountID {
+			return
+		}
+	}
+	t.Fatalf("registration event missing: %+v", body.Events)
+}
+
+func TestInviteRevocationIsVisibleInAdministratorActivity(t *testing.T) {
+	store := &memoryBootstrapStore{}
+	auditStore := &memoryAuditStore{}
+	audit := NewAuditLog(auditStore, defaultAuditRetention)
+	auth := newTestAuthService(t, store)
+	auth.audit = audit
+	invites := NewInviteService(store, auth, audit)
+	activity := NewActivityService(audit, auth)
+	handler := NewHandler("test", stubSchema{version: 1}, nil, auth, invites, activity)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	password := []byte("TermKeep#2026")
+	mustBootstrap(t, server, "admin@example.com", password)
+	token := mustLogin(t, server, "admin@example.com", password)
+	invite := mustCreateInvite(t, server, token, "friend@example.com")
+	revoke := postJSONWithAuth(t,
+		server.URL+"/api/v1/invites/"+invite.InviteID+"/revoke", nil, token)
+	revoke.Body.Close()
+	if revoke.StatusCode != http.StatusNoContent {
+		t.Fatalf("revoke invite status: want 204, got %d", revoke.StatusCode)
+	}
+
+	response := getJSONWithAuth(t, server.URL+"/api/v1/admin/activity", token)
+	var body struct {
+		Events []AuditEvent `json:"events"`
+	}
+	decodeJSON(t, response, &body)
+	for _, event := range body.Events {
+		if event.Type == "invite.revoked" &&
+			event.ActorID == store.account.AccountID &&
+			event.InviteID == invite.InviteID {
+			return
+		}
+	}
+	t.Fatalf("invite revocation event missing: %+v", body.Events)
+}
+
+func TestSessionRevocationIsVisibleInAccountActivity(t *testing.T) {
+	store := &memoryBootstrapStore{}
+	auditStore := &memoryAuditStore{}
+	audit := NewAuditLog(auditStore, defaultAuditRetention)
+	auth := newTestAuthService(t, store)
+	auth.audit = audit
+	sessions := NewSessionService(store, auth)
+	sessions.audit = audit
+	activity := NewActivityService(audit, auth)
+	handler := NewHandler("test", stubSchema{version: 1}, nil, auth, sessions, activity)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	password := []byte("TermKeep#2026")
+	mustBootstrap(t, server, "admin@example.com", password)
+	mustLoginResponseFromHost(t, server, "admin@example.com", password, "remote")
+	current := mustLoginResponseFromHost(t, server, "admin@example.com", password, "current")
+
+	listResponse := getJSONWithAuth(t, server.URL+"/api/v1/sessions", current.AccessToken)
+	var list struct {
+		Sessions []OnlineSession `json:"sessions"`
+	}
+	decodeJSON(t, listResponse, &list)
+	var remoteID string
+	for _, session := range list.Sessions {
+		if session.Host == "remote" {
+			remoteID = session.SessionID
+		}
+	}
+	request, err := http.NewRequest(
+		http.MethodDelete, server.URL+"/api/v1/sessions/"+remoteID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+current.AccessToken)
+	revoke, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revoke.Body.Close()
+	if revoke.StatusCode != http.StatusNoContent {
+		t.Fatalf("revoke session status: want 204, got %d", revoke.StatusCode)
+	}
+
+	response := getJSONWithAuth(t, server.URL+"/api/v1/activity", current.AccessToken)
+	var body struct {
+		Events []AuditEvent `json:"events"`
+	}
+	decodeJSON(t, response, &body)
+	for _, event := range body.Events {
+		if event.Type == "session.revoked" &&
+			event.ActorID == store.account.AccountID &&
+			event.SessionID == remoteID {
+			return
+		}
+	}
+	t.Fatalf("session revocation event missing: %+v", body.Events)
 }
 
 type memoryAuditStore struct {

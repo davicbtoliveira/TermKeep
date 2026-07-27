@@ -99,6 +99,7 @@ type AuthService struct {
 	opaque  *opaque.Server
 	config  *opaque.Configuration
 	store   AuthStore
+	audit   *AuditLog
 	limiter *LoginLimiter
 	mu      sync.Mutex
 	pending map[string]pendingLogin
@@ -116,11 +117,16 @@ type pendingLogin struct {
 
 // NewAuthService configures the OPAQUE server and persistence boundary used by
 // registration and later authentication flows.
-func NewAuthService(opaqueServer *opaque.Server, store AuthStore) *AuthService {
+func NewAuthService(opaqueServer *opaque.Server, store AuthStore, auditLogs ...*AuditLog) *AuthService {
+	var audit *AuditLog
+	if len(auditLogs) > 0 {
+		audit = auditLogs[0]
+	}
 	return &AuthService{
 		opaque:  opaqueServer,
 		config:  opaque.DefaultConfiguration(),
 		store:   store,
+		audit:   audit,
 		limiter: NewLoginLimiter(time.Now),
 		pending: make(map[string]pendingLogin),
 	}
@@ -310,6 +316,7 @@ func (a *AuthService) finishRegistration(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "invalid registration request", http.StatusBadRequest)
 		return
 	}
+	now := time.Now()
 	err = a.store.CreateInvitedAccount(r.Context(), tokenHash, BootstrapAccount{
 		AccountID:             request.AccountID,
 		Email:                 email,
@@ -317,11 +324,18 @@ func (a *AuthService) finishRegistration(w http.ResponseWriter, r *http.Request)
 		OpaqueRecord:          registrationRecord.Serialize(),
 		PasswordVaultEnvelope: passwordEnvelope,
 		RecoveryVaultEnvelope: recoveryEnvelope,
-	}, time.Now())
+	}, now)
 	if err != nil {
 		writeRegistrationError(w, err)
 		return
 	}
+	recordAudit(r.Context(), a.audit, AuditEvent{
+		Type:       "registration.succeeded",
+		AccountID:  request.AccountID,
+		ActorID:    request.AccountID,
+		SourceIP:   requestClientIP(r),
+		OccurredAt: now,
+	})
 	w.WriteHeader(http.StatusCreated)
 }
 
@@ -414,6 +428,15 @@ func (a *AuthService) startLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	sourceIP := requestClientIP(r)
 	if retry := a.limiter.RetryAfter(email, sourceIP); retry > 0 {
+		var accountID string
+		if account, err := a.store.FindAccount(r.Context(), email); err == nil {
+			accountID = account.AccountID
+		}
+		recordAudit(r.Context(), a.audit, AuditEvent{
+			Type:      "login.throttled",
+			AccountID: accountID,
+			SourceIP:  sourceIP,
+		})
 		seconds := (retry + time.Second - 1) / time.Second
 		w.Header().Set("Retry-After", strconv.FormatInt(int64(seconds), 10))
 		http.Error(w, "login temporarily delayed", http.StatusTooManyRequests)
@@ -455,6 +478,15 @@ func (a *AuthService) finishLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	login, err := a.completeLogin(request.LoginID, encoded)
 	if err != nil {
+		var accountID string
+		if login.account != nil {
+			accountID = login.account.AccountID
+		}
+		recordAudit(r.Context(), a.audit, AuditEvent{
+			Type:      "login.failed",
+			AccountID: accountID,
+			SourceIP:  login.sourceIP,
+		})
 		http.Error(w, "invalid login", http.StatusUnauthorized)
 		return
 	}
@@ -498,6 +530,22 @@ func (a *AuthService) issueAccessToken(ctx context.Context, account *StoredAccou
 	if err := a.store.CreateAccessToken(ctx, stored); err != nil {
 		return "", fmt.Errorf("store access token: %w", err)
 	}
+	recordAudit(ctx, a.audit, AuditEvent{
+		Type:       "login.succeeded",
+		AccountID:  account.AccountID,
+		ActorID:    account.AccountID,
+		SessionID:  sessionID,
+		SourceIP:   sourceIP,
+		OccurredAt: now,
+	})
+	recordAudit(ctx, a.audit, AuditEvent{
+		Type:       "session.created",
+		AccountID:  account.AccountID,
+		ActorID:    account.AccountID,
+		SessionID:  sessionID,
+		SourceIP:   sourceIP,
+		OccurredAt: now,
+	})
 	return token, nil
 }
 
@@ -579,16 +627,16 @@ func (a *AuthService) completeLogin(loginID string, encodedKE3 []byte) (pendingL
 	delete(a.pending, loginID)
 	a.mu.Unlock()
 	if !ok || time.Now().After(pending.expiresAt) {
-		return pendingLogin{}, errInvalidLogin
+		return pending, errInvalidLogin
 	}
 	defer clearBytes(pending.clientMAC)
 	defer clearBytes(pending.sessionSecret)
 	ke3, err := a.opaque.Deserialize.KE3(encodedKE3)
 	if err != nil {
-		return pendingLogin{}, errInvalidLogin
+		return pending, errInvalidLogin
 	}
 	if err := a.opaque.LoginFinish(ke3, pending.clientMAC); err != nil || pending.account == nil {
-		return pendingLogin{}, errInvalidLogin
+		return pending, errInvalidLogin
 	}
 	return pending, nil
 }

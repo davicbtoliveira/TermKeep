@@ -83,10 +83,10 @@ func run() error {
 
 	dbStore := server.DBStore{DB: db}
 	audit := server.NewAuditLog(dbStore, auditRetention)
-	auth := server.NewAuthService(opaqueServer, dbStore)
-	invites := server.NewInviteService(dbStore, auth)
+	auth := server.NewAuthService(opaqueServer, dbStore, audit)
+	invites := server.NewInviteService(dbStore, auth, audit)
 	accounts := server.NewAccountService(dbStore, auth)
-	sessions := server.NewSessionService(dbStore, auth)
+	sessions := server.NewSessionService(dbStore, auth, audit)
 	activity := server.NewActivityService(audit, auth)
 	srv := &http.Server{
 		Addr:              addr,

@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -34,6 +35,7 @@ type AuditQuery struct {
 }
 
 type AuditStore interface {
+	CreateAuditEvent(ctx context.Context, event AuditEvent) error
 	ListAuditEvents(ctx context.Context, query AuditQuery) ([]AuditEvent, error)
 	DeleteAuditEventsBefore(ctx context.Context, cutoff time.Time) error
 }
@@ -69,6 +71,35 @@ func (l *AuditLog) list(ctx context.Context, query AuditQuery) ([]AuditEvent, er
 		return nil, err
 	}
 	return l.store.ListAuditEvents(ctx, query)
+}
+
+func (l *AuditLog) Record(ctx context.Context, event AuditEvent) error {
+	if event.Type == "" {
+		return errors.New("audit event type is required")
+	}
+	if event.EventID == "" {
+		eventID, err := newAccountID()
+		if err != nil {
+			return err
+		}
+		event.EventID = eventID
+	}
+	if event.OccurredAt.IsZero() {
+		event.OccurredAt = l.now()
+	}
+	if err := l.store.DeleteAuditEventsBefore(ctx, l.now().Add(-l.retention)); err != nil {
+		return err
+	}
+	return l.store.CreateAuditEvent(ctx, event)
+}
+
+func recordAudit(ctx context.Context, audit *AuditLog, event AuditEvent) {
+	if audit == nil {
+		return
+	}
+	if err := audit.Record(ctx, event); err != nil {
+		slog.Error("record audit event", "event_type", event.Type, "error", err)
+	}
 }
 
 type ActivityService struct {

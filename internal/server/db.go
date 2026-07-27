@@ -436,6 +436,29 @@ func (s DBStore) ListAuditEvents(ctx context.Context, query AuditQuery) ([]Audit
 	return events, nil
 }
 
+// CreateAuditEvent persists fixed operational metadata only.
+func (s DBStore) CreateAuditEvent(ctx context.Context, event AuditEvent) error {
+	nullableUUID := func(value string) any {
+		if value == "" {
+			return nil
+		}
+		return value
+	}
+	_, err := s.DB.ExecContext(ctx, `
+		INSERT INTO audit_events (
+			uuid, event_type, account_uuid, actor_uuid, session_uuid,
+			invite_uuid, source_ip, occurred_at
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		event.EventID, event.Type, nullableUUID(event.AccountID),
+		nullableUUID(event.ActorID), nullableUUID(event.SessionID),
+		nullableUUID(event.InviteID), event.SourceIP, event.OccurredAt)
+	if err != nil {
+		return fmt.Errorf("create audit event: %w", err)
+	}
+	return nil
+}
+
 // DeleteAuditEventsBefore enforces configured retention without exposing
 // event contents to application logs.
 func (s DBStore) DeleteAuditEventsBefore(ctx context.Context, cutoff time.Time) error {

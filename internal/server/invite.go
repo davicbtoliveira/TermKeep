@@ -59,12 +59,17 @@ type InviteStore interface {
 type InviteService struct {
 	store InviteStore
 	auth  *AuthService
+	audit *AuditLog
 }
 
 // NewInviteService wires invitation persistence to the administrator
 // authentication provided by the auth service.
-func NewInviteService(store InviteStore, auth *AuthService) *InviteService {
-	return &InviteService{store: store, auth: auth}
+func NewInviteService(store InviteStore, auth *AuthService, auditLogs ...*AuditLog) *InviteService {
+	var audit *AuditLog
+	if len(auditLogs) > 0 {
+		audit = auditLogs[0]
+	}
+	return &InviteService{store: store, auth: auth, audit: audit}
 }
 
 func (s *InviteService) register(mux *http.ServeMux) {
@@ -173,6 +178,14 @@ func (s *InviteService) createInvite(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invite creation failed", http.StatusInternalServerError)
 		return
 	}
+	recordAudit(r.Context(), s.audit, AuditEvent{
+		Type:       "invite.created",
+		AccountID:  token.AccountID,
+		ActorID:    token.AccountID,
+		InviteID:   invite.InviteID,
+		SourceIP:   requestClientIP(r),
+		OccurredAt: now,
+	})
 
 	writeJSON(w, http.StatusCreated, createInviteResponse{
 		InviteID:  invite.InviteID,
@@ -217,7 +230,7 @@ func (s *InviteService) listInvites(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *InviteService) revokeInvite(w http.ResponseWriter, r *http.Request) {
-	_, err := s.authenticateAdmin(r)
+	token, err := s.authenticateAdmin(r)
 	if err != nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -235,5 +248,12 @@ func (s *InviteService) revokeInvite(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to revoke invite", http.StatusInternalServerError)
 		return
 	}
+	recordAudit(r.Context(), s.audit, AuditEvent{
+		Type:      "invite.revoked",
+		AccountID: token.AccountID,
+		ActorID:   token.AccountID,
+		InviteID:  inviteID,
+		SourceIP:  requestClientIP(r),
+	})
 	w.WriteHeader(http.StatusNoContent)
 }

@@ -17,6 +17,7 @@ type SessionStore interface {
 type SessionService struct {
 	store SessionStore
 	auth  *AuthService
+	audit *AuditLog
 }
 
 type OnlineSession struct {
@@ -28,8 +29,12 @@ type OnlineSession struct {
 	Current   bool      `json:"current"`
 }
 
-func NewSessionService(store SessionStore, auth *AuthService) *SessionService {
-	return &SessionService{store: store, auth: auth}
+func NewSessionService(store SessionStore, auth *AuthService, auditLogs ...*AuditLog) *SessionService {
+	var audit *AuditLog
+	if len(auditLogs) > 0 {
+		audit = auditLogs[0]
+	}
+	return &SessionService{store: store, auth: auth, audit: audit}
 }
 
 func (s *SessionService) register(mux *http.ServeMux) {
@@ -55,6 +60,13 @@ func (s *SessionService) revoke(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to revoke session", http.StatusInternalServerError)
 		return
 	}
+	recordAudit(r.Context(), s.audit, AuditEvent{
+		Type:      "session.revoked",
+		AccountID: current.AccountID,
+		ActorID:   current.AccountID,
+		SessionID: sessionID,
+		SourceIP:  requestClientIP(r),
+	})
 	w.WriteHeader(http.StatusNoContent)
 }
 
