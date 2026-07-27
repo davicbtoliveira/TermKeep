@@ -74,6 +74,8 @@ func TestBlackbox(t *testing.T) {
 	t.Run("Active Sessions shows online session metadata", s.testActiveSessionsScreen)
 	t.Run("Active Sessions revokes a remote session", s.testActiveSessionsRevoke)
 	t.Run("invited user registers an isolated vault", s.testInvitedRegistration)
+	t.Run("Activity separates user and administrator views", s.testActivityViews)
+	t.Run("audit persistence and logs exclude secrets", s.testAuditExcludesSecrets)
 	t.Run("expired invitation cannot register", s.testExpiredInvitation)
 	t.Run("concurrent invitation consumption registers once", s.testConcurrentInvitationConsumption)
 }
@@ -183,8 +185,8 @@ func (s *stack) testMigrationsApplied(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query schema_migrations: %v\n%s", err, out)
 	}
-	if strings.TrimSpace(string(out)) != "4" {
-		t.Errorf("schema version: want 4, got %q", strings.TrimSpace(string(out)))
+	if strings.TrimSpace(string(out)) != "5" {
+		t.Errorf("schema version: want 5, got %q", strings.TrimSpace(string(out)))
 	}
 
 	cmd = s.composeCmd(context.Background(),
@@ -209,7 +211,7 @@ func (s *stack) testStatusHealthy(t *testing.T) {
 	if !strings.Contains(stdout, "Status:   healthy") {
 		t.Errorf("stdout missing healthy state:\n%s", stdout)
 	}
-	if !strings.Contains(stdout, "schema v4") {
+	if !strings.Contains(stdout, "schema v5") {
 		t.Errorf("stdout missing schema version:\n%s", stdout)
 	}
 }
@@ -746,6 +748,202 @@ func (s *stack) testInvitedRegistration(t *testing.T) {
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("non-administrator account list status: want 401, got %d", response.StatusCode)
+	}
+}
+
+func (s *stack) testActivityViews(t *testing.T) {
+	const (
+		adminEmail    = "admin@example.com"
+		adminPassword = "TermKeep#2026"
+		userEmail     = "friend@example.com"
+		userPassword  = "Friend#Pass2026"
+	)
+	admin, err := client.Login(context.Background(), s.clientConfig(), client.LoginInput{
+		Email:          adminEmail,
+		MasterPassword: adminPassword,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Clear()
+	user, err := client.Login(context.Background(), s.clientConfig(), client.LoginInput{
+		Email:          userEmail,
+		MasterPassword: userPassword,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer user.Clear()
+
+	own, err := client.ListActivity(
+		context.Background(), s.clientConfig(), user.AccessToken, false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(own.Events) == 0 || own.CanViewAll {
+		t.Fatalf("ordinary account activity metadata: %+v", own)
+	}
+	for _, event := range own.Events {
+		if event.AccountID != user.AccountID {
+			t.Fatalf("ordinary account read cross-account event: %+v", event)
+		}
+	}
+	if _, err := client.ListActivity(
+		context.Background(), s.clientConfig(), user.AccessToken, true, ""); err == nil {
+		t.Fatal("ordinary account read administrative activity")
+	}
+
+	all, err := client.ListActivity(
+		context.Background(), s.clientConfig(), admin.AccessToken, true, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawUserRegistration, sawAdminActor bool
+	for _, event := range all.Events {
+		if event.Type == "registration.succeeded" &&
+			event.AccountID == user.AccountID &&
+			event.ActorID == user.AccountID {
+			sawUserRegistration = true
+		}
+		if event.ActorID == admin.AccountID {
+			sawAdminActor = true
+		}
+	}
+	if !all.CanViewAll || !sawUserRegistration || !sawAdminActor {
+		t.Fatalf("administrator activity incomplete: %+v", all)
+	}
+
+	loginCommand := fmt.Sprintf("%q --server %q --ca-cert %q login --email %q\n",
+		s.binary, s.serverURL, filepath.Join(s.certsDir, "ca.pem"), userEmail)
+	userShell := s.startTerminalShell(t)
+	userShell.clear()
+	write(t, userShell.ptmx, loginCommand)
+	userShell.waitFor(30*time.Second, "Master password:")
+	write(t, userShell.ptmx, userPassword+"\n")
+	userShell.waitFor(45*time.Second, "Vault:    unlocked (empty)")
+	userShell.clear()
+	write(t, userShell.ptmx, "a")
+	_, output := userShell.waitFor(30*time.Second, "login.succeeded")
+	for _, want := range []string{"Activity", "my account", "Actor:", "Source:"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("user Activity missing %q:\n%s", want, output)
+		}
+	}
+	if strings.Contains(output, "[g] all accounts") {
+		t.Fatalf("ordinary account Activity exposed global control:\n%s", output)
+	}
+	write(t, userShell.ptmx, "q")
+	userShell.waitFor(10*time.Second, terminalShellPrompt)
+
+	adminCommand := fmt.Sprintf("%q --server %q --ca-cert %q login --email %q\n",
+		s.binary, s.serverURL, filepath.Join(s.certsDir, "ca.pem"), adminEmail)
+	adminShell := s.startTerminalShell(t)
+	adminShell.clear()
+	write(t, adminShell.ptmx, adminCommand)
+	adminShell.waitFor(30*time.Second, "Master password:")
+	write(t, adminShell.ptmx, adminPassword+"\n")
+	adminShell.waitFor(45*time.Second, "Vault:    unlocked (empty)")
+	adminShell.clear()
+	write(t, adminShell.ptmx, "a")
+	adminShell.waitFor(30*time.Second, "[g] all accounts")
+	adminShell.clear()
+	write(t, adminShell.ptmx, "g")
+	_, output = adminShell.waitFor(30*time.Second, "all accounts")
+	for _, want := range []string{"Account:", "Actor:"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("administrator Activity missing %q:\n%s", want, output)
+		}
+	}
+	write(t, adminShell.ptmx, "q")
+	adminShell.waitFor(10*time.Second, terminalShellPrompt)
+}
+
+func (s *stack) testAuditExcludesSecrets(t *testing.T) {
+	const (
+		adminEmail    = "admin@example.com"
+		adminPassword = "TermKeep#2026"
+	)
+	admin, err := client.Login(context.Background(), s.clientConfig(), client.LoginInput{
+		Email:          adminEmail,
+		MasterPassword: adminPassword,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Clear()
+	invite := s.createInvite(t, admin.AccessToken, "audit-probe@example.com")
+
+	forbiddenInput := map[string]string{
+		"email":           "another@example.com",
+		"master_password": "Master-Field-Sentinel",
+		"recovery_key":    "Recovery-Key-Sentinel",
+		"item_content":    "Item-Content-Sentinel",
+		"search_term":     "Search-Term-Sentinel",
+		"totp":            "TOTP-Sentinel",
+	}
+	payload, err := json.Marshal(forbiddenInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequest(
+		http.MethodPost, s.serverURL+"/api/v1/invites", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+admin.AccessToken)
+	request.Header.Set("Content-Type", "application/json")
+	httpClient := &http.Client{Transport: &http.Transport{
+		TLSClientConfig: tlsConfigWithCA(t, filepath.Join(s.certsDir, "ca.pem")),
+	}}
+	response, err := httpClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("secret-bearing unknown fields: want 400, got %d", response.StatusCode)
+	}
+
+	activity, err := client.ListActivity(
+		context.Background(), s.clientConfig(), admin.AccessToken, true, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiBody, err := json.Marshal(activity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbCommand := s.composeCmd(context.Background(),
+		"exec", "-T", "db", "psql", "-U", "termkeep", "-d", "termkeep", "-tAc",
+		"SELECT COALESCE(string_agg(row_to_json(a)::text, E'\\n'), '') FROM audit_events a")
+	dbBody, err := dbCommand.CombinedOutput()
+	if err != nil {
+		t.Fatalf("read audit events: %v\n%s", err, dbBody)
+	}
+	logBody, err := s.composeCmd(context.Background(), "logs", "server").CombinedOutput()
+	if err != nil {
+		t.Fatalf("read server logs: %v\n%s", err, logBody)
+	}
+	surfaces := map[string][]byte{
+		"API":        apiBody,
+		"PostgreSQL": dbBody,
+		"logs":       logBody,
+	}
+	for _, secret := range []string{
+		adminPassword,
+		admin.AccessToken,
+		invite.Token,
+		"Master-Field-Sentinel",
+		"Recovery-Key-Sentinel",
+		"Item-Content-Sentinel",
+		"Search-Term-Sentinel",
+		"TOTP-Sentinel",
+	} {
+		for surface, contents := range surfaces {
+			if bytes.Contains(contents, []byte(secret)) {
+				t.Fatalf("%s contains forbidden secret %q", surface, secret)
+			}
+		}
 	}
 }
 
