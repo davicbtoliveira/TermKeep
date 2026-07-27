@@ -25,6 +25,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -67,6 +68,7 @@ func TestBlackbox(t *testing.T) {
 	t.Run("login reuses unlocked session in the same terminal", s.testTerminalSessionReuse)
 	t.Run("another terminal requires its own login", s.testTerminalSessionIsolation)
 	t.Run("logout clears the terminal session", s.testTerminalSessionLogout)
+	t.Run("terminal session socket is owner-only", s.testTerminalSessionSocketPermissions)
 	t.Run("ending the shell clears the terminal session", s.testTerminalSessionOwnerExit)
 	t.Run("invited user registers an isolated vault", s.testInvitedRegistration)
 	t.Run("expired invitation cannot register", s.testExpiredInvitation)
@@ -492,6 +494,44 @@ func (s *stack) testTerminalSessionOwnerExit(t *testing.T) {
 		time.Sleep(25 * time.Millisecond)
 	}
 	t.Fatal("session socket remained after owner shell exited")
+}
+
+func (s *stack) testTerminalSessionSocketPermissions(t *testing.T) {
+	const (
+		email    = "admin@example.com"
+		password = "TermKeep#2026"
+	)
+	loginCommand := fmt.Sprintf("%q --server %q --ca-cert %q login --email %q\n",
+		s.binary, s.serverURL, filepath.Join(s.certsDir, "ca.pem"), email)
+	shell := s.startTerminalShell(t)
+	shell.login(loginCommand, password)
+
+	runtimeDir := filepath.Join(shell.runtimeDir, "termkeep")
+	runtimeInfo, err := os.Stat(runtimeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := runtimeInfo.Mode().Perm(); got != 0o700 {
+		t.Fatalf("session runtime directory mode: want 0700, got %04o", got)
+	}
+	sockets, err := filepath.Glob(filepath.Join(runtimeDir, "*.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sockets) != 1 {
+		t.Fatalf("session sockets: want 1, got %d", len(sockets))
+	}
+	socketInfo, err := os.Stat(sockets[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := socketInfo.Mode().Perm(); got != 0o600 {
+		t.Fatalf("session socket mode: want 0600, got %04o", got)
+	}
+	stat, ok := socketInfo.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != uint32(os.Getuid()) {
+		t.Fatalf("session socket is not owned by UID %d", os.Getuid())
+	}
 }
 
 func (s *stack) testInvitedRegistration(t *testing.T) {
