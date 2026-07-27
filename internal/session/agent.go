@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/davicbtoliveira/TermKeep/internal/client"
 	"golang.org/x/sys/unix"
 )
 
@@ -53,13 +54,18 @@ type Agent struct {
 }
 
 type request struct {
-	Action string `json:"action"`
+	Action   string                `json:"action"`
+	Login    *client.LoginItem     `json:"login,omitempty"`
+	Item     *client.EncryptedItem `json:"item,omitempty"`
+	Revision uint64                `json:"revision,omitempty"`
 }
 
 type response struct {
-	Info  *Info  `json:"info,omitempty"`
-	Token []byte `json:"token,omitempty"`
-	Error string `json:"error,omitempty"`
+	Info  *Info                 `json:"info,omitempty"`
+	Token []byte                `json:"token,omitempty"`
+	Item  *client.EncryptedItem `json:"item,omitempty"`
+	Login *client.LoginItem     `json:"login,omitempty"`
+	Error string                `json:"error,omitempty"`
 }
 
 // NewAgent binds a terminal session socket and takes an in-memory copy of the
@@ -198,6 +204,29 @@ func (a *Agent) handle(conn *net.UnixConn) {
 		_ = a.Close()
 	case "access-token":
 		_ = json.NewEncoder(conn).Encode(response{Token: a.accessToken})
+	case "seal-login":
+		if req.Login == nil {
+			_ = json.NewEncoder(conn).Encode(response{Error: "login is required"})
+			return
+		}
+		item, err := client.EncryptLogin(
+			a.vaultKey, a.accountID, *req.Login, req.Revision)
+		if err != nil {
+			_ = json.NewEncoder(conn).Encode(response{Error: err.Error()})
+			return
+		}
+		_ = json.NewEncoder(conn).Encode(response{Item: &item})
+	case "open-login":
+		if req.Item == nil {
+			_ = json.NewEncoder(conn).Encode(response{Error: "item is required"})
+			return
+		}
+		login, err := client.DecryptLogin(a.vaultKey, a.accountID, *req.Item)
+		if err != nil {
+			_ = json.NewEncoder(conn).Encode(response{Error: err.Error()})
+			return
+		}
+		_ = json.NewEncoder(conn).Encode(response{Login: &login})
 	default:
 		_ = json.NewEncoder(conn).Encode(response{Error: "unknown session action"})
 	}
@@ -317,6 +346,67 @@ func AccessToken(ctx context.Context, socketPath string) ([]byte, error) {
 		return nil, errors.New("session agent returned no online token")
 	}
 	return res.Token, nil
+}
+
+func SealLogin(
+	ctx context.Context,
+	socketPath string,
+	login client.LoginItem,
+	revision uint64,
+) (client.EncryptedItem, error) {
+	res, err := requestAgent(ctx, socketPath, request{
+		Action:   "seal-login",
+		Login:    &login,
+		Revision: revision,
+	})
+	if err != nil {
+		return client.EncryptedItem{}, err
+	}
+	if res.Item == nil {
+		return client.EncryptedItem{}, errors.New("session agent returned no encrypted item")
+	}
+	return *res.Item, nil
+}
+
+func OpenLogin(
+	ctx context.Context,
+	socketPath string,
+	item client.EncryptedItem,
+) (client.LoginItem, error) {
+	res, err := requestAgent(ctx, socketPath, request{
+		Action: "open-login",
+		Item:   &item,
+	})
+	if err != nil {
+		return client.LoginItem{}, err
+	}
+	if res.Login == nil {
+		return client.LoginItem{}, errors.New("session agent returned no login")
+	}
+	return *res.Login, nil
+}
+
+func requestAgent(ctx context.Context, socketPath string, req request) (response, error) {
+	var dialer net.Dialer
+	conn, err := dialer.DialContext(ctx, "unix", socketPath)
+	if err != nil {
+		return response{}, fmt.Errorf("connect to session agent: %w", err)
+	}
+	defer conn.Close()
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	}
+	if err := json.NewEncoder(conn).Encode(req); err != nil {
+		return response{}, fmt.Errorf("request session operation: %w", err)
+	}
+	var res response
+	if err := json.NewDecoder(conn).Decode(&res); err != nil {
+		return response{}, fmt.Errorf("read session operation: %w", err)
+	}
+	if res.Error != "" {
+		return response{}, errors.New(res.Error)
+	}
+	return res, nil
 }
 
 // Logout clears unlocked material and ends the terminal session.
