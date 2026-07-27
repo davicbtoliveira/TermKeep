@@ -16,6 +16,7 @@ import (
 type LoginInput struct {
 	Email          string
 	MasterPassword string
+	Host           string
 }
 
 // LoginResult contains an unlocked vault key held only by the caller.
@@ -75,6 +76,7 @@ func Login(ctx context.Context, cfg Config, input LoginInput) (*LoginResult, err
 	if err := postBootstrap(ctx, httpClient, cfg.ServerURL, "/api/v1/login/start", map[string]string{
 		"email": email,
 		"ke1":   base64.RawStdEncoding.EncodeToString(ke1.Serialize()),
+		"host":  input.Host,
 	}, http.StatusOK, &start); err != nil {
 		return nil, err
 	}

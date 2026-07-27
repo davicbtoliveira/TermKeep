@@ -43,7 +43,11 @@ func (s *SessionService) revoke(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if err := s.store.RevokeSession(r.Context(), current.AccountID, r.PathValue("id"), time.Now()); err != nil {
+	sessionID := r.PathValue("id")
+	if sessionID == "current" {
+		sessionID = current.SessionID
+	}
+	if err := s.store.RevokeSession(r.Context(), current.AccountID, sessionID, time.Now()); err != nil {
 		if errors.Is(err, ErrSessionNotFound) {
 			http.Error(w, "session not found", http.StatusNotFound)
 			return

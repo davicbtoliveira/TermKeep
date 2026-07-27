@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/davicbtoliveira/TermKeep/internal/client"
 )
 
 type UnlockMaterial struct {
@@ -21,6 +23,8 @@ type UnlockMaterial struct {
 	Email       string `json:"email"`
 	VaultKey    []byte `json:"vault_key"`
 	AccessToken []byte `json:"access_token"`
+	ServerURL   string `json:"server_url"`
+	CACertFile  string `json:"ca_cert_file"`
 }
 
 // Launch starts the per-terminal agent and transfers unlocked material
@@ -132,7 +136,7 @@ func RunAgentProcess(args []string, startup *os.File) error {
 	defer clearBytes(material.VaultKey)
 	defer clearBytes(material.AccessToken)
 
-	agent, err := NewAgent(AgentConfig{
+	agentConfig := AgentConfig{
 		SocketPath:  args[0],
 		OwnerUID:    uint32(os.Getuid()),
 		OwnerPID:    ownerPID,
@@ -141,7 +145,14 @@ func RunAgentProcess(args []string, startup *os.File) error {
 		VaultKey:    material.VaultKey,
 		AccessToken: material.AccessToken,
 		AutoLock:    time.Duration(autoLockValue),
-	})
+	}
+	if material.ServerURL != "" {
+		cfg := client.Config{ServerURL: material.ServerURL, CACertFile: material.CACertFile}
+		agentConfig.RevokeOnline = func(ctx context.Context, token []byte) error {
+			return client.RevokeSession(ctx, cfg, string(token), "current")
+		}
+	}
+	agent, err := NewAgent(agentConfig)
 	if err != nil {
 		return err
 	}

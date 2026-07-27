@@ -15,14 +15,15 @@ import (
 )
 
 type AgentConfig struct {
-	SocketPath  string
-	OwnerUID    uint32
-	OwnerPID    int
-	AccountID   string
-	Email       string
-	VaultKey    []byte
-	AccessToken []byte
-	AutoLock    time.Duration
+	SocketPath   string
+	OwnerUID     uint32
+	OwnerPID     int
+	AccountID    string
+	Email        string
+	VaultKey     []byte
+	AccessToken  []byte
+	AutoLock     time.Duration
+	RevokeOnline func(context.Context, []byte) error
 }
 
 type Info struct {
@@ -41,6 +42,7 @@ type Agent struct {
 	email        string
 	vaultKey     []byte
 	accessToken  []byte
+	revokeOnline func(context.Context, []byte) error
 	memoryLocked bool
 	autoLock     *time.Timer
 	autoLockFor  time.Duration
@@ -56,6 +58,7 @@ type request struct {
 
 type response struct {
 	Info  *Info  `json:"info,omitempty"`
+	Token []byte `json:"token,omitempty"`
 	Error string `json:"error,omitempty"`
 }
 
@@ -84,17 +87,18 @@ func NewAgent(cfg AgentConfig) (*Agent, error) {
 		return nil, fmt.Errorf("restrict session socket: %w", err)
 	}
 	agent := &Agent{
-		listener:    listener,
-		socketPath:  cfg.SocketPath,
-		ownerUID:    cfg.OwnerUID,
-		ownerPID:    cfg.OwnerPID,
-		ownerStart:  ownerStart,
-		accountID:   cfg.AccountID,
-		email:       cfg.Email,
-		vaultKey:    append([]byte(nil), cfg.VaultKey...),
-		accessToken: append([]byte(nil), cfg.AccessToken...),
-		autoLockFor: cfg.AutoLock,
-		done:        make(chan struct{}),
+		listener:     listener,
+		socketPath:   cfg.SocketPath,
+		ownerUID:     cfg.OwnerUID,
+		ownerPID:     cfg.OwnerPID,
+		ownerStart:   ownerStart,
+		accountID:    cfg.AccountID,
+		email:        cfg.Email,
+		vaultKey:     append([]byte(nil), cfg.VaultKey...),
+		accessToken:  append([]byte(nil), cfg.AccessToken...),
+		revokeOnline: cfg.RevokeOnline,
+		autoLockFor:  cfg.AutoLock,
+		done:         make(chan struct{}),
 	}
 	if len(agent.vaultKey) > 0 {
 		agent.memoryLocked = unix.Mlock(agent.vaultKey) == nil
@@ -192,6 +196,8 @@ func (a *Agent) handle(conn *net.UnixConn) {
 	case "logout":
 		_ = json.NewEncoder(conn).Encode(response{})
 		_ = a.Close()
+	case "access-token":
+		_ = json.NewEncoder(conn).Encode(response{Token: a.accessToken})
 	default:
 		_ = json.NewEncoder(conn).Encode(response{Error: "unknown session action"})
 	}
@@ -231,6 +237,7 @@ func peerUID(conn *net.UnixConn) (uint32, error) {
 func (a *Agent) Close() error {
 	var closeErr error
 	a.closeOnce.Do(func() {
+		token := append([]byte(nil), a.accessToken...)
 		close(a.done)
 		a.timerMu.Lock()
 		a.closed = true
@@ -247,6 +254,12 @@ func (a *Agent) Close() error {
 		a.accessToken = nil
 		closeErr = a.listener.Close()
 		_ = os.Remove(a.socketPath)
+		if a.revokeOnline != nil && len(token) > 0 {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			_ = a.revokeOnline(ctx, token)
+			cancel()
+		}
+		clearBytes(token)
 	})
 	return closeErr
 }
@@ -276,6 +289,34 @@ func Status(ctx context.Context, socketPath string) (Info, error) {
 		return Info{}, errors.New("session agent returned no status")
 	}
 	return *res.Info, nil
+}
+
+// AccessToken returns a copy of online authorization material to an
+// owner-authenticated local client.
+func AccessToken(ctx context.Context, socketPath string) ([]byte, error) {
+	var dialer net.Dialer
+	conn, err := dialer.DialContext(ctx, "unix", socketPath)
+	if err != nil {
+		return nil, fmt.Errorf("connect to session agent: %w", err)
+	}
+	defer conn.Close()
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	}
+	if err := json.NewEncoder(conn).Encode(request{Action: "access-token"}); err != nil {
+		return nil, fmt.Errorf("request online token: %w", err)
+	}
+	var res response
+	if err := json.NewDecoder(conn).Decode(&res); err != nil {
+		return nil, fmt.Errorf("read online token: %w", err)
+	}
+	if res.Error != "" {
+		return nil, errors.New(res.Error)
+	}
+	if len(res.Token) == 0 {
+		return nil, errors.New("session agent returned no online token")
+	}
+	return res.Token, nil
 }
 
 // Logout clears unlocked material and ends the terminal session.

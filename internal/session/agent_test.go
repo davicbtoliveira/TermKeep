@@ -45,6 +45,37 @@ func TestAgentReportsUnlockedSession(t *testing.T) {
 	}
 }
 
+func TestAgentProvidesOnlineTokenToOwner(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "agent.sock")
+	agent, err := session.NewAgent(session.AgentConfig{
+		SocketPath:  socketPath,
+		OwnerUID:    uint32(os.Getuid()),
+		VaultKey:    []byte("01234567890123456789012345678901"),
+		AccessToken: []byte("access-token"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- agent.Serve(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		_ = agent.Close()
+		if err := <-done; err != nil {
+			t.Errorf("serve agent: %v", err)
+		}
+	})
+
+	token, err := session.AccessToken(ctx, socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(token) != "access-token" {
+		t.Fatalf("online token: got %q", token)
+	}
+}
+
 func TestAgentSocketIsOwnerOnly(t *testing.T) {
 	socketPath := filepath.Join(t.TempDir(), "agent.sock")
 	agent, err := session.NewAgent(session.AgentConfig{
@@ -264,4 +295,36 @@ func TestAgentEndsWhenOwnerProcessExits(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("session remained unlocked after owner exited")
+}
+
+func TestAgentClosesLocallyBeforeRemoteRevocationReturns(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "agent.sock")
+	revokeStarted := make(chan struct{})
+	releaseRevoke := make(chan struct{})
+	agent, err := session.NewAgent(session.AgentConfig{
+		SocketPath:  socketPath,
+		OwnerUID:    uint32(os.Getuid()),
+		VaultKey:    []byte("01234567890123456789012345678901"),
+		AccessToken: []byte("access-token"),
+		RevokeOnline: func(context.Context, []byte) error {
+			close(revokeStarted)
+			<-releaseRevoke
+			return context.DeadlineExceeded
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		_ = agent.Close()
+		close(closed)
+	}()
+	<-revokeStarted
+	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
+		t.Fatalf("local socket remains during offline revocation: %v", err)
+	}
+	close(releaseRevoke)
+	<-closed
 }

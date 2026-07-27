@@ -167,9 +167,15 @@ func runLogin(cfg client.Config, args []string) int {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return exitUsageFailure
 	}
+	host, err := os.Hostname()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error: read host name:", err)
+		return exitUsageFailure
+	}
 	result, err := client.Login(context.Background(), cfg, client.LoginInput{
 		Email:          *email,
 		MasterPassword: password,
+		Host:           host,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -190,6 +196,8 @@ func runLogin(cfg client.Config, args []string) int {
 		Email:       strings.ToLower(strings.TrimSpace(*email)),
 		VaultKey:    result.VaultKey,
 		AccessToken: accessToken,
+		ServerURL:   cfg.ServerURL,
+		CACertFile:  cfg.CACertFile,
 	}, autoLock); err != nil {
 		fmt.Fprintln(os.Stderr, "error: start session agent:", err)
 		return exitUsageFailure

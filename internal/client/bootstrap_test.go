@@ -55,6 +55,7 @@ func TestBootstrapCreatesZeroKnowledgeVault(t *testing.T) {
 	login, err := Login(context.Background(), Config{ServerURL: srv.URL}, LoginInput{
 		Email:          "admin@example.com",
 		MasterPassword: "TermKeep#2026",
+		Host:           "workstation",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -65,6 +66,11 @@ func TestBootstrapCreatesZeroKnowledgeVault(t *testing.T) {
 	}
 	if login.AccessToken == "" {
 		t.Fatal("OPAQUE login did not return an access token")
+	}
+	for _, token := range store.accessTokens {
+		if token.Host != "workstation" {
+			t.Fatalf("online session host: want workstation, got %q", token.Host)
+		}
 	}
 	if _, err := Login(context.Background(), Config{ServerURL: srv.URL}, LoginInput{
 		Email:          "admin@example.com",

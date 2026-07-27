@@ -139,3 +139,36 @@ func TestAuthenticatedOperationUpdatesSessionLastUse(t *testing.T) {
 		t.Fatalf("last use was not updated: %+v", body.Sessions[0])
 	}
 }
+
+func TestCurrentSessionCanRevokeItself(t *testing.T) {
+	store := &memoryBootstrapStore{}
+	auth := newTestAuthService(t, store)
+	sessions := NewSessionService(store, auth)
+	handler := NewHandler("test", stubSchema{version: 1}, nil, auth, sessions)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	password := []byte("TermKeep#2026")
+	mustBootstrap(t, server, "admin@example.com", password)
+	token := mustLogin(t, server, "admin@example.com", password)
+
+	request, err := http.NewRequest(http.MethodDelete, server.URL+"/api/v1/sessions/current", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("revoke current session: want 204, got %d", response.StatusCode)
+	}
+
+	rejected := getJSONWithAuth(t, server.URL+"/api/v1/sessions", token)
+	rejected.Body.Close()
+	if rejected.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("revoked current session status: want 401, got %d", rejected.StatusCode)
+	}
+}

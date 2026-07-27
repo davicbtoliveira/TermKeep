@@ -3,6 +3,8 @@ package session_test
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,6 +49,51 @@ func TestAgentProcessDisablesCoreDumps(t *testing.T) {
 		}
 	}
 	t.Fatal("agent process limits omit core file size")
+}
+
+func TestLaunchedAgentRevokesOnlineSessionOnLogout(t *testing.T) {
+	revoked := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete ||
+			r.URL.Path != "/api/v1/sessions/current" ||
+			r.Header.Get("Authorization") != "Bearer access-token" {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		revoked <- struct{}{}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := session.Scope{
+		SocketPath: filepath.Join(t.TempDir(), "agent.sock"),
+		OwnerPID:   os.Getpid(),
+		OwnerUID:   uint32(os.Getuid()),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err = session.Launch(ctx, executable, scope, session.UnlockMaterial{
+		AccountID:   "account-123",
+		Email:       "user@example.com",
+		VaultKey:    []byte("01234567890123456789012345678901"),
+		AccessToken: []byte("access-token"),
+		ServerURL:   server.URL,
+	}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Logout(ctx, scope.SocketPath); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-revoked:
+	case <-time.After(3 * time.Second):
+		t.Fatal("agent did not attempt online session revocation")
+	}
 }
 
 func launchTestAgent(t *testing.T) (session.Scope, session.Info) {
