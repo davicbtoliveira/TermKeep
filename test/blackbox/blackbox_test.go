@@ -78,6 +78,7 @@ func TestBlackbox(t *testing.T) {
 	t.Run("audit persistence and logs exclude secrets", s.testAuditExcludesSecrets)
 	t.Run("expired invitation cannot register", s.testExpiredInvitation)
 	t.Run("concurrent invitation consumption registers once", s.testConcurrentInvitationConsumption)
+	t.Run("encrypted Login survives a new unlocked process", s.testEncryptedLoginRoundTrip)
 }
 
 // newStack boots the ephemeral deployment once for the whole test run.
@@ -185,8 +186,8 @@ func (s *stack) testMigrationsApplied(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query schema_migrations: %v\n%s", err, out)
 	}
-	if strings.TrimSpace(string(out)) != "5" {
-		t.Errorf("schema version: want 5, got %q", strings.TrimSpace(string(out)))
+	if strings.TrimSpace(string(out)) != "6" {
+		t.Errorf("schema version: want 6, got %q", strings.TrimSpace(string(out)))
 	}
 
 	cmd = s.composeCmd(context.Background(),
@@ -211,7 +212,7 @@ func (s *stack) testStatusHealthy(t *testing.T) {
 	if !strings.Contains(stdout, "Status:   healthy") {
 		t.Errorf("stdout missing healthy state:\n%s", stdout)
 	}
-	if !strings.Contains(stdout, "schema v5") {
+	if !strings.Contains(stdout, "schema v6") {
 		t.Errorf("stdout missing schema version:\n%s", stdout)
 	}
 }
@@ -369,7 +370,7 @@ func (s *stack) testBootstrap(t *testing.T) {
 	if !strings.Contains(output, "Recovery key — save it now") {
 		t.Fatalf("bootstrap did not warn about one-time recovery key:\n%s", output)
 	}
-	if !strings.Contains(output, "Vault:    unlocked (empty)") {
+	if !strings.Contains(output, "unlocked (empty)") {
 		t.Fatalf("bootstrap did not open empty vault:\n%s", output)
 	}
 
@@ -416,15 +417,147 @@ func (s *stack) testTerminalSessionReuse(t *testing.T) {
 
 	shell.clear()
 	write(t, shell.ptmx, command)
-	matched, output := shell.waitFor(30*time.Second, "Master password:", "Vault:    unlocked (empty)")
+	matched, output := shell.waitFor(30*time.Second, "Master password:", "unlocked (empty)")
 	if matched == "Master password:" {
 		t.Fatalf("same terminal requested master password again:\n%s", output)
 	}
-	if matched != "Vault:    unlocked (empty)" {
+	if matched != "unlocked (empty)" {
 		t.Fatalf("same terminal did not reuse unlocked session:\n%s", output)
 	}
 	write(t, shell.ptmx, "q")
 	shell.waitFor(10*time.Second, terminalShellPrompt)
+}
+
+func (s *stack) testEncryptedLoginRoundTrip(t *testing.T) {
+	const (
+		email       = "admin@example.com"
+		password    = "TermKeep#2026"
+		loginName   = "Login-Name-Sentinel"
+		loginUser   = "login-user-sentinel@example.com"
+		loginPass   = "Login-Password-Sentinel"
+		loginURL    = "https://login-url-sentinel.example.com"
+		loginURLTwo = "ssh://login-internal-sentinel"
+		loginNotes  = "Login-Notes-Sentinel"
+		loginCustom = "Login-Custom-Sentinel"
+	)
+	command := fmt.Sprintf("%q --server %q --ca-cert %q login --email %q\n",
+		s.binary, s.serverURL, filepath.Join(s.certsDir, "ca.pem"), email)
+	shell := s.startTerminalShell(t)
+	shell.login(command, password)
+	sockets, err := filepath.Glob(
+		filepath.Join(shell.runtimeDir, "termkeep", "*.sock"))
+	if err != nil || len(sockets) != 1 {
+		t.Fatalf("session sockets: want 1, got %d (%v)", len(sockets), err)
+	}
+	token, err := session.AccessToken(context.Background(), sockets[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clear(token)
+	login := client.LoginItem{
+		ItemID:   "11111111-1111-4111-8111-111111111111",
+		Name:     loginName,
+		Username: loginUser,
+		Password: loginPass,
+		URLs:     []string{loginURL, loginURLTwo},
+		Notes:    loginNotes,
+		CustomFields: []client.CustomField{
+			{Name: "region", Value: loginCustom},
+		},
+	}
+	item, err := session.SealLogin(
+		context.Background(), sockets[0], login, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.PutItem(
+		context.Background(), s.clientConfig(), string(token), item,
+	); err != nil {
+		t.Fatal(err)
+	}
+	shell.clear()
+	write(t, shell.ptmx, command)
+	matched, output := shell.waitFor(30*time.Second, "Master password:", loginName)
+	if matched == "Master password:" {
+		t.Fatalf("new process requested master password:\n%s", output)
+	}
+	if !strings.Contains(output, loginUser) {
+		t.Fatalf("new process did not list Login username:\n%s", output)
+	}
+	shell.clear()
+	write(t, shell.ptmx, "\r")
+	_, output = shell.waitFor(10*time.Second, loginNotes)
+	for _, want := range []string{
+		loginName,
+		loginUser,
+		loginURL,
+		loginURLTwo,
+		loginNotes,
+		"region: " + loginCustom,
+		"Password: ••••••••",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("new process Login detail missing %q:\n%s", want, output)
+		}
+	}
+	if strings.Contains(output, loginPass) {
+		t.Fatalf("new process exposed password by default:\n%s", output)
+	}
+	write(t, shell.ptmx, "q")
+	shell.waitFor(10*time.Second, terminalShellPrompt)
+
+	items, err := client.ListItems(
+		context.Background(), s.clientConfig(), string(token))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("opaque API items: want 1, got %d", len(items))
+	}
+	apiBody, err := json.Marshal(items)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dbCommand := s.composeCmd(context.Background(),
+		"exec", "-T", "db", "psql", "-U", "termkeep", "-d", "termkeep", "-tAc",
+		"SELECT row_to_json(v)::text FROM vault_items v")
+	dbBody, err := dbCommand.CombinedOutput()
+	if err != nil {
+		t.Fatalf("read vault items: %v\n%s", err, dbBody)
+	}
+	auditCommand := s.composeCmd(context.Background(),
+		"exec", "-T", "db", "psql", "-U", "termkeep", "-d", "termkeep", "-tAc",
+		"SELECT COALESCE(string_agg(row_to_json(a)::text, E'\\n'), '') FROM audit_events a")
+	auditBody, err := auditCommand.CombinedOutput()
+	if err != nil {
+		t.Fatalf("read audit events: %v\n%s", err, auditBody)
+	}
+	logBody, err := s.composeCmd(context.Background(), "logs", "server").CombinedOutput()
+	if err != nil {
+		t.Fatalf("read server logs: %v\n%s", err, logBody)
+	}
+	surfaces := map[string][]byte{
+		"API":        apiBody,
+		"PostgreSQL": dbBody,
+		"audit":      auditBody,
+		"logs":       logBody,
+	}
+	for _, plaintext := range []string{
+		loginName,
+		loginUser,
+		loginPass,
+		loginURL,
+		loginURLTwo,
+		loginNotes,
+		loginCustom,
+	} {
+		for surface, contents := range surfaces {
+			if bytes.Contains(contents, []byte(plaintext)) {
+				t.Fatalf("%s contains Login plaintext %q", surface, plaintext)
+			}
+		}
+	}
 }
 
 func (s *stack) testTerminalSessionIsolation(t *testing.T) {
@@ -440,7 +573,7 @@ func (s *stack) testTerminalSessionIsolation(t *testing.T) {
 	other := s.startTerminalShell(t)
 	other.clear()
 	write(t, other.ptmx, command)
-	matched, output := other.waitFor(30*time.Second, "Master password:", "Vault:    unlocked (empty)")
+	matched, output := other.waitFor(30*time.Second, "Master password:", "unlocked (empty)")
 	if matched != "Master password:" {
 		t.Fatalf("other terminal reused unlocked session:\n%s", output)
 	}
@@ -465,7 +598,7 @@ func (s *stack) testTerminalSessionLogout(t *testing.T) {
 
 	shell.clear()
 	write(t, shell.ptmx, loginCommand)
-	matched, output := shell.waitFor(30*time.Second, "Master password:", "Vault:    unlocked (empty)")
+	matched, output := shell.waitFor(30*time.Second, "Master password:", "unlocked (empty)")
 	if matched != "Master password:" {
 		t.Fatalf("login remained unlocked after logout:\n%s", output)
 	}
@@ -587,7 +720,7 @@ func (s *stack) testActiveSessionsScreen(t *testing.T) {
 		t.Fatalf("login did not request master password:\n%s", output)
 	}
 	write(t, shell.ptmx, password+"\n")
-	shell.waitFor(45*time.Second, "Vault:    unlocked (empty)")
+	shell.waitFor(45*time.Second, "unlocked (empty)")
 
 	shell.clear()
 	write(t, shell.ptmx, "s")
@@ -623,7 +756,7 @@ func (s *stack) testActiveSessionsRevoke(t *testing.T) {
 	write(t, shell.ptmx, loginCommand)
 	shell.waitFor(30*time.Second, "Master password:")
 	write(t, shell.ptmx, password+"\n")
-	shell.waitFor(45*time.Second, "Vault:    unlocked (empty)")
+	shell.waitFor(45*time.Second, "unlocked (empty)")
 	write(t, shell.ptmx, "s")
 	shell.waitFor(30*time.Second, "remote-to-revoke")
 	shell.clear()
@@ -668,7 +801,7 @@ func (s *stack) testInvitedRegistration(t *testing.T) {
 	if !strings.Contains(output, "Recovery key — save it now") {
 		t.Fatalf("registration did not warn about one-time recovery key:\n%s", output)
 	}
-	if !strings.Contains(output, "Vault:    unlocked (empty)") {
+	if !strings.Contains(output, "unlocked (empty)") {
 		t.Fatalf("registration did not open empty vault:\n%s", output)
 	}
 
@@ -820,10 +953,10 @@ func (s *stack) testActivityViews(t *testing.T) {
 	write(t, userShell.ptmx, loginCommand)
 	userShell.waitFor(30*time.Second, "Master password:")
 	write(t, userShell.ptmx, userPassword+"\n")
-	userShell.waitFor(45*time.Second, "Vault:    unlocked (empty)")
+	userShell.waitFor(45*time.Second, "unlocked (empty)")
 	userShell.clear()
 	write(t, userShell.ptmx, "a")
-	_, output := userShell.waitFor(30*time.Second, "[r] refresh")
+	_, output := userShell.waitFor(30*time.Second, "login.succeeded")
 	for _, want := range []string{"login.succeeded", "Actor:", "Source:"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("user Activity missing %q:\n%s", want, output)
@@ -842,13 +975,13 @@ func (s *stack) testActivityViews(t *testing.T) {
 	write(t, adminShell.ptmx, adminCommand)
 	adminShell.waitFor(30*time.Second, "Master password:")
 	write(t, adminShell.ptmx, adminPassword+"\n")
-	adminShell.waitFor(45*time.Second, "Vault:    unlocked (empty)")
+	adminShell.waitFor(45*time.Second, "unlocked (empty)")
 	adminShell.clear()
 	write(t, adminShell.ptmx, "a")
-	adminShell.waitFor(30*time.Second, "[g] all accounts")
+	adminShell.waitFor(30*time.Second, "login.succeeded")
 	adminShell.clear()
 	write(t, adminShell.ptmx, "g")
-	_, output = adminShell.waitFor(30*time.Second, "[g] my account")
+	_, output = adminShell.waitFor(30*time.Second, "Account:")
 	for _, want := range []string{"Account:", "Actor:"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("administrator Activity missing %q:\n%s", want, output)
@@ -1228,7 +1361,7 @@ func (s *stack) runBootstrap(t *testing.T, email, password string) (string, int)
 				stage++
 			}
 		case 2:
-			if strings.Contains(plain, "Vault:    unlocked (empty)") {
+			if strings.Contains(plain, "unlocked (empty)") {
 				write(t, ptmx, "q")
 				stage++
 			}
@@ -1291,7 +1424,7 @@ func (s *stack) runRegistration(t *testing.T, email, password, inviteToken strin
 				stage++
 			}
 		case 2:
-			if strings.Contains(plain, "Vault:    unlocked (empty)") {
+			if strings.Contains(plain, "unlocked (empty)") {
 				write(t, ptmx, "q")
 				stage++
 			}
@@ -1385,11 +1518,11 @@ func (s *terminalShell) login(command, password string) {
 	s.t.Helper()
 	s.clear()
 	write(s.t, s.ptmx, command)
-	if matched, output := s.waitFor(30*time.Second, "Master password:", "Vault:    unlocked (empty)"); matched != "Master password:" {
+	if matched, output := s.waitFor(30*time.Second, "Master password:", "unlocked (empty)"); matched != "Master password:" {
 		s.t.Fatalf("first login did not request master password:\n%s", output)
 	}
 	write(s.t, s.ptmx, password+"\n")
-	if _, output := s.waitFor(45*time.Second, "Vault:    unlocked (empty)"); !strings.Contains(output, "Vault:    unlocked (empty)") {
+	if _, output := s.waitFor(45*time.Second, "unlocked (empty)"); !strings.Contains(output, "unlocked (empty)") {
 		s.t.Fatalf("login did not open vault:\n%s", output)
 	}
 	write(s.t, s.ptmx, "q")
