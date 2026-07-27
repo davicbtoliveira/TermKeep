@@ -180,8 +180,8 @@ func (s *stack) testMigrationsApplied(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query schema_migrations: %v\n%s", err, out)
 	}
-	if strings.TrimSpace(string(out)) != "3" {
-		t.Errorf("schema version: want 3, got %q", strings.TrimSpace(string(out)))
+	if strings.TrimSpace(string(out)) != "4" {
+		t.Errorf("schema version: want 4, got %q", strings.TrimSpace(string(out)))
 	}
 
 	cmd = s.composeCmd(context.Background(),
@@ -206,7 +206,7 @@ func (s *stack) testStatusHealthy(t *testing.T) {
 	if !strings.Contains(stdout, "Status:   healthy") {
 		t.Errorf("stdout missing healthy state:\n%s", stdout)
 	}
-	if !strings.Contains(stdout, "schema v3") {
+	if !strings.Contains(stdout, "schema v4") {
 		t.Errorf("stdout missing schema version:\n%s", stdout)
 	}
 }

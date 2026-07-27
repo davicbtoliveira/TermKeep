@@ -180,6 +180,38 @@ func (s *memoryBootstrapStore) FindAccessToken(_ context.Context, tokenHash []by
 	return StoredAccessToken{}, ErrAccessTokenNotFound
 }
 
+func (s *memoryBootstrapStore) TouchAccessToken(_ context.Context, tokenHash []byte, now time.Time) error {
+	key := string(tokenHash)
+	token, ok := s.accessTokens[key]
+	if !ok {
+		return ErrAccessTokenNotFound
+	}
+	token.LastUsedAt = now
+	s.accessTokens[key] = token
+	return nil
+}
+
+func (s *memoryBootstrapStore) ListSessions(_ context.Context, accountID string) ([]StoredAccessToken, error) {
+	var sessions []StoredAccessToken
+	for _, token := range s.accessTokens {
+		if token.AccountID == accountID && token.RevokedAt.IsZero() {
+			sessions = append(sessions, token)
+		}
+	}
+	return sessions, nil
+}
+
+func (s *memoryBootstrapStore) RevokeSession(_ context.Context, accountID, sessionID string, now time.Time) error {
+	for hash, token := range s.accessTokens {
+		if token.AccountID == accountID && token.SessionID == sessionID && token.RevokedAt.IsZero() {
+			token.RevokedAt = now
+			s.accessTokens[hash] = token
+			return nil
+		}
+	}
+	return ErrSessionNotFound
+}
+
 func (s *memoryBootstrapStore) CreateInvite(_ context.Context, invite StoredInvite) error {
 	s.invites = append(s.invites, invite)
 	return nil

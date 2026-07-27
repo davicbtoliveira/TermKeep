@@ -117,9 +117,13 @@ func (s DBStore) FindAccount(ctx context.Context, email string) (StoredAccount, 
 // CreateAccessToken stores a hashed access token.
 func (s DBStore) CreateAccessToken(ctx context.Context, token StoredAccessToken) error {
 	_, err := s.DB.ExecContext(ctx, `
-		INSERT INTO access_tokens (token_hash, account_uuid, email, administrator, expires_at)
-		VALUES ($1, $2, $3, $4, $5)`,
-		token.TokenHash, token.AccountID, token.Email, token.Administrator, token.ExpiresAt,
+		INSERT INTO access_tokens (
+			token_hash, session_uuid, account_uuid, email, administrator,
+			host, source_ip, created_at, last_used_at
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		token.TokenHash, token.SessionID, token.AccountID, token.Email, token.Administrator,
+		token.Host, token.SourceIP, token.CreatedAt, token.LastUsedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("create access token: %w", err)
@@ -130,11 +134,14 @@ func (s DBStore) CreateAccessToken(ctx context.Context, token StoredAccessToken)
 // FindAccessToken loads an access token record by token hash.
 func (s DBStore) FindAccessToken(ctx context.Context, tokenHash []byte) (StoredAccessToken, error) {
 	var token StoredAccessToken
+	var revokedAt sql.NullTime
 	err := s.DB.QueryRowContext(ctx, `
-		SELECT token_hash, account_uuid::text, email, administrator, expires_at
+		SELECT token_hash, session_uuid::text, account_uuid::text, email, administrator,
+		       host, source_ip, created_at, last_used_at, revoked_at
 		FROM access_tokens
 		WHERE token_hash = $1`, tokenHash).Scan(
-		&token.TokenHash, &token.AccountID, &token.Email, &token.Administrator, &token.ExpiresAt,
+		&token.TokenHash, &token.SessionID, &token.AccountID, &token.Email, &token.Administrator,
+		&token.Host, &token.SourceIP, &token.CreatedAt, &token.LastUsedAt, &revokedAt,
 	)
 	if err == sql.ErrNoRows {
 		return StoredAccessToken{}, ErrAccessTokenNotFound
@@ -142,7 +149,79 @@ func (s DBStore) FindAccessToken(ctx context.Context, tokenHash []byte) (StoredA
 	if err != nil {
 		return StoredAccessToken{}, fmt.Errorf("find access token: %w", err)
 	}
+	if revokedAt.Valid {
+		token.RevokedAt = revokedAt.Time
+	}
 	return token, nil
+}
+
+// ListSessions returns active online sessions belonging to one account.
+func (s DBStore) ListSessions(ctx context.Context, accountID string) ([]StoredAccessToken, error) {
+	rows, err := s.DB.QueryContext(ctx, `
+		SELECT session_uuid::text, account_uuid::text, host, source_ip, created_at, last_used_at
+		FROM access_tokens
+		WHERE account_uuid = $1 AND revoked_at IS NULL
+		ORDER BY created_at DESC, session_uuid`, accountID)
+	if err != nil {
+		return nil, fmt.Errorf("list sessions: %w", err)
+	}
+	defer rows.Close()
+
+	var sessions []StoredAccessToken
+	for rows.Next() {
+		var token StoredAccessToken
+		if err := rows.Scan(
+			&token.SessionID, &token.AccountID, &token.Host, &token.SourceIP,
+			&token.CreatedAt, &token.LastUsedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan session: %w", err)
+		}
+		sessions = append(sessions, token)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate sessions: %w", err)
+	}
+	return sessions, nil
+}
+
+// RevokeSession marks one active session belonging to the authenticated
+// account.
+func (s DBStore) RevokeSession(ctx context.Context, accountID, sessionID string, now time.Time) error {
+	result, err := s.DB.ExecContext(ctx, `
+		UPDATE access_tokens
+		SET revoked_at = $3
+		WHERE account_uuid = $1 AND session_uuid = $2 AND revoked_at IS NULL`,
+		accountID, sessionID, now)
+	if err != nil {
+		return fmt.Errorf("revoke session: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("revoke session rows affected: %w", err)
+	}
+	if count == 0 {
+		return ErrSessionNotFound
+	}
+	return nil
+}
+
+// TouchAccessToken records observable online use without exposing request
+// content.
+func (s DBStore) TouchAccessToken(ctx context.Context, tokenHash []byte, now time.Time) error {
+	result, err := s.DB.ExecContext(ctx,
+		"UPDATE access_tokens SET last_used_at = $2 WHERE token_hash = $1",
+		tokenHash, now)
+	if err != nil {
+		return fmt.Errorf("touch access token: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("touch access token rows affected: %w", err)
+	}
+	if count == 0 {
+		return ErrAccessTokenNotFound
+	}
+	return nil
 }
 
 // CreateInvite persists an invitation.

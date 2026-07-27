@@ -128,6 +128,17 @@ func (s *bootstrapStore) FindAccessToken(_ context.Context, tokenHash []byte) (s
 	return server.StoredAccessToken{}, server.ErrAccessTokenNotFound
 }
 
+func (s *bootstrapStore) TouchAccessToken(_ context.Context, tokenHash []byte, now time.Time) error {
+	key := string(tokenHash)
+	token, ok := s.accessTokens[key]
+	if !ok {
+		return server.ErrAccessTokenNotFound
+	}
+	token.LastUsedAt = now
+	s.accessTokens[key] = token
+	return nil
+}
+
 func (s *bootstrapStore) ValidateInvite(_ context.Context, tokenHash []byte, email string, now time.Time) error {
 	for _, invite := range s.invites {
 		if bytes.Equal(invite.TokenHash, tokenHash) &&

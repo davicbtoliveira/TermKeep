@@ -44,7 +44,19 @@ func NewHandler(version string, schema SchemaStore, trustedProxies []netip.Prefi
 			service.register(mux)
 		}
 	}
-	return mux
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := context.WithValue(r.Context(), clientIPContextKey{}, clientIP(r, trustedProxies))
+		mux.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+type clientIPContextKey struct{}
+
+func requestClientIP(r *http.Request) string {
+	if value, ok := r.Context().Value(clientIPContextKey{}).(string); ok {
+		return value
+	}
+	return clientIP(r, nil)
 }
 
 func statusHandler(version string, schema SchemaStore, trusted []netip.Prefix) http.HandlerFunc {

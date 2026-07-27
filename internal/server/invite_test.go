@@ -168,6 +168,10 @@ func mustLogin(t *testing.T, srv *httptest.Server, email string, password []byte
 }
 
 func mustLoginResponse(t *testing.T, srv *httptest.Server, email string, password []byte) loginFinishResponse {
+	return mustLoginResponseFromHost(t, srv, email, password, "")
+}
+
+func mustLoginResponseFromHost(t *testing.T, srv *httptest.Server, email string, password []byte, host string) loginFinishResponse {
 	t.Helper()
 	client, err := opaque.NewClient(nil)
 	if err != nil {
@@ -177,10 +181,14 @@ func mustLoginResponse(t *testing.T, srv *httptest.Server, email string, passwor
 	if err != nil {
 		t.Fatal(err)
 	}
-	start := postJSON(t, srv.URL+"/api/v1/login/start", map[string]string{
+	requestBody := map[string]string{
 		"email": email,
 		"ke1":   base64.RawStdEncoding.EncodeToString(ke1.Serialize()),
-	})
+	}
+	if host != "" {
+		requestBody["host"] = host
+	}
+	start := postJSON(t, srv.URL+"/api/v1/login/start", requestBody)
 	if start.StatusCode != http.StatusOK {
 		t.Fatalf("login start status: want 200, got %d", start.StatusCode)
 	}

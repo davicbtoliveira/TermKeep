@@ -24,10 +24,6 @@ var ErrAccessTokenNotFound = errors.New("access token not found")
 var errInvalidLogin = errors.New("invalid login")
 var errInvalidAccessToken = errors.New("invalid access token")
 
-// accessTokenTTL bounds the short-lived bearer token issued at login. It
-// authorizes administrative calls until full online sessions arrive.
-const accessTokenTTL = 15 * time.Minute
-
 // BootstrapStore persists the first account and its opaque client-created
 // vault envelopes. CreateBootstrap must reject concurrent second attempts.
 type BootstrapStore interface {
@@ -41,6 +37,7 @@ type BootstrapStore interface {
 type AccessTokenStore interface {
 	CreateAccessToken(ctx context.Context, token StoredAccessToken) error
 	FindAccessToken(ctx context.Context, tokenHash []byte) (StoredAccessToken, error)
+	TouchAccessToken(ctx context.Context, tokenHash []byte, now time.Time) error
 }
 
 // InvitedRegistrationStore validates and atomically consumes invitations
@@ -61,10 +58,15 @@ type AuthStore interface {
 // Administrator flag authorizes the invitation management surface.
 type StoredAccessToken struct {
 	TokenHash     []byte
+	SessionID     string
 	AccountID     string
 	Email         string
 	Administrator bool
-	ExpiresAt     time.Time
+	Host          string
+	SourceIP      string
+	CreatedAt     time.Time
+	LastUsedAt    time.Time
+	RevokedAt     time.Time
 }
 
 // BootstrapAccount is the only account material written during bootstrap.
@@ -103,6 +105,8 @@ type pendingLogin struct {
 	account       *StoredAccount
 	clientMAC     []byte
 	sessionSecret []byte
+	host          string
+	sourceIP      string
 	expiresAt     time.Time
 }
 
@@ -360,6 +364,7 @@ func (a *AuthService) finish(ctx context.Context, accountID, email string, encod
 type loginStartRequest struct {
 	Email string `json:"email"`
 	KE1   string `json:"ke1"`
+	Host  string `json:"host,omitempty"`
 }
 
 type loginStartResponse struct {
@@ -394,7 +399,15 @@ func (a *AuthService) startLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid login request", http.StatusBadRequest)
 		return
 	}
-	loginID, response, err := a.beginLogin(r.Context(), email, encoded)
+	host := strings.TrimSpace(request.Host)
+	if host == "" {
+		host = "unknown"
+	}
+	if len(host) > 255 {
+		http.Error(w, "invalid login request", http.StatusBadRequest)
+		return
+	}
+	loginID, response, err := a.beginLogin(r.Context(), email, encoded, host, requestClientIP(r))
 	if err != nil {
 		http.Error(w, "invalid login request", http.StatusBadRequest)
 		return
@@ -415,37 +428,46 @@ func (a *AuthService) finishLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid login", http.StatusUnauthorized)
 		return
 	}
-	account, err := a.completeLogin(request.LoginID, encoded)
+	login, err := a.completeLogin(request.LoginID, encoded)
 	if err != nil {
 		http.Error(w, "invalid login", http.StatusUnauthorized)
 		return
 	}
-	token, err := a.issueAccessToken(r.Context(), account)
+	token, err := a.issueAccessToken(r.Context(), login.account, login.host, login.sourceIP)
 	if err != nil {
 		http.Error(w, "login unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	writeJSON(w, http.StatusOK, loginFinishResponse{
-		AccountID:             account.AccountID,
-		PasswordVaultEnvelope: base64.RawStdEncoding.EncodeToString(account.PasswordVaultEnvelope),
-		RecoveryVaultEnvelope: base64.RawStdEncoding.EncodeToString(account.RecoveryVaultEnvelope),
+		AccountID:             login.account.AccountID,
+		PasswordVaultEnvelope: base64.RawStdEncoding.EncodeToString(login.account.PasswordVaultEnvelope),
+		RecoveryVaultEnvelope: base64.RawStdEncoding.EncodeToString(login.account.RecoveryVaultEnvelope),
 		AccessToken:           token,
 	})
 }
 
-func (a *AuthService) issueAccessToken(ctx context.Context, account *StoredAccount) (string, error) {
+func (a *AuthService) issueAccessToken(ctx context.Context, account *StoredAccount, host, sourceIP string) (string, error) {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
 		return "", fmt.Errorf("generate access token: %w", err)
 	}
 	token := base64.RawURLEncoding.EncodeToString(raw)
 	hash := sha256.Sum256([]byte(token))
+	sessionID, err := newAccountID()
+	if err != nil {
+		return "", err
+	}
+	now := time.Now()
 	stored := StoredAccessToken{
 		TokenHash:     hash[:],
+		SessionID:     sessionID,
 		AccountID:     account.AccountID,
 		Email:         account.Email,
 		Administrator: account.Administrator,
-		ExpiresAt:     time.Now().Add(accessTokenTTL),
+		Host:          host,
+		SourceIP:      sourceIP,
+		CreatedAt:     now,
+		LastUsedAt:    now,
 	}
 	if err := a.store.CreateAccessToken(ctx, stored); err != nil {
 		return "", fmt.Errorf("store access token: %w", err)
@@ -462,13 +484,18 @@ func (a *AuthService) AuthenticateToken(ctx context.Context, rawToken string) (S
 	if err != nil {
 		return StoredAccessToken{}, err
 	}
-	if time.Now().After(token.ExpiresAt) {
+	if !token.RevokedAt.IsZero() {
 		return StoredAccessToken{}, errInvalidAccessToken
 	}
+	now := time.Now()
+	if err := a.store.TouchAccessToken(ctx, hash[:], now); err != nil {
+		return StoredAccessToken{}, err
+	}
+	token.LastUsedAt = now
 	return token, nil
 }
 
-func (a *AuthService) beginLogin(ctx context.Context, email string, encodedKE1 []byte) (string, []byte, error) {
+func (a *AuthService) beginLogin(ctx context.Context, email string, encodedKE1 []byte, host, sourceIP string) (string, []byte, error) {
 	ke1, err := a.opaque.Deserialize.KE1(encodedKE1)
 	if err != nil {
 		return "", nil, err
@@ -511,30 +538,32 @@ func (a *AuthService) beginLogin(ctx context.Context, email string, encodedKE1 [
 		account:       accountPtr,
 		clientMAC:     output.ClientMAC,
 		sessionSecret: output.SessionSecret,
+		host:          host,
+		sourceIP:      sourceIP,
 		expiresAt:     time.Now().Add(5 * time.Minute),
 	}
 	a.mu.Unlock()
 	return loginID, ke2.Serialize(), nil
 }
 
-func (a *AuthService) completeLogin(loginID string, encodedKE3 []byte) (*StoredAccount, error) {
+func (a *AuthService) completeLogin(loginID string, encodedKE3 []byte) (pendingLogin, error) {
 	a.mu.Lock()
 	pending, ok := a.pending[loginID]
 	delete(a.pending, loginID)
 	a.mu.Unlock()
 	if !ok || time.Now().After(pending.expiresAt) {
-		return nil, errInvalidLogin
+		return pendingLogin{}, errInvalidLogin
 	}
 	defer clearBytes(pending.clientMAC)
 	defer clearBytes(pending.sessionSecret)
 	ke3, err := a.opaque.Deserialize.KE3(encodedKE3)
 	if err != nil {
-		return nil, errInvalidLogin
+		return pendingLogin{}, errInvalidLogin
 	}
 	if err := a.opaque.LoginFinish(ke3, pending.clientMAC); err != nil || pending.account == nil {
-		return nil, errInvalidLogin
+		return pendingLogin{}, errInvalidLogin
 	}
-	return pending.account, nil
+	return pending, nil
 }
 
 func newLoginID() (string, error) {
