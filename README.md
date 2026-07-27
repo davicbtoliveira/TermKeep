@@ -44,7 +44,20 @@ termkeep login --email user@example.com --auto-lock off
 Values from 1 through 60 are minutes. To change an active session's setting,
 log out and create it again. `termkeep logout` clears the current terminal's
 unlocked material and removes its local socket. Closing the owning shell or
-reaching the inactivity timeout does the same automatically.
+reaching the inactivity timeout does the same automatically. Local cleanup
+always completes, even when the server cannot be reached; TermKeep also makes
+a best-effort attempt to revoke the corresponding online session.
+
+Press `s` from the unlocked vault to open Active Sessions. The screen shows
+each session's host, creation time, last use, and approximate source IP. Use
+`j`/`k` to select a remote session, `x` to revoke it, `r` to refresh, and `v`
+to return to the vault. A revoked session is rejected on its next online
+operation.
+
+Repeated login failures are delayed after the fifth failure: 1, 5, 10, then
+15 minutes, capped at 15 minutes. A successful login or 24 hours without a
+failure resets the delay. Limits are isolated by account and source address
+and never permanently lock an account.
 
 The agent restricts its Unix socket to the current OS user, checks peer
 credentials, disables core dumps, and memory-locks and clears key material on
