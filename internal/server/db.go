@@ -476,8 +476,8 @@ func (s DBStore) PutItem(ctx context.Context, accountID string, item OpaqueItem)
 		INSERT INTO vault_items (
 			account_uuid, item_uuid, schema_version, revision, envelope
 		)
-		SELECT $1, $2, $3, $4, $5
-		WHERE $4 = 1
+		SELECT $1::uuid, $2::uuid, $3::integer, $4::bigint, $5::bytea
+		WHERE $4::bigint = 1
 		ON CONFLICT (account_uuid, item_uuid) DO UPDATE
 		SET schema_version = EXCLUDED.schema_version,
 		    revision = EXCLUDED.revision,
