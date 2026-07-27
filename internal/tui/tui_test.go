@@ -1,9 +1,11 @@
 package tui
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -226,4 +228,257 @@ func TestActivityLoadsNextPageFromCursor(t *testing.T) {
 		strings.Contains(view, "login.succeeded") {
 		t.Fatalf("next activity page not rendered:\n%s", view)
 	}
+}
+
+func TestUnlockedVaultListsLoginsWithoutPasswords(t *testing.T) {
+	initial := model{loaded: true, vaultOpen: true}
+	updated, _ := initial.Update(loginsMsg{{
+		Login: client.LoginItem{
+			ItemID:   "11111111-1111-4111-8111-111111111111",
+			Name:     "Production database",
+			Username: "operator@example.com",
+			Password: "Password-Sentinel",
+		},
+		Revision: 1,
+	}})
+	view := updated.(model).View()
+	for _, want := range []string{"Production database", "operator@example.com"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("Vault list missing %q:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "Password-Sentinel") {
+		t.Fatalf("Vault list exposed password:\n%s", view)
+	}
+
+	locked := model{loaded: true}.View()
+	if strings.Contains(locked, "Production database") {
+		t.Fatalf("locked TUI exposed Login:\n%s", locked)
+	}
+}
+
+func TestLoginDetailShowsFieldsWithMaskedPassword(t *testing.T) {
+	initial := model{
+		loaded:    true,
+		vaultOpen: true,
+		logins: []loginRecord{{
+			Login: client.LoginItem{
+				ItemID:   "11111111-1111-4111-8111-111111111111",
+				Name:     "Production database",
+				Username: "operator@example.com",
+				Password: "Password-Sentinel",
+				URLs: []string{
+					"https://db.example.com",
+					"postgres://db.internal",
+				},
+				Notes: "Primary credentials",
+				CustomFields: []client.CustomField{
+					{Name: "region", Value: "us-east-1"},
+				},
+			},
+			Revision: 1,
+		}},
+	}
+	updated, _ := initial.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	view := updated.(model).View()
+	for _, want := range []string{
+		"Login — Production database",
+		"operator@example.com",
+		"https://db.example.com",
+		"postgres://db.internal",
+		"Primary credentials",
+		"region: us-east-1",
+		"Password: ••••••••",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("Login detail missing %q:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "Password-Sentinel") {
+		t.Fatalf("Login detail exposed password by default:\n%s", view)
+	}
+}
+
+func TestLoginPasswordRevealsOnlyAfterExplicitKey(t *testing.T) {
+	initial := model{
+		loaded:    true,
+		vaultOpen: true,
+		logins: []loginRecord{{
+			Login: client.LoginItem{
+				ItemID:   "11111111-1111-4111-8111-111111111111",
+				Name:     "Production database",
+				Password: "Password-Sentinel",
+			},
+			Revision: 1,
+		}},
+	}
+	updated, _ := initial.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = updated.(model).Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	view := updated.(model).View()
+	if !strings.Contains(view, "Password: Password-Sentinel") {
+		t.Fatalf("explicit reveal did not show password:\n%s", view)
+	}
+}
+
+func TestVaultRefreshLoadsDecryptedLogins(t *testing.T) {
+	store := &fakeLoginStore{records: []loginRecord{{
+		Login: client.LoginItem{
+			ItemID:   "11111111-1111-4111-8111-111111111111",
+			Name:     "Mail account",
+			Username: "user@example.com",
+		},
+		Revision: 1,
+	}}}
+	initial := model{
+		loaded:     true,
+		vaultOpen:  true,
+		loginStore: store,
+	}
+	updated, command := initial.Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	if command == nil {
+		t.Fatal("Vault refresh did not load Logins")
+	}
+	updated, _ = updated.(model).Update(command())
+	view := updated.(model).View()
+	if !strings.Contains(view, "Mail account") {
+		t.Fatalf("refreshed Vault missing Login:\n%s", view)
+	}
+}
+
+func TestCreateLoginCapturesAllNativeFields(t *testing.T) {
+	store := &fakeLoginStore{}
+	var current tea.Model = model{
+		loaded:     true,
+		vaultOpen:  true,
+		loginStore: store,
+	}
+	current, _ = current.Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	values := []string{
+		"Production database",
+		"operator@example.com",
+		"Password-Sentinel",
+		"https://db.example.com, postgres://db.internal",
+		"Primary credentials",
+		"region=us-east-1, owner=platform",
+	}
+	var command tea.Cmd
+	for _, value := range values {
+		current, _ = current.Update(
+			tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(value)})
+		current, command = current.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	}
+	if command == nil {
+		t.Fatal("final Login field did not save")
+	}
+	current, _ = current.Update(command())
+
+	if len(store.saved) != 1 {
+		t.Fatalf("saved Logins: want 1, got %d", len(store.saved))
+	}
+	login := store.saved[0].Login
+	if login.ItemID == "" ||
+		login.Name != values[0] ||
+		login.Username != values[1] ||
+		login.Password != values[2] ||
+		!reflect.DeepEqual(login.URLs, []string{
+			"https://db.example.com",
+			"postgres://db.internal",
+		}) ||
+		login.Notes != values[4] ||
+		!reflect.DeepEqual(login.CustomFields, []client.CustomField{
+			{Name: "region", Value: "us-east-1"},
+			{Name: "owner", Value: "platform"},
+		}) {
+		t.Fatalf("saved Login differs: %+v", login)
+	}
+	if strings.Contains(current.(model).View(), values[2]) {
+		t.Fatal("Vault exposed saved password")
+	}
+}
+
+func TestEditLoginPreservesFieldsAndIncrementsRevision(t *testing.T) {
+	store := &fakeLoginStore{records: []loginRecord{{
+		Login: client.LoginItem{
+			ItemID:   "11111111-1111-4111-8111-111111111111",
+			Name:     "Old name",
+			Username: "operator@example.com",
+			Password: "Password-Sentinel",
+			URLs:     []string{"https://db.example.com"},
+			Notes:    "Primary credentials",
+			CustomFields: []client.CustomField{
+				{Name: "region", Value: "us-east-1"},
+			},
+		},
+		Revision: 1,
+	}}}
+	var current tea.Model = model{
+		loaded:     true,
+		vaultOpen:  true,
+		loginStore: store,
+		logins:     store.records,
+	}
+	current, _ = current.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	current, _ = current.Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	if !strings.Contains(current.(model).View(), "Edit Login") {
+		t.Fatalf("edit key did not open form:\n%s", current.(model).View())
+	}
+	current, _ = current.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+	current, _ = current.Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("New name")})
+
+	var command tea.Cmd
+	for range loginFormFieldCount {
+		current, command = current.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	}
+	if command == nil {
+		t.Fatal("edited Login was not saved")
+	}
+	current, _ = current.Update(command())
+
+	if len(store.saved) != 1 {
+		t.Fatalf("saved Logins: want 1, got %d", len(store.saved))
+	}
+	got := store.saved[0]
+	if got.Revision != 2 {
+		t.Fatalf("revision: want 2, got %d", got.Revision)
+	}
+	if got.Login.Name != "New name" ||
+		got.Login.Username != "operator@example.com" ||
+		got.Login.Password != "Password-Sentinel" ||
+		!reflect.DeepEqual(got.Login.URLs, []string{"https://db.example.com"}) ||
+		got.Login.Notes != "Primary credentials" ||
+		!reflect.DeepEqual(got.Login.CustomFields, []client.CustomField{
+			{Name: "region", Value: "us-east-1"},
+		}) {
+		t.Fatalf("edited Login lost fields: %+v", got.Login)
+	}
+}
+
+type fakeLoginStore struct {
+	records []loginRecord
+	saved   []loginRecord
+	err     error
+}
+
+func (s *fakeLoginStore) List(context.Context) ([]loginRecord, error) {
+	return s.records, s.err
+}
+
+func (s *fakeLoginStore) Save(_ context.Context, record loginRecord) error {
+	if s.err != nil {
+		return s.err
+	}
+	s.saved = append(s.saved, record)
+	for index := range s.records {
+		if s.records[index].Login.ItemID == record.Login.ItemID {
+			s.records[index] = record
+			return nil
+		}
+	}
+	s.records = append(s.records, record)
+	return nil
 }

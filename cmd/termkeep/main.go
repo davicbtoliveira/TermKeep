@@ -248,7 +248,7 @@ func runVaultTUI(cfg client.Config, socketPath string) int {
 		}
 		defer clearPassword(token)
 	}
-	if err := tui.RunVault(cfg, string(token)); err != nil {
+	if err := tui.RunVault(cfg, string(token), socketPath); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 1
 	}
