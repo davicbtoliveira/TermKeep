@@ -95,7 +95,7 @@ func runBootstrap(cfg client.Config, args []string) int {
 
 	fmt.Fprintln(os.Stdout, "Recovery key — save it now. It will not be shown again:")
 	fmt.Fprintln(os.Stdout, result.RecoveryKey)
-	return runVaultTUI(cfg)
+	return runVaultTUI(cfg, "")
 }
 
 func runRegister(cfg client.Config, args []string) int {
@@ -130,7 +130,7 @@ func runRegister(cfg client.Config, args []string) int {
 
 	fmt.Fprintln(os.Stdout, "Recovery key — save it now. It will not be shown again:")
 	fmt.Fprintln(os.Stdout, result.RecoveryKey)
-	return runVaultTUI(cfg)
+	return runVaultTUI(cfg, "")
 }
 
 func runLogin(cfg client.Config, args []string) int {
@@ -159,7 +159,7 @@ func runLogin(cfg client.Config, args []string) int {
 			fmt.Fprintf(os.Stderr, "error: terminal already unlocked for %s; logout first\n", info.Email)
 			return exitUsageFailure
 		}
-		return runVaultTUI(cfg)
+		return runVaultTUI(cfg, scope.SocketPath)
 	}
 
 	password, err := readMasterPassword("Master password: ")
@@ -202,7 +202,7 @@ func runLogin(cfg client.Config, args []string) int {
 		fmt.Fprintln(os.Stderr, "error: start session agent:", err)
 		return exitUsageFailure
 	}
-	return runVaultTUI(cfg)
+	return runVaultTUI(cfg, scope.SocketPath)
 }
 
 func runSessionAgent(args []string) int {
@@ -235,8 +235,20 @@ func runLogout(args []string) int {
 	return 0
 }
 
-func runVaultTUI(cfg client.Config) int {
-	if err := tui.RunVault(cfg); err != nil {
+func runVaultTUI(cfg client.Config, socketPath string) int {
+	var token []byte
+	if socketPath != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		var err error
+		token, err = session.AccessToken(ctx, socketPath)
+		cancel()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error: read online session:", err)
+			return 1
+		}
+		defer clearPassword(token)
+	}
+	if err := tui.RunVault(cfg, string(token)); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 1
 	}

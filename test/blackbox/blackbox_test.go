@@ -33,6 +33,7 @@ import (
 	"github.com/creack/pty"
 	"github.com/davicbtoliveira/TermKeep/internal/client"
 	"github.com/davicbtoliveira/TermKeep/internal/server"
+	"github.com/davicbtoliveira/TermKeep/internal/session"
 )
 
 // stack holds everything a test needs to reach the ephemeral deployment.
@@ -70,6 +71,8 @@ func TestBlackbox(t *testing.T) {
 	t.Run("logout clears the terminal session", s.testTerminalSessionLogout)
 	t.Run("terminal session socket is owner-only", s.testTerminalSessionSocketPermissions)
 	t.Run("ending the shell clears the terminal session", s.testTerminalSessionOwnerExit)
+	t.Run("Active Sessions shows online session metadata", s.testActiveSessionsScreen)
+	t.Run("Active Sessions revokes a remote session", s.testActiveSessionsRevoke)
 	t.Run("invited user registers an isolated vault", s.testInvitedRegistration)
 	t.Run("expired invitation cannot register", s.testExpiredInvitation)
 	t.Run("concurrent invitation consumption registers once", s.testConcurrentInvitationConsumption)
@@ -483,17 +486,38 @@ func (s *stack) testTerminalSessionOwnerExit(t *testing.T) {
 	if len(sockets) != 1 {
 		t.Fatalf("session sockets: want 1, got %d", len(sockets))
 	}
+	token, err := session.AccessToken(context.Background(), sockets[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		for index := range token {
+			token[index] = 0
+		}
+	}()
 	write(t, shell.ptmx, "exit\n")
 	shell.waitExit(5 * time.Second)
 
 	deadline := time.Now().Add(2 * time.Second)
+	socketRemoved := false
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(sockets[0]); os.IsNotExist(err) {
-			return
+			socketRemoved = true
+			break
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	t.Fatal("session socket remained after owner shell exited")
+	if !socketRemoved {
+		t.Fatal("session socket remained after owner shell exited")
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := client.ListSessions(context.Background(), s.clientConfig(), string(token)); err != nil {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("online session remained authorized after owner shell exited")
 }
 
 func (s *stack) testTerminalSessionSocketPermissions(t *testing.T) {
@@ -532,6 +556,89 @@ func (s *stack) testTerminalSessionSocketPermissions(t *testing.T) {
 	if !ok || stat.Uid != uint32(os.Getuid()) {
 		t.Fatalf("session socket is not owned by UID %d", os.Getuid())
 	}
+}
+
+func (s *stack) testActiveSessionsScreen(t *testing.T) {
+	const (
+		email    = "admin@example.com"
+		password = "TermKeep#2026"
+	)
+	remote, err := client.Login(context.Background(), s.clientConfig(), client.LoginInput{
+		Email:          email,
+		MasterPassword: password,
+		Host:           "remote-host",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer remote.Clear()
+	t.Cleanup(func() {
+		_ = client.RevokeSession(context.Background(), s.clientConfig(), remote.AccessToken, "current")
+	})
+
+	loginCommand := fmt.Sprintf("%q --server %q --ca-cert %q login --email %q\n",
+		s.binary, s.serverURL, filepath.Join(s.certsDir, "ca.pem"), email)
+	shell := s.startTerminalShell(t)
+	shell.clear()
+	write(t, shell.ptmx, loginCommand)
+	if matched, output := shell.waitFor(30*time.Second, "Master password:"); matched == "" {
+		t.Fatalf("login did not request master password:\n%s", output)
+	}
+	write(t, shell.ptmx, password+"\n")
+	shell.waitFor(45*time.Second, "Vault:    unlocked (empty)")
+
+	shell.clear()
+	write(t, shell.ptmx, "s")
+	_, output := shell.waitFor(30*time.Second, "remote-host")
+	for _, want := range []string{"Active Sessions", "IP:", "Created:", "Last use:"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("Active Sessions missing %q:\n%s", want, output)
+		}
+	}
+	write(t, shell.ptmx, "q")
+	shell.waitFor(10*time.Second, terminalShellPrompt)
+}
+
+func (s *stack) testActiveSessionsRevoke(t *testing.T) {
+	const (
+		email    = "admin@example.com"
+		password = "TermKeep#2026"
+	)
+	remote, err := client.Login(context.Background(), s.clientConfig(), client.LoginInput{
+		Email:          email,
+		MasterPassword: password,
+		Host:           "remote-to-revoke",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer remote.Clear()
+
+	loginCommand := fmt.Sprintf("%q --server %q --ca-cert %q login --email %q\n",
+		s.binary, s.serverURL, filepath.Join(s.certsDir, "ca.pem"), email)
+	shell := s.startTerminalShell(t)
+	shell.clear()
+	write(t, shell.ptmx, loginCommand)
+	shell.waitFor(30*time.Second, "Master password:")
+	write(t, shell.ptmx, password+"\n")
+	shell.waitFor(45*time.Second, "Vault:    unlocked (empty)")
+	write(t, shell.ptmx, "s")
+	shell.waitFor(30*time.Second, "remote-to-revoke")
+	shell.clear()
+	write(t, shell.ptmx, "j")
+	shell.waitFor(10*time.Second, "> remote-to-revoke")
+	write(t, shell.ptmx, "x")
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := client.ListSessions(context.Background(), s.clientConfig(), remote.AccessToken); err != nil {
+			write(t, shell.ptmx, "q")
+			shell.waitFor(10*time.Second, terminalShellPrompt)
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("revoked remote token remained authorized")
 }
 
 func (s *stack) testInvitedRegistration(t *testing.T) {
