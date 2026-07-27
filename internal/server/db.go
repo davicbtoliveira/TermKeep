@@ -392,3 +392,56 @@ func (s DBStore) ListAccounts(ctx context.Context) ([]AccountSummary, error) {
 	}
 	return accounts, nil
 }
+
+// ListAuditEvents returns operational events in stable reverse chronological
+// order. AccountID scopes ordinary users; an empty value is administrative.
+func (s DBStore) ListAuditEvents(ctx context.Context, query AuditQuery) ([]AuditEvent, error) {
+	var accountID any
+	if query.AccountID != "" {
+		accountID = query.AccountID
+	}
+	var beforeAt, beforeID any
+	if !query.BeforeAt.IsZero() {
+		beforeAt = query.BeforeAt
+		beforeID = query.BeforeID
+	}
+	rows, err := s.DB.QueryContext(ctx, `
+		SELECT uuid::text, event_type, COALESCE(account_uuid::text, ''),
+		       COALESCE(actor_uuid::text, ''), COALESCE(session_uuid::text, ''),
+		       COALESCE(invite_uuid::text, ''), source_ip, occurred_at
+		FROM audit_events
+		WHERE ($1::uuid IS NULL OR account_uuid = $1)
+		  AND ($2::timestamptz IS NULL OR (occurred_at, uuid) < ($2, $3::uuid))
+		ORDER BY occurred_at DESC, uuid DESC
+		LIMIT $4`, accountID, beforeAt, beforeID, query.Limit)
+	if err != nil {
+		return nil, fmt.Errorf("list audit events: %w", err)
+	}
+	defer rows.Close()
+
+	var events []AuditEvent
+	for rows.Next() {
+		var event AuditEvent
+		if err := rows.Scan(
+			&event.EventID, &event.Type, &event.AccountID, &event.ActorID,
+			&event.SessionID, &event.InviteID, &event.SourceIP, &event.OccurredAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan audit event: %w", err)
+		}
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate audit events: %w", err)
+	}
+	return events, nil
+}
+
+// DeleteAuditEventsBefore enforces configured retention without exposing
+// event contents to application logs.
+func (s DBStore) DeleteAuditEventsBefore(ctx context.Context, cutoff time.Time) error {
+	if _, err := s.DB.ExecContext(ctx,
+		"DELETE FROM audit_events WHERE occurred_at < $1", cutoff); err != nil {
+		return fmt.Errorf("delete expired audit events: %w", err)
+	}
+	return nil
+}

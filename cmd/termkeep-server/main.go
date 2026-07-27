@@ -56,6 +56,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	auditRetention, err := server.ParseAuditRetention(os.Getenv("AUDIT_RETENTION_DAYS"))
+	if err != nil {
+		return err
+	}
 
 	addr := os.Getenv("LISTEN_ADDR")
 	if addr == "" {
@@ -78,13 +82,15 @@ func run() error {
 	slog.Info("migrations applied", "schema_version", schemaVersion)
 
 	dbStore := server.DBStore{DB: db}
+	audit := server.NewAuditLog(dbStore, auditRetention)
 	auth := server.NewAuthService(opaqueServer, dbStore)
 	invites := server.NewInviteService(dbStore, auth)
 	accounts := server.NewAccountService(dbStore, auth)
 	sessions := server.NewSessionService(dbStore, auth)
+	activity := server.NewActivityService(audit, auth)
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           server.NewHandler(version, dbStore, trusted, auth, invites, accounts, sessions),
+		Handler:           server.NewHandler(version, dbStore, trusted, auth, invites, accounts, sessions, activity),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
