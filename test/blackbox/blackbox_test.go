@@ -64,6 +64,10 @@ func TestBlackbox(t *testing.T) {
 	t.Run("proxy headers ignored from untrusted sources", s.testTrustedProxyEnforcement)
 	t.Run("bare invocation opens TUI with instance state", s.testTUI)
 	t.Run("bootstrap creates only encrypted administrator vault material", s.testBootstrap)
+	t.Run("login reuses unlocked session in the same terminal", s.testTerminalSessionReuse)
+	t.Run("another terminal requires its own login", s.testTerminalSessionIsolation)
+	t.Run("logout clears the terminal session", s.testTerminalSessionLogout)
+	t.Run("ending the shell clears the terminal session", s.testTerminalSessionOwnerExit)
 	t.Run("invited user registers an isolated vault", s.testInvitedRegistration)
 	t.Run("expired invitation cannot register", s.testExpiredInvitation)
 	t.Run("concurrent invitation consumption registers once", s.testConcurrentInvitationConsumption)
@@ -391,6 +395,103 @@ func (s *stack) testBootstrap(t *testing.T) {
 	if retryCode == 0 {
 		t.Fatal("second bootstrap unexpectedly succeeded")
 	}
+}
+
+func (s *stack) testTerminalSessionReuse(t *testing.T) {
+	const (
+		email    = "admin@example.com"
+		password = "TermKeep#2026"
+	)
+	shell := s.startTerminalShell(t)
+	command := fmt.Sprintf("%q --server %q --ca-cert %q login --email %q\n",
+		s.binary, s.serverURL, filepath.Join(s.certsDir, "ca.pem"), email)
+	shell.login(command, password)
+
+	shell.clear()
+	write(t, shell.ptmx, command)
+	matched, output := shell.waitFor(30*time.Second, "Master password:", "Vault:    unlocked (empty)")
+	if matched == "Master password:" {
+		t.Fatalf("same terminal requested master password again:\n%s", output)
+	}
+	if matched != "Vault:    unlocked (empty)" {
+		t.Fatalf("same terminal did not reuse unlocked session:\n%s", output)
+	}
+	write(t, shell.ptmx, "q")
+	shell.waitFor(10*time.Second, terminalShellPrompt)
+}
+
+func (s *stack) testTerminalSessionIsolation(t *testing.T) {
+	const (
+		email    = "admin@example.com"
+		password = "TermKeep#2026"
+	)
+	command := fmt.Sprintf("%q --server %q --ca-cert %q login --email %q\n",
+		s.binary, s.serverURL, filepath.Join(s.certsDir, "ca.pem"), email)
+	owner := s.startTerminalShell(t)
+	owner.login(command, password)
+
+	other := s.startTerminalShell(t)
+	other.clear()
+	write(t, other.ptmx, command)
+	matched, output := other.waitFor(30*time.Second, "Master password:", "Vault:    unlocked (empty)")
+	if matched != "Master password:" {
+		t.Fatalf("other terminal reused unlocked session:\n%s", output)
+	}
+}
+
+func (s *stack) testTerminalSessionLogout(t *testing.T) {
+	const (
+		email    = "admin@example.com"
+		password = "TermKeep#2026"
+	)
+	loginCommand := fmt.Sprintf("%q --server %q --ca-cert %q login --email %q\n",
+		s.binary, s.serverURL, filepath.Join(s.certsDir, "ca.pem"), email)
+	shell := s.startTerminalShell(t)
+	shell.login(loginCommand, password)
+
+	shell.clear()
+	write(t, shell.ptmx, fmt.Sprintf("%q logout\n", s.binary))
+	if _, output := shell.waitFor(10*time.Second, "Session: locked"); !strings.Contains(output, "Session: locked") {
+		t.Fatalf("logout did not report locked session:\n%s", output)
+	}
+	shell.waitFor(10*time.Second, terminalShellPrompt)
+
+	shell.clear()
+	write(t, shell.ptmx, loginCommand)
+	matched, output := shell.waitFor(30*time.Second, "Master password:", "Vault:    unlocked (empty)")
+	if matched != "Master password:" {
+		t.Fatalf("login remained unlocked after logout:\n%s", output)
+	}
+}
+
+func (s *stack) testTerminalSessionOwnerExit(t *testing.T) {
+	const (
+		email    = "admin@example.com"
+		password = "TermKeep#2026"
+	)
+	loginCommand := fmt.Sprintf("%q --server %q --ca-cert %q login --email %q\n",
+		s.binary, s.serverURL, filepath.Join(s.certsDir, "ca.pem"), email)
+	shell := s.startTerminalShell(t)
+	shell.login(loginCommand, password)
+
+	sockets, err := filepath.Glob(filepath.Join(shell.runtimeDir, "termkeep", "*.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sockets) != 1 {
+		t.Fatalf("session sockets: want 1, got %d", len(sockets))
+	}
+	write(t, shell.ptmx, "exit\n")
+	shell.waitExit(5 * time.Second)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(sockets[0]); os.IsNotExist(err) {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatal("session socket remained after owner shell exited")
 }
 
 func (s *stack) testInvitedRegistration(t *testing.T) {
@@ -867,6 +968,127 @@ type lockedWriter struct {
 	buf *bytes.Buffer
 }
 
+const terminalShellPrompt = "termkeep-test> "
+
+type terminalShell struct {
+	t          *testing.T
+	cmd        *exec.Cmd
+	ptmx       *os.File
+	runtimeDir string
+	mu         sync.Mutex
+	buf        bytes.Buffer
+	waitErr    error
+	done       chan struct{}
+}
+
+func (s *stack) startTerminalShell(t *testing.T) *terminalShell {
+	t.Helper()
+	cmd := exec.Command("sh")
+	cmd.Env = withoutEnv(os.Environ(),
+		"TERM", "PS1", "TERMKEEP_SERVER", "TERMKEEP_CA_CERT", "XDG_RUNTIME_DIR")
+	runtimeDir, err := os.MkdirTemp("/tmp", "tk-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(runtimeDir) })
+	cmd.Env = append(cmd.Env,
+		"TERM=dumb",
+		"PS1="+terminalShellPrompt,
+		"XDG_RUNTIME_DIR="+runtimeDir,
+	)
+	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 24, Cols: 80})
+	if err != nil {
+		t.Fatal(err)
+	}
+	shell := &terminalShell{
+		t:          t,
+		cmd:        cmd,
+		ptmx:       ptmx,
+		runtimeDir: runtimeDir,
+		done:       make(chan struct{}),
+	}
+	go func() { _, _ = io.Copy(&lockedWriter{&shell.mu, &shell.buf}, ptmx) }()
+	go func() {
+		err := cmd.Wait()
+		shell.mu.Lock()
+		shell.waitErr = err
+		shell.mu.Unlock()
+		close(shell.done)
+	}()
+	t.Cleanup(func() {
+		_ = ptmx.Close()
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		select {
+		case <-shell.done:
+		case <-time.After(5 * time.Second):
+			t.Error("terminal shell did not exit")
+		}
+	})
+	shell.waitFor(10*time.Second, terminalShellPrompt)
+	return shell
+}
+
+func (s *terminalShell) clear() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.buf.Reset()
+}
+
+func (s *terminalShell) login(command, password string) {
+	s.t.Helper()
+	s.clear()
+	write(s.t, s.ptmx, command)
+	if matched, output := s.waitFor(30*time.Second, "Master password:", "Vault:    unlocked (empty)"); matched != "Master password:" {
+		s.t.Fatalf("first login did not request master password:\n%s", output)
+	}
+	write(s.t, s.ptmx, password+"\n")
+	if _, output := s.waitFor(45*time.Second, "Vault:    unlocked (empty)"); !strings.Contains(output, "Vault:    unlocked (empty)") {
+		s.t.Fatalf("login did not open vault:\n%s", output)
+	}
+	write(s.t, s.ptmx, "q")
+	s.waitFor(10*time.Second, terminalShellPrompt)
+}
+
+func (s *terminalShell) waitFor(timeout time.Duration, values ...string) (string, string) {
+	s.t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		s.mu.Lock()
+		output := stripANSI(s.buf.String())
+		s.mu.Unlock()
+		for _, value := range values {
+			if strings.Contains(output, value) {
+				return value, output
+			}
+		}
+		select {
+		case <-s.done:
+			s.mu.Lock()
+			err := s.waitErr
+			s.mu.Unlock()
+			s.t.Fatalf("terminal shell exited while waiting for %q: %v\n%s", values, err, output)
+		default:
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	s.mu.Lock()
+	output := stripANSI(s.buf.String())
+	s.mu.Unlock()
+	s.t.Fatalf("terminal shell timed out waiting for %q:\n%s", values, output)
+	return "", output
+}
+
+func (s *terminalShell) waitExit(timeout time.Duration) {
+	s.t.Helper()
+	select {
+	case <-s.done:
+	case <-time.After(timeout):
+		s.t.Fatal("terminal shell did not exit")
+	}
+}
+
 func (w *lockedWriter) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -981,7 +1203,7 @@ func stripANSI(s string) string {
 		switch {
 		case c == 0x1b:
 			inEscape = true
-		case inEscape && (c == 'm' || c == 'K' || c == 'J' || c == 'H'):
+		case inEscape && (c == 'm' || c == 'K' || c == 'J' || c == 'H' || c == 'h' || c == 'l'):
 			inEscape = false
 		case !inEscape:
 			b.WriteByte(c)

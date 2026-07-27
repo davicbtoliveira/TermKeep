@@ -187,6 +187,34 @@ func TestAuthorizedUseResetsAutoLock(t *testing.T) {
 	}
 }
 
+func TestDisabledAutoLockDoesNotExpire(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "agent.sock")
+	agent, err := session.NewAgent(session.AgentConfig{
+		SocketPath: socketPath,
+		OwnerUID:   uint32(os.Getuid()),
+		VaultKey:   []byte("01234567890123456789012345678901"),
+		AutoLock:   0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- agent.Serve(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		_ = agent.Close()
+		if err := <-done; err != nil {
+			t.Errorf("serve agent: %v", err)
+		}
+	})
+
+	time.Sleep(150 * time.Millisecond)
+	if _, err := session.Status(ctx, socketPath); err != nil {
+		t.Fatalf("disabled auto-lock ended session: %v", err)
+	}
+}
+
 func TestAgentEndsWhenOwnerProcessExits(t *testing.T) {
 	owner := exec.Command("sleep", "30")
 	if err := owner.Start(); err != nil {

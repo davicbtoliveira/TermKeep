@@ -7,10 +7,13 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
+	"time"
 
 	"golang.org/x/term"
 
 	"github.com/davicbtoliveira/TermKeep/internal/client"
+	"github.com/davicbtoliveira/TermKeep/internal/session"
 	"github.com/davicbtoliveira/TermKeep/internal/tui"
 )
 
@@ -50,10 +53,14 @@ func run(args []string) int {
 		return runRegister(cfg, fs.Args()[1:])
 	case "login":
 		return runLogin(cfg, fs.Args()[1:])
+	case "logout":
+		return runLogout(fs.Args()[1:])
+	case "__session-agent":
+		return runSessionAgent(fs.Args()[1:])
 	case "":
 		return runTUI(cfg)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n\nusage: termkeep [--server URL] [--ca-cert FILE] [status|bootstrap|register|login]\n", fs.Arg(0))
+		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n\nusage: termkeep [--server URL] [--ca-cert FILE] [status|bootstrap|register|login|logout]\n", fs.Arg(0))
 		return exitUsageFailure
 	}
 }
@@ -129,10 +136,32 @@ func runRegister(cfg client.Config, args []string) int {
 func runLogin(cfg client.Config, args []string) int {
 	fs := flag.NewFlagSet("login", flag.ContinueOnError)
 	email := fs.String("email", "", "account email")
+	autoLockValue := fs.String("auto-lock", "", "inactivity timeout in minutes (1-60 or off; default 15)")
 	if err := fs.Parse(args); err != nil || *email == "" || fs.NArg() != 0 {
-		fmt.Fprintln(os.Stderr, "usage: termkeep login --email EMAIL")
+		fmt.Fprintln(os.Stderr, "usage: termkeep login --email EMAIL [--auto-lock 1-60|off]")
 		return exitUsageFailure
 	}
+	autoLock, err := session.ParseAutoLock(*autoLockValue)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return exitUsageFailure
+	}
+	scope, err := session.CurrentScope(os.Stdin)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return exitUsageFailure
+	}
+	statusCtx, cancelStatus := context.WithTimeout(context.Background(), time.Second)
+	info, statusErr := session.Status(statusCtx, scope.SocketPath)
+	cancelStatus()
+	if statusErr == nil {
+		if !strings.EqualFold(strings.TrimSpace(*email), info.Email) {
+			fmt.Fprintf(os.Stderr, "error: terminal already unlocked for %s; logout first\n", info.Email)
+			return exitUsageFailure
+		}
+		return runVaultTUI(cfg)
+	}
+
 	password, err := readMasterPassword("Master password: ")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -147,7 +176,55 @@ func runLogin(cfg client.Config, args []string) int {
 		return exitUsageFailure
 	}
 	defer result.Clear()
+	executable, err := os.Executable()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error: locate session agent executable:", err)
+		return exitUsageFailure
+	}
+	accessToken := []byte(result.AccessToken)
+	defer clearPassword(accessToken)
+	launchCtx, cancelLaunch := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelLaunch()
+	if err := session.Launch(launchCtx, executable, scope, session.UnlockMaterial{
+		AccountID:   result.AccountID,
+		Email:       strings.ToLower(strings.TrimSpace(*email)),
+		VaultKey:    result.VaultKey,
+		AccessToken: accessToken,
+	}, autoLock); err != nil {
+		fmt.Fprintln(os.Stderr, "error: start session agent:", err)
+		return exitUsageFailure
+	}
 	return runVaultTUI(cfg)
+}
+
+func runSessionAgent(args []string) int {
+	startup := os.NewFile(3, "session-startup")
+	if err := session.RunAgentProcess(args, startup); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	return 0
+}
+
+func runLogout(args []string) int {
+	fs := flag.NewFlagSet("logout", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "usage: termkeep logout")
+		return exitUsageFailure
+	}
+	scope, err := session.CurrentScope(os.Stdin)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return exitUsageFailure
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := session.Logout(ctx, scope.SocketPath); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	fmt.Fprintln(os.Stdout, "Session: locked")
+	return 0
 }
 
 func runVaultTUI(cfg client.Config) int {

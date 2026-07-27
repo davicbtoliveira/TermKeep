@@ -62,7 +62,7 @@ func Launch(ctx context.Context, executable string, scope Scope, material Unlock
 	defer null.Close()
 	command.Stdin = null
 	command.Stdout = null
-	command.Stderr = null
+	command.Stderr = os.Stderr
 	if err := command.Start(); err != nil {
 		writer.Close()
 		return fmt.Errorf("start session agent: %w", err)
