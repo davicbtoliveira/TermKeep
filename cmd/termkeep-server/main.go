@@ -88,9 +88,10 @@ func run() error {
 	accounts := server.NewAccountService(dbStore, auth)
 	sessions := server.NewSessionService(dbStore, auth, audit)
 	activity := server.NewActivityService(audit, auth)
+	items := server.NewItemService(dbStore, auth)
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           server.NewHandler(version, dbStore, trusted, auth, invites, accounts, sessions, activity),
+		Handler:           server.NewHandler(version, dbStore, trusted, auth, invites, accounts, sessions, activity, items),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

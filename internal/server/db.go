@@ -468,3 +468,62 @@ func (s DBStore) DeleteAuditEventsBefore(ctx context.Context, cutoff time.Time) 
 	}
 	return nil
 }
+
+// PutItem atomically accepts revision 1 for creation or exactly the next
+// revision for an existing opaque item.
+func (s DBStore) PutItem(ctx context.Context, accountID string, item OpaqueItem) error {
+	result, err := s.DB.ExecContext(ctx, `
+		INSERT INTO vault_items (
+			account_uuid, item_uuid, schema_version, revision, envelope
+		)
+		SELECT $1, $2, $3, $4, $5
+		WHERE $4 = 1
+		ON CONFLICT (account_uuid, item_uuid) DO UPDATE
+		SET schema_version = EXCLUDED.schema_version,
+		    revision = EXCLUDED.revision,
+		    envelope = EXCLUDED.envelope,
+		    updated_at = now()
+		WHERE vault_items.revision + 1 = EXCLUDED.revision`,
+		accountID, item.ItemID, item.SchemaVersion, int64(item.Revision), item.Envelope)
+	if err != nil {
+		return fmt.Errorf("put opaque item: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("put opaque item rows affected: %w", err)
+	}
+	if count == 0 {
+		return ErrItemRevisionConflict
+	}
+	return nil
+}
+
+// ListItems returns opaque envelopes for one authenticated account.
+func (s DBStore) ListItems(ctx context.Context, accountID string) ([]OpaqueItem, error) {
+	rows, err := s.DB.QueryContext(ctx, `
+		SELECT item_uuid::text, schema_version, revision, envelope
+		FROM vault_items
+		WHERE account_uuid = $1
+		ORDER BY item_uuid`, accountID)
+	if err != nil {
+		return nil, fmt.Errorf("list opaque items: %w", err)
+	}
+	defer rows.Close()
+
+	var items []OpaqueItem
+	for rows.Next() {
+		var item OpaqueItem
+		var revision int64
+		if err := rows.Scan(
+			&item.ItemID, &item.SchemaVersion, &revision, &item.Envelope,
+		); err != nil {
+			return nil, fmt.Errorf("scan opaque item: %w", err)
+		}
+		item.Revision = uint64(revision)
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate opaque items: %w", err)
+	}
+	return items, nil
+}
