@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -278,6 +279,304 @@ func TestCachePreservesAndResolvesConcurrentRevisionHeads(t *testing.T) {
 	if len(groups) != 1 || len(groups[0].Revisions) != 1 ||
 		groups[0].Revisions[0].RevisionID != resolutionID {
 		t.Fatalf("resolved heads: %+v", groups)
+	}
+}
+
+func TestDeletionMovesEncryptedItemToTrash(t *testing.T) {
+	password := []byte("TermKeep#2026")
+	accountID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	vault, err := NewVault(password, accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vault.Clear()
+	cfg := Config{DataDir: filepath.Join(t.TempDir(), "cache")}
+	if err := AuthorizeCache(
+		cfg,
+		"user@example.com",
+		accountID,
+		vault.PasswordEnvelope,
+	); err != nil {
+		t.Fatal(err)
+	}
+	cache, err := OpenCache(cfg, "user@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := EncryptedItem{
+		ItemID:        "11111111-1111-4111-8111-111111111111",
+		SchemaVersion: 1,
+		Revision:      1,
+		RevisionID:    "22222222-2222-4222-8222-222222222222",
+		Envelope:      []byte("encrypted-root"),
+	}
+	if err := cache.ApplySync("1", nil, []EncryptedItem{root}); err != nil {
+		t.Fatal(err)
+	}
+	deleted := EncryptedItem{
+		ItemID:            root.ItemID,
+		SchemaVersion:     1,
+		Revision:          2,
+		RevisionID:        "33333333-3333-4333-8333-333333333333",
+		ParentRevisionIDs: []string{root.RevisionID},
+		Deleted:           true,
+		Envelope:          []byte("encrypted-trash"),
+	}
+	mutation, err := cache.QueueMutation(deleted, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mutation.MutationID != deleted.RevisionID {
+		t.Fatalf("deletion mutation: %+v", mutation)
+	}
+	active, err := cache.ItemHeads()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != 0 {
+		t.Fatalf("deleted item remained active: %+v", active)
+	}
+	trash, err := cache.TrashHeads()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(trash) != 1 || len(trash[0].Revisions) != 1 ||
+		!trash[0].Revisions[0].Deleted ||
+		string(trash[0].Revisions[0].Envelope) != "encrypted-trash" {
+		t.Fatalf("encrypted trash: %+v", trash)
+	}
+}
+
+func TestPermanentDeletionLeavesOnlyTechnicalTombstone(t *testing.T) {
+	password := []byte("TermKeep#2026")
+	accountID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	vault, err := NewVault(password, accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vault.Clear()
+	cfg := Config{DataDir: filepath.Join(t.TempDir(), "cache")}
+	if err := AuthorizeCache(
+		cfg,
+		"user@example.com",
+		accountID,
+		vault.PasswordEnvelope,
+	); err != nil {
+		t.Fatal(err)
+	}
+	cache, err := OpenCache(cfg, "user@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootID := "22222222-2222-4222-8222-222222222222"
+	deletedID := "33333333-3333-4333-8333-333333333333"
+	deleted := EncryptedItem{
+		ItemID:            "11111111-1111-4111-8111-111111111111",
+		SchemaVersion:     1,
+		Revision:          2,
+		RevisionID:        deletedID,
+		ParentRevisionIDs: []string{rootID},
+		Deleted:           true,
+		Envelope:          []byte("encrypted-trash"),
+	}
+	if err := cache.ApplySync(
+		"2",
+		nil,
+		[]EncryptedItem{
+			{
+				ItemID:        deleted.ItemID,
+				SchemaVersion: 1,
+				Revision:      1,
+				RevisionID:    rootID,
+				Envelope:      []byte("encrypted-root"),
+			},
+			deleted,
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	purged := EncryptedItem{
+		ItemID:            deleted.ItemID,
+		SchemaVersion:     1,
+		Revision:          3,
+		RevisionID:        "44444444-4444-4444-8444-444444444444",
+		ParentRevisionIDs: []string{deletedID},
+		Deleted:           true,
+		Purged:            true,
+	}
+	mutation, err := cache.QueueMutation(purged, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !mutation.Item.Purged || len(mutation.Item.Envelope) != 0 {
+		t.Fatalf("permanent deletion mutation: %+v", mutation)
+	}
+	trash, err := cache.TrashHeads()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(trash) != 0 {
+		t.Fatalf("purged item remained in trash: %+v", trash)
+	}
+	stored, err := os.ReadFile(cache.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, envelope := range []string{"encrypted-root", "encrypted-trash"} {
+		encoded := base64.StdEncoding.EncodeToString([]byte(envelope))
+		if bytes.Contains(stored, []byte(encoded)) {
+			t.Fatalf("cache retained purged ciphertext %q", envelope)
+		}
+	}
+}
+
+func TestRestoreMovesEncryptedItemOutOfTrash(t *testing.T) {
+	password := []byte("TermKeep#2026")
+	accountID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	vault, err := NewVault(password, accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vault.Clear()
+	cfg := Config{DataDir: filepath.Join(t.TempDir(), "cache")}
+	if err := AuthorizeCache(
+		cfg,
+		"user@example.com",
+		accountID,
+		vault.PasswordEnvelope,
+	); err != nil {
+		t.Fatal(err)
+	}
+	cache, err := OpenCache(cfg, "user@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deleted := EncryptedItem{
+		ItemID:        "11111111-1111-4111-8111-111111111111",
+		SchemaVersion: 1,
+		Revision:      2,
+		RevisionID:    "33333333-3333-4333-8333-333333333333",
+		ParentRevisionIDs: []string{
+			"22222222-2222-4222-8222-222222222222",
+		},
+		Deleted:  true,
+		Envelope: []byte("encrypted-trash"),
+	}
+	if err := cache.ApplySync(
+		"2", nil, []EncryptedItem{deleted},
+	); err != nil {
+		t.Fatal(err)
+	}
+	restored := EncryptedItem{
+		ItemID:            deleted.ItemID,
+		SchemaVersion:     1,
+		Revision:          3,
+		RevisionID:        "44444444-4444-4444-8444-444444444444",
+		ParentRevisionIDs: []string{deleted.RevisionID},
+		Envelope:          []byte("encrypted-restored"),
+	}
+	if _, err := cache.QueueMutation(restored, 2); err != nil {
+		t.Fatal(err)
+	}
+	trash, err := cache.TrashHeads()
+	if err != nil {
+		t.Fatal(err)
+	}
+	active, err := cache.ItemHeads()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(trash) != 0 ||
+		len(active) != 1 ||
+		len(active[0].Revisions) != 1 ||
+		active[0].Revisions[0].Deleted ||
+		active[0].Revisions[0].RevisionID != restored.RevisionID {
+		t.Fatalf("restored item: active=%+v trash=%+v", active, trash)
+	}
+}
+
+func TestStaleOfflineEditConflictsWithPurgedTombstone(t *testing.T) {
+	password := []byte("TermKeep#2026")
+	accountID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	vault, err := NewVault(password, accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vault.Clear()
+	cfg := Config{DataDir: filepath.Join(t.TempDir(), "cache")}
+	if err := AuthorizeCache(
+		cfg,
+		"user@example.com",
+		accountID,
+		vault.PasswordEnvelope,
+	); err != nil {
+		t.Fatal(err)
+	}
+	cache, err := OpenCache(cfg, "user@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := EncryptedItem{
+		ItemID:        "11111111-1111-4111-8111-111111111111",
+		SchemaVersion: 1,
+		Revision:      1,
+		RevisionID:    "22222222-2222-4222-8222-222222222222",
+		Envelope:      []byte("encrypted-root"),
+	}
+	if err := cache.ApplySync("1", nil, []EncryptedItem{root}); err != nil {
+		t.Fatal(err)
+	}
+	offline := EncryptedItem{
+		ItemID:            root.ItemID,
+		SchemaVersion:     1,
+		Revision:          2,
+		RevisionID:        "33333333-3333-4333-8333-333333333333",
+		ParentRevisionIDs: []string{root.RevisionID},
+		Envelope:          []byte("encrypted-offline-edit"),
+	}
+	if _, err := cache.QueueMutation(offline, 1); err != nil {
+		t.Fatal(err)
+	}
+	tombstone := EncryptedItem{
+		ItemID:        root.ItemID,
+		SchemaVersion: 1,
+		Revision:      3,
+		RevisionID:    "55555555-5555-4555-8555-555555555555",
+		ParentRevisionIDs: []string{
+			"44444444-4444-4444-8444-444444444444",
+		},
+		Deleted: true,
+		Purged:  true,
+	}
+	if err := cache.ApplySync(
+		"3", nil, []EncryptedItem{tombstone},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	active, err := cache.ItemHeads()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != 1 || len(active[0].Revisions) != 2 {
+		t.Fatalf("stale edit/Tombstone Conflict: %+v", active)
+	}
+	got := map[string]EncryptedItem{}
+	for _, head := range active[0].Revisions {
+		got[head.RevisionID] = head
+	}
+	if string(got[offline.RevisionID].Envelope) !=
+		"encrypted-offline-edit" ||
+		!got[tombstone.RevisionID].Purged {
+		t.Fatalf("Conflict heads not preserved: %+v", got)
+	}
+	pending, err := cache.PendingMutations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 ||
+		pending[0].MutationID != offline.RevisionID {
+		t.Fatalf("stale edit mutation lost: %+v", pending)
 	}
 }
 

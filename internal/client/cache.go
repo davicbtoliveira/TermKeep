@@ -128,7 +128,7 @@ func (c *Cache) QueueMutation(
 ) (Mutation, error) {
 	if item.ItemID == "" || item.SchemaVersion < 1 ||
 		item.Revision == 0 || item.Revision != baseRevision+1 ||
-		len(item.Envelope) == 0 {
+		!validEncryptedItemContent(item) {
 		return Mutation{}, ErrInvalidItemEnvelope
 	}
 	if item.RevisionID == "" {
@@ -192,7 +192,12 @@ func (c *Cache) QueueMutation(
 			BaseRevision: baseRevision,
 			Item:         item,
 		}
-		revisions[item.RevisionID] = item
+		if item.Purged {
+			data.Revisions[item.ItemID] =
+				map[string]EncryptedItem{item.RevisionID: item}
+		} else {
+			revisions[item.RevisionID] = item
+		}
 		data.Mutations = append(data.Mutations, mutation)
 		return writeCacheFile(c.path, data)
 	})
@@ -215,6 +220,48 @@ func (c *Cache) Items() ([]EncryptedItem, error) {
 }
 
 func (c *Cache) ItemHeads() ([]ItemHead, error) {
+	groups, err := c.allItemHeads()
+	if err != nil {
+		return nil, err
+	}
+	active := groups[:0]
+	for _, group := range groups {
+		for _, revision := range group.Revisions {
+			if !revision.Deleted {
+				active = append(active, group)
+				break
+			}
+		}
+	}
+	return active, nil
+}
+
+func (c *Cache) TrashHeads() ([]ItemHead, error) {
+	groups, err := c.allItemHeads()
+	if err != nil {
+		return nil, err
+	}
+	trash := groups[:0]
+	for _, group := range groups {
+		deleted := true
+		recoverable := false
+		for _, revision := range group.Revisions {
+			if !revision.Deleted {
+				deleted = false
+				break
+			}
+			if !revision.Purged {
+				recoverable = true
+			}
+		}
+		if deleted && recoverable {
+			trash = append(trash, group)
+		}
+	}
+	return trash, nil
+}
+
+func (c *Cache) allItemHeads() ([]ItemHead, error) {
 	data, err := c.read()
 	if err != nil {
 		return nil, err
@@ -281,7 +328,7 @@ func (c *Cache) ApplySync(
 	for _, change := range changes {
 		if change.ItemID == "" || change.SchemaVersion < 1 ||
 			change.Revision < 1 || change.RevisionID == "" ||
-			len(change.Envelope) == 0 {
+			!validEncryptedItemContent(change) {
 			return ErrInvalidItemEnvelope
 		}
 		seen := make(map[string]bool, len(change.ParentRevisionIDs))
@@ -314,7 +361,20 @@ func (c *Cache) ApplySync(
 			if exists && !sameEncryptedItem(current, change) {
 				return ErrInvalidItemEnvelope
 			}
-			revisions[change.RevisionID] = cloneEncryptedItem(change)
+			if change.Purged {
+				preserved := map[string]EncryptedItem{
+					change.RevisionID: cloneEncryptedItem(change),
+				}
+				for _, mutation := range data.Mutations {
+					if mutation.Item.ItemID == change.ItemID {
+						preserved[mutation.Item.RevisionID] =
+							cloneEncryptedItem(mutation.Item)
+					}
+				}
+				data.Revisions[change.ItemID] = preserved
+			} else {
+				revisions[change.RevisionID] = cloneEncryptedItem(change)
+			}
 		}
 		data.Cursor = cursor
 		return writeCacheFile(c.path, data)
@@ -415,7 +475,8 @@ func readCacheFile(path string) (cacheFile, error) {
 		for revisionID, item := range revisions {
 			if revisionID == "" || item.RevisionID != revisionID ||
 				item.ItemID != itemID || item.SchemaVersion < 1 ||
-				item.Revision < 1 || len(item.Envelope) == 0 ||
+				item.Revision < 1 ||
+				!validEncryptedItemContent(item) ||
 				hasInvalidParentIDs(item.ParentRevisionIDs) {
 				return cacheFile{}, ErrInvalidCache
 			}
@@ -426,7 +487,7 @@ func readCacheFile(path string) (cacheFile, error) {
 			mutation.Item.RevisionID != mutation.MutationID ||
 			mutation.Item.Revision != mutation.BaseRevision+1 ||
 			mutation.Item.ItemID == "" ||
-			len(mutation.Item.Envelope) == 0 ||
+			!validEncryptedItemContent(mutation.Item) ||
 			(mutation.BaseRevision == 0 &&
 				len(mutation.Item.ParentRevisionIDs) != 0) ||
 			(mutation.BaseRevision > 0 &&
@@ -613,6 +674,8 @@ func sameEncryptedItem(left, right EncryptedItem) bool {
 		left.SchemaVersion != right.SchemaVersion ||
 		left.Revision != right.Revision ||
 		left.RevisionID != right.RevisionID ||
+		left.Deleted != right.Deleted ||
+		left.Purged != right.Purged ||
 		!bytes.Equal(left.Envelope, right.Envelope) ||
 		len(left.ParentRevisionIDs) != len(right.ParentRevisionIDs) {
 		return false
@@ -627,6 +690,13 @@ func sameEncryptedItem(left, right EncryptedItem) bool {
 		}
 	}
 	return true
+}
+
+func validEncryptedItemContent(item EncryptedItem) bool {
+	if item.Purged {
+		return item.Deleted && len(item.Envelope) == 0
+	}
+	return len(item.Envelope) > 0
 }
 
 func hasInvalidParentIDs(ids []string) bool {

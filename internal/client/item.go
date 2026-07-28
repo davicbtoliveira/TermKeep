@@ -40,6 +40,8 @@ type EncryptedItem struct {
 	Revision          uint64   `json:"revision"`
 	RevisionID        string   `json:"revision_id"`
 	ParentRevisionIDs []string `json:"parent_revision_ids"`
+	Deleted           bool     `json:"deleted"`
+	Purged            bool     `json:"purged"`
 	Envelope          []byte   `json:"envelope"`
 }
 
