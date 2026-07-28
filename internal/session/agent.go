@@ -54,18 +54,20 @@ type Agent struct {
 }
 
 type request struct {
-	Action   string                `json:"action"`
-	Login    *client.LoginItem     `json:"login,omitempty"`
-	Item     *client.EncryptedItem `json:"item,omitempty"`
-	Revision uint64                `json:"revision,omitempty"`
+	Action   string                 `json:"action"`
+	Login    *client.LoginItem      `json:"login,omitempty"`
+	Note     *client.SecureNoteItem `json:"note,omitempty"`
+	Item     *client.EncryptedItem  `json:"item,omitempty"`
+	Revision uint64                 `json:"revision,omitempty"`
 }
 
 type response struct {
-	Info  *Info                 `json:"info,omitempty"`
-	Token []byte                `json:"token,omitempty"`
-	Item  *client.EncryptedItem `json:"item,omitempty"`
-	Login *client.LoginItem     `json:"login,omitempty"`
-	Error string                `json:"error,omitempty"`
+	Info  *Info                  `json:"info,omitempty"`
+	Token []byte                 `json:"token,omitempty"`
+	Item  *client.EncryptedItem  `json:"item,omitempty"`
+	Login *client.LoginItem      `json:"login,omitempty"`
+	Note  *client.SecureNoteItem `json:"note,omitempty"`
+	Error string                 `json:"error,omitempty"`
 }
 
 // NewAgent binds a terminal session socket and takes an in-memory copy of the
@@ -227,6 +229,30 @@ func (a *Agent) handle(conn *net.UnixConn) {
 			return
 		}
 		_ = json.NewEncoder(conn).Encode(response{Login: &login})
+	case "seal-secure-note":
+		if req.Note == nil {
+			_ = json.NewEncoder(conn).Encode(response{Error: "note is required"})
+			return
+		}
+		item, err := client.EncryptSecureNote(
+			a.vaultKey, a.accountID, *req.Note, req.Revision)
+		if err != nil {
+			_ = json.NewEncoder(conn).Encode(response{Error: err.Error()})
+			return
+		}
+		_ = json.NewEncoder(conn).Encode(response{Item: &item})
+	case "open-secure-note":
+		if req.Item == nil {
+			_ = json.NewEncoder(conn).Encode(response{Error: "item is required"})
+			return
+		}
+		note, err := client.DecryptSecureNote(
+			a.vaultKey, a.accountID, *req.Item)
+		if err != nil {
+			_ = json.NewEncoder(conn).Encode(response{Error: err.Error()})
+			return
+		}
+		_ = json.NewEncoder(conn).Encode(response{Note: &note})
 	default:
 		_ = json.NewEncoder(conn).Encode(response{Error: "unknown session action"})
 	}
@@ -382,6 +408,46 @@ func OpenLogin(
 		return client.LoginItem{}, errors.New("session agent returned no login")
 	}
 	return *res.Login, nil
+}
+
+func SealSecureNote(
+	ctx context.Context,
+	socketPath string,
+	note client.SecureNoteItem,
+	revision uint64,
+) (client.EncryptedItem, error) {
+	res, err := requestAgent(ctx, socketPath, request{
+		Action:   "seal-secure-note",
+		Note:     &note,
+		Revision: revision,
+	})
+	if err != nil {
+		return client.EncryptedItem{}, err
+	}
+	if res.Item == nil {
+		return client.EncryptedItem{}, errors.New(
+			"session agent returned no encrypted item")
+	}
+	return *res.Item, nil
+}
+
+func OpenSecureNote(
+	ctx context.Context,
+	socketPath string,
+	item client.EncryptedItem,
+) (client.SecureNoteItem, error) {
+	res, err := requestAgent(ctx, socketPath, request{
+		Action: "open-secure-note",
+		Item:   &item,
+	})
+	if err != nil {
+		return client.SecureNoteItem{}, err
+	}
+	if res.Note == nil {
+		return client.SecureNoteItem{}, errors.New(
+			"session agent returned no Secure Note")
+	}
+	return *res.Note, nil
 }
 
 func requestAgent(ctx context.Context, socketPath string, req request) (response, error) {

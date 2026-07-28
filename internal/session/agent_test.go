@@ -155,6 +155,54 @@ func TestAgentSealsAndOpensLoginWithoutExposingVaultKey(t *testing.T) {
 	}
 }
 
+func TestAgentSealsAndOpensSecureNoteWithoutExposingVaultKey(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "agent.sock")
+	vaultKey := []byte("01234567890123456789012345678901")
+	agent, err := session.NewAgent(session.AgentConfig{
+		SocketPath: socketPath,
+		OwnerUID:   uint32(os.Getuid()),
+		AccountID:  "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		VaultKey:   vaultKey,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- agent.Serve(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		_ = agent.Close()
+		if err := <-done; err != nil {
+			t.Errorf("serve agent: %v", err)
+		}
+	})
+
+	note := client.SecureNoteItem{
+		ItemID:  "11111111-1111-4111-8111-111111111111",
+		Title:   "Recovery procedure",
+		Content: "Sensitive-Note-Content-Sentinel",
+	}
+	encrypted, err := session.SealSecureNote(
+		ctx, socketPath, note, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encrypted.Envelope, []byte(note.Title)) ||
+		bytes.Contains(encrypted.Envelope, []byte(note.Content)) ||
+		bytes.Contains(encrypted.Envelope, vaultKey) {
+		t.Fatal("sealed response exposed plaintext or vault key")
+	}
+	opened, err := session.OpenSecureNote(ctx, socketPath, encrypted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(opened, note) {
+		t.Fatalf("opened Note differs:\nwant: %+v\ngot:  %+v",
+			note, opened)
+	}
+}
+
 func TestAgentSocketIsOwnerOnly(t *testing.T) {
 	socketPath := filepath.Join(t.TempDir(), "agent.sock")
 	agent, err := session.NewAgent(session.AgentConfig{
