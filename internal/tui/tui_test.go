@@ -360,6 +360,11 @@ func TestCachedItemStoreSavesListsAndEditsOffline(t *testing.T) {
 			Name:     "Offline account",
 			Username: "user@example.com",
 			Password: "Password-Sentinel",
+			PasswordHistory: []client.PasswordHistoryEntry{{
+				Password: "Offline-History-Sentinel",
+				ChangedAt: time.Date(
+					2026, time.July, 28, 12, 0, 0, 0, time.UTC),
+			}},
 			FolderID: folderID,
 			Favorite: true,
 		},
@@ -1323,6 +1328,80 @@ func TestConflictScreenPreservesVersionsAndSelectsOne(t *testing.T) {
 			[]string{firstID, secondID},
 		) {
 		t.Fatalf("selected resolution: %+v", resolution)
+	}
+}
+
+func TestPasswordHistoryParticipatesInLoginConflictWithoutExposure(t *testing.T) {
+	firstID := "22222222-2222-4222-8222-222222222222"
+	secondID := "33333333-3333-4333-8333-333333333333"
+	first := itemRecord{
+		Login: client.LoginItem{
+			ItemID:   "11111111-1111-4111-8111-111111111111",
+			Name:     "Production database",
+			Password: "First-Current-Password",
+			PasswordHistory: []client.PasswordHistoryEntry{{
+				Password: "First-History-Password",
+				ChangedAt: time.Date(
+					2026, time.July, 28, 12, 0, 0, 0, time.UTC),
+			}},
+		},
+		Revision:   2,
+		RevisionID: firstID,
+	}
+	second := itemRecord{
+		Login: client.LoginItem{
+			ItemID:   first.Login.ItemID,
+			Name:     "Production database",
+			Password: "Second-Current-Password",
+			PasswordHistory: []client.PasswordHistoryEntry{{
+				Password: "Second-History-Password",
+				ChangedAt: time.Date(
+					2026, time.July, 28, 13, 0, 0, 0, time.UTC),
+			}},
+		},
+		Revision:   2,
+		RevisionID: secondID,
+	}
+	conflict := first
+	conflict.ConflictVersions = []itemRecord{first, second}
+	store := &fakeItemStore{records: []itemRecord{conflict}}
+	initial := model{
+		loaded:    true,
+		vaultOpen: true,
+		itemStore: store,
+		items:     store.records,
+		showItem:  true,
+	}
+	view := initial.View()
+	for _, hidden := range []string{
+		first.Login.Password,
+		first.Login.PasswordHistory[0].Password,
+		second.Login.Password,
+		second.Login.PasswordHistory[0].Password,
+	} {
+		if strings.Contains(view, hidden) {
+			t.Fatalf("Conflict exposed password %q:\n%s", hidden, view)
+		}
+	}
+
+	current, _ := initial.Update(tea.KeyMsg{Type: tea.KeyDown})
+	current, command := current.(model).Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if command == nil {
+		t.Fatal("history Conflict did not save selected version")
+	}
+	current, _ = current.(model).Update(command())
+	if len(store.saved) != 1 ||
+		!reflect.DeepEqual(
+			store.saved[0].Login.PasswordHistory,
+			second.Login.PasswordHistory,
+		) ||
+		store.saved[0].Login.Password != second.Login.Password ||
+		store.saved[0].Revision != 3 ||
+		!reflect.DeepEqual(
+			store.saved[0].ParentRevisionIDs,
+			[]string{firstID, secondID},
+		) {
+		t.Fatalf("history Conflict resolution: %+v", store.saved)
 	}
 }
 
