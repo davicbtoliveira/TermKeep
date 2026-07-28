@@ -13,7 +13,7 @@
 - **Revision graph**: The append-only set of encrypted item revisions connected by immutable parent revision UUIDs.
 - **Server**: The self-hosted Go API that authenticates accounts and synchronizes opaque encrypted records.
 - **Session agent**: A per-terminal local process that holds an unlocked vault key in memory and serves later `termkeep` invocations through a restricted Unix socket.
-- **Tombstone**: A retained deletion marker that prevents stale offline clients from silently resurrecting deleted items.
+- **Tombstone**: A retained content-free deletion revision. It preserves only opaque reconciliation metadata so stale offline edits become explicit Conflicts instead of silently resurrecting deleted Items.
 - **Vault**: One account's logical collection of encrypted items, folders, favorites, and settings.
 - **Vault key**: A random 256-bit key used as the root of the per-vault encryption hierarchy.
 - **Zero knowledge**: The property that the server and administrator cannot decrypt semantic vault content.

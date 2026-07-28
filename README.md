@@ -83,6 +83,19 @@ use `j`/`k` and `enter` to keep the selected content, or press `m` to edit and
 save a manual merge. Either choice writes a new revision whose parents are all
 conflicting heads.
 
+Press `d` in a Login detail view to move it to encrypted Trash. From the vault,
+press `t` to open Trash, `j`/`k` to select an item, `r` to restore it, or `v`
+to return. Trashed content remains encrypted and restorable for 30 days.
+Pressing `x` twice permanently deletes the selected content before that
+deadline; the first press displays the irreversible-deletion warning.
+
+After permanent deletion, or the first synchronization after the 30-day
+deadline, the server and synchronized cache retain only a technical Tombstone.
+They remove the encrypted item content but keep enough opaque revision metadata
+to prevent an old client from silently recreating it. A disconnected historic
+cache cannot be remotely erased; if it later submits an offline edit, TermKeep
+shows an explicit Conflict between that edit and the Tombstone.
+
 Login content is serialized and encrypted on the client with
 XChaCha20-Poly1305. Each item UUID gets a derived key and each encryption gets
 a random nonce. Account UUID, item UUID, schema version, and revision are
@@ -115,6 +128,10 @@ changes by per-Account cursor. The Server records mutation UUIDs in the same
 transaction as revisions, so retrying after a lost response does not create
 another revision. Concurrent descendants remain separate heads regardless of
 push/pull order; unrelated items in the same batch continue synchronizing.
+Incremental changes are retained for 30 days. When a cursor references pruned
+history, the Server returns a complete snapshot of current encrypted heads;
+the Client replaces synchronized state while preserving local pending
+mutations, so missing content is not resurrected.
 
 Synchronization runs when an online Vault opens, after an online mutation,
 every 30 seconds while the TUI remains open, with `[y] sync`, or with:
