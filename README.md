@@ -85,9 +85,39 @@ session agent; its local IPC exposes only seal/open operations.
 
 The server stores and returns the opaque envelope plus account ownership,
 item UUID, schema version, and revision. It cannot inspect or index Login
-names, usernames, passwords, URLs, notes, or custom fields. This first item
-flow requires an online unlocked session; offline mutation queues and
-reconciliation are implemented by the later synchronization work.
+names, usernames, passwords, URLs, notes, or custom fields.
+
+## Offline use and synchronization
+
+A successful registration or online login authorizes an encrypted local
+cache. Later `termkeep login` attempts online authentication first and, when
+the Server is unavailable, unlocks that cache locally. A TLS validation
+failure never permits offline fallback.
+
+The cache stores encrypted item envelopes, the encrypted Vault-key wrapper,
+technical revision metadata, a change cursor, and stable mutation UUIDs. It
+does not persist the master password, plaintext Vault key, plaintext Login
+content, or plaintext search indexes. Cache files use mode `0600`, live under
+`$XDG_DATA_HOME/termkeep` (default `~/.local/share/termkeep`), and are replaced
+atomically after file and directory flushes.
+
+Offline creates and edits appear immediately in the TUI and enter the durable
+mutation queue. Batch synchronization pushes those mutations and pulls
+changes by per-Account cursor. The Server records mutation UUIDs in the same
+transaction as revisions, so retrying after a lost response does not create
+another revision.
+
+Synchronization runs when an online Vault opens, after an online mutation,
+every 30 seconds while the TUI remains open, with `[y] sync`, or with:
+
+```sh
+termkeep sync
+```
+
+The TUI and `termkeep status` distinguish `Client offline`, `Server
+unavailable`, `TLS validation failed`, and ambiguous `Connection unavailable`
+states. Authenticated synchronization failures create fixed operational audit
+events without Item IDs, envelopes, or semantic Vault content.
 
 ## Activity audit
 
