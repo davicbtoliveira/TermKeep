@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestAuthenticatedAccountStoresAndListsOpaqueItem(t *testing.T) {
@@ -341,6 +342,17 @@ func TestSyncResultSerializesFullSnapshot(t *testing.T) {
 	}
 	if !bytes.Contains(encoded, []byte(`"full_snapshot":true`)) {
 		t.Fatalf("full snapshot marker missing: %s", encoded)
+	}
+}
+
+func TestTrashExpirationCutoffUsesStoreClock(t *testing.T) {
+	now := time.Date(2026, time.July, 28, 12, 0, 0, 0, time.UTC)
+	store := DBStore{Now: func() time.Time { return now }}
+
+	got := trashExpirationCutoff(store.now())
+	want := time.Date(2026, time.June, 28, 12, 0, 0, 0, time.UTC)
+	if !got.Equal(want) {
+		t.Fatalf("trash expiration cutoff: want %s, got %s", want, got)
 	}
 }
 

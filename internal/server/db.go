@@ -48,6 +48,10 @@ func (s DBStore) now() time.Time {
 	return time.Now().UTC()
 }
 
+func trashExpirationCutoff(now time.Time) time.Time {
+	return now.Add(-trashRetention)
+}
+
 // SchemaVersion implements SchemaStore.
 func (s DBStore) SchemaVersion(ctx context.Context) (int, error) {
 	return SchemaVersion(ctx, s.DB)
@@ -723,7 +727,7 @@ func purgeExpiredVaultItems(
 		  )
 		ORDER BY revision.item_uuid
 		FOR UPDATE OF revision`,
-		accountID, acceptedAt.Add(-trashRetention),
+		accountID, trashExpirationCutoff(acceptedAt),
 	)
 	if err != nil {
 		return fmt.Errorf("list expired trash: %w", err)
