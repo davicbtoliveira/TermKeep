@@ -81,6 +81,7 @@ func TestBlackbox(t *testing.T) {
 	t.Run("concurrent invitation consumption registers once", s.testConcurrentInvitationConsumption)
 	t.Run("encrypted Login survives a new unlocked process", s.testEncryptedLoginRoundTrip)
 	t.Run("offline Login edit synchronizes after reconnection", s.testOfflineLoginSynchronization)
+	t.Run("offline Secure Note opens in another Client", s.testSecureNoteOfflineCrossClient)
 	t.Run("sync preserves and resolves concurrent revisions", s.testConcurrentRevisionSync)
 	t.Run("trash expires without resurrecting stale content", s.testTrashLifecycle)
 }
@@ -1019,7 +1020,7 @@ func (s *stack) testEncryptedLoginRoundTrip(t *testing.T) {
 	}
 	shell.clear()
 	write(t, shell.ptmx, "region="+loginCustom+"\r")
-	if _, output := shell.waitFor(30*time.Second, "Logins:"); !strings.Contains(output, loginName) ||
+	if _, output := shell.waitFor(30*time.Second, "Items:"); !strings.Contains(output, loginName) ||
 		!strings.Contains(output, loginUser) {
 		t.Fatalf("first Login client did not save through the TUI:\n%s", output)
 	}
@@ -1248,6 +1249,220 @@ func (s *stack) testOfflineLoginSynchronization(t *testing.T) {
 	}
 	write(t, shell.ptmx, "q")
 	shell.waitFor(10*time.Second, terminalShellPrompt)
+}
+
+func (s *stack) testSecureNoteOfflineCrossClient(t *testing.T) {
+	const (
+		email       = "admin@example.com"
+		password    = "TermKeep#2026"
+		noteTitle   = "Offline-Secure-Note-Title-Sentinel"
+		noteContent = "Offline-Secure-Note-Content-Sentinel"
+	)
+	command := fmt.Sprintf(
+		"%q --server %q --ca-cert %q login --email %q\n",
+		s.binary,
+		s.serverURL,
+		filepath.Join(s.certsDir, "ca.pem"),
+		email,
+	)
+	firstDataDir := filepath.Join(t.TempDir(), "client-data")
+	first := s.startTerminalShellWithDataDir(t, firstDataDir)
+	first.clear()
+	write(t, first.ptmx, command)
+	if matched, output := first.waitFor(
+		30*time.Second, "Master password:",
+	); matched != "Master password:" {
+		t.Fatalf("first Note Client did not request password:\n%s", output)
+	}
+	write(t, first.ptmx, password+"\n")
+	first.waitFor(45*time.Second, "Items:")
+
+	serverRunning := true
+	t.Cleanup(func() {
+		if !serverRunning {
+			_ = s.composeCmd(context.Background(), "start", "server").Run()
+			s.waitHealthy(time.Minute)
+		}
+	})
+	if out, err := s.composeCmd(
+		context.Background(), "stop", "server").CombinedOutput(); err != nil {
+		t.Fatalf("stop server: %v\n%s", err, out)
+	}
+	serverRunning = false
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		_, _, code := s.runClient("status")
+		if code == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("proxy did not report Server unavailable")
+		}
+		time.Sleep(time.Second)
+	}
+
+	first.clear()
+	write(t, first.ptmx, "n")
+	first.waitFor(10*time.Second, "New Secure Note")
+	first.clear()
+	write(t, first.ptmx, noteTitle+"\r")
+	first.waitFor(10*time.Second, "> Content:")
+	first.clear()
+	write(t, first.ptmx, noteContent+"\r")
+	first.waitFor(10*time.Second, "Saving…")
+	first.clear()
+	_, output := first.waitFor(
+		30*time.Second, "[Secure Note] "+noteTitle)
+	if strings.Contains(output, noteContent) {
+		t.Fatalf("Vault list exposed Secure Note content:\n%s", output)
+	}
+	firstCache, err := client.OpenCache(
+		client.Config{DataDir: firstDataDir}, email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := firstCache.SyncSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Mutations) != 1 {
+		t.Fatalf("offline Note queue: want 1, got %+v", snapshot)
+	}
+
+	if out, err := s.composeCmd(
+		context.Background(), "start", "server").CombinedOutput(); err != nil {
+		t.Fatalf("start server: %v\n%s", err, out)
+	}
+	serverRunning = true
+	s.waitHealthy(time.Minute)
+	first.clear()
+	write(t, first.ptmx, "y")
+	syncDeadline := time.Now().Add(30 * time.Second)
+	for {
+		snapshot, err = firstCache.SyncSnapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(snapshot.Mutations) == 0 {
+			break
+		}
+		if time.Now().After(syncDeadline) {
+			t.Fatalf("Note mutation remained queued: %+v", snapshot)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	write(t, first.ptmx, "q")
+	first.waitFor(10*time.Second, terminalShellPrompt)
+
+	secondDataDir := filepath.Join(t.TempDir(), "client-data")
+	second := s.startTerminalShellWithDataDir(t, secondDataDir)
+	second.clear()
+	write(t, second.ptmx, command)
+	if matched, output := second.waitFor(
+		30*time.Second, "Master password:",
+	); matched != "Master password:" {
+		t.Fatalf("second Note Client did not request password:\n%s", output)
+	}
+	write(t, second.ptmx, password+"\n")
+	_, output = second.waitFor(
+		45*time.Second, "[Secure Note] "+noteTitle)
+	if strings.Contains(output, noteContent) {
+		t.Fatalf("second Client list exposed Note content:\n%s", output)
+	}
+
+	secondCache, err := client.OpenCache(
+		client.Config{DataDir: secondDataDir}, email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sockets, err := filepath.Glob(
+		filepath.Join(second.runtimeDir, "termkeep", "*.sock"))
+	if err != nil || len(sockets) != 1 {
+		t.Fatalf("second Client sockets: want 1, got %d (%v)",
+			len(sockets), err)
+	}
+	groups, err := secondCache.ItemHeads()
+	if err != nil {
+		t.Fatal(err)
+	}
+	noteIndex := -1
+	for index, group := range groups {
+		for _, encrypted := range group.Revisions {
+			opened, err := session.OpenNativeItem(
+				context.Background(), sockets[0], encrypted)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if opened.SecureNote != nil &&
+				opened.SecureNote.Title == noteTitle {
+				noteIndex = index
+			}
+		}
+	}
+	if noteIndex < 0 {
+		t.Fatal("second Client cache missing synchronized Secure Note")
+	}
+	for range noteIndex {
+		write(t, second.ptmx, "j")
+	}
+	second.clear()
+	write(t, second.ptmx, "\r")
+	_, output = second.waitFor(10*time.Second, noteContent)
+	if !strings.Contains(output, noteTitle) {
+		t.Fatalf("second Client Note detail missing title:\n%s", output)
+	}
+
+	token, err := session.AccessToken(
+		context.Background(), sockets[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clear(token)
+	apiItems, err := client.ListItems(
+		context.Background(), s.clientConfig(), string(token))
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiBody, err := json.Marshal(apiItems)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbBody := []byte(s.queryDatabaseScalar(t, `
+		SELECT COALESCE(
+			string_agg(row_to_json(vault_revision)::text, E'\n'),
+			''
+		)
+		FROM vault_revisions AS vault_revision`))
+	auditBody := []byte(s.queryDatabaseScalar(t, `
+		SELECT COALESCE(
+			string_agg(row_to_json(event)::text, E'\n'),
+			''
+		)
+		FROM audit_events AS event`))
+	logBody, err := s.composeCmd(
+		context.Background(), "logs", "server").CombinedOutput()
+	if err != nil {
+		t.Fatalf("read server logs: %v\n%s", err, logBody)
+	}
+	for surface, body := range map[string][]byte{
+		"API":        apiBody,
+		"PostgreSQL": dbBody,
+		"audit":      auditBody,
+		"logs":       logBody,
+	} {
+		for _, forbidden := range []string{
+			noteTitle,
+			noteContent,
+			"secure_note",
+		} {
+			if bytes.Contains(body, []byte(forbidden)) {
+				t.Fatalf("%s contains Secure Note field %q",
+					surface, forbidden)
+			}
+		}
+	}
+	write(t, second.ptmx, "q")
+	second.waitFor(10*time.Second, terminalShellPrompt)
 }
 
 func (s *stack) testTerminalSessionIsolation(t *testing.T) {
@@ -2158,6 +2373,13 @@ type terminalShell struct {
 }
 
 func (s *stack) startTerminalShell(t *testing.T) *terminalShell {
+	return s.startTerminalShellWithDataDir(t, s.dataDir)
+}
+
+func (s *stack) startTerminalShellWithDataDir(
+	t *testing.T,
+	dataDir string,
+) *terminalShell {
 	t.Helper()
 	cmd := exec.Command("sh")
 	cmd.Env = withoutEnv(os.Environ(),
@@ -2172,7 +2394,7 @@ func (s *stack) startTerminalShell(t *testing.T) *terminalShell {
 		"TERM=dumb",
 		"PS1="+terminalShellPrompt,
 		"XDG_RUNTIME_DIR="+runtimeDir,
-		"TERMKEEP_DATA_DIR="+s.dataDir,
+		"TERMKEEP_DATA_DIR="+dataDir,
 	)
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 24, Cols: 80})
 	if err != nil {
