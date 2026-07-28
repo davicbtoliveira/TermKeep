@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -99,6 +100,177 @@ func TestOpaqueItemRejectsStaleRevision(t *testing.T) {
 	}
 }
 
+func TestSyncPushesMutationAndReturnsChangeCursor(t *testing.T) {
+	authStore := &memoryBootstrapStore{}
+	auth := newTestAuthService(t, authStore)
+	itemStore := &memoryItemStore{}
+	items := NewItemService(itemStore, auth)
+	handler := NewHandler("test", stubSchema{version: 1}, nil, auth, items)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	password := []byte("TermKeep#2026")
+	mustBootstrap(t, server, "admin@example.com", password)
+	token := mustLogin(t, server, "admin@example.com", password)
+	itemID := "11111111-1111-4111-8111-111111111111"
+	mutationID := "22222222-2222-4222-8222-222222222222"
+	body := syncOpaqueItems(t, server, token, "", []VaultMutation{{
+		MutationID:   mutationID,
+		BaseRevision: 0,
+		Item: OpaqueItem{
+			ItemID:        itemID,
+			SchemaVersion: 1,
+			Revision:      1,
+			Envelope:      []byte("encrypted"),
+		},
+	}})
+
+	if body.Cursor == "" {
+		t.Fatal("sync returned empty cursor")
+	}
+	if len(body.AppliedMutationIDs) != 1 ||
+		body.AppliedMutationIDs[0] != mutationID {
+		t.Fatalf("applied mutations: %+v", body.AppliedMutationIDs)
+	}
+	if len(body.Changes) != 1 ||
+		body.Changes[0].ItemID != itemID ||
+		body.Changes[0].Revision != 1 ||
+		!bytes.Equal(body.Changes[0].Envelope, []byte("encrypted")) {
+		t.Fatalf("sync changes: %+v", body.Changes)
+	}
+}
+
+func TestSyncRetryDoesNotDuplicateRevision(t *testing.T) {
+	authStore := &memoryBootstrapStore{}
+	auth := newTestAuthService(t, authStore)
+	itemStore := &memoryItemStore{}
+	items := NewItemService(itemStore, auth)
+	handler := NewHandler("test", stubSchema{version: 1}, nil, auth, items)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	password := []byte("TermKeep#2026")
+	mustBootstrap(t, server, "admin@example.com", password)
+	token := mustLogin(t, server, "admin@example.com", password)
+	mutation := VaultMutation{
+		MutationID:   "22222222-2222-4222-8222-222222222222",
+		BaseRevision: 0,
+		Item: OpaqueItem{
+			ItemID:        "11111111-1111-4111-8111-111111111111",
+			SchemaVersion: 1,
+			Revision:      1,
+			Envelope:      []byte("encrypted"),
+		},
+	}
+	first := syncOpaqueItems(
+		t, server, token, "", []VaultMutation{mutation})
+	retry := syncOpaqueItems(
+		t, server, token, first.Cursor, []VaultMutation{mutation})
+
+	if len(retry.AppliedMutationIDs) != 1 ||
+		retry.AppliedMutationIDs[0] != mutation.MutationID {
+		t.Fatalf("retry did not acknowledge mutation: %+v", retry)
+	}
+	if len(retry.Changes) != 0 {
+		t.Fatalf("retry duplicated changes: %+v", retry.Changes)
+	}
+	stored := itemStore.items[authStore.account.AccountID][mutation.Item.ItemID]
+	if stored.Revision != 1 {
+		t.Fatalf("retry advanced revision to %d", stored.Revision)
+	}
+}
+
+func TestSyncRejectsMutationIDReusedWithDifferentContent(t *testing.T) {
+	authStore := &memoryBootstrapStore{}
+	auth := newTestAuthService(t, authStore)
+	itemStore := &memoryItemStore{}
+	items := NewItemService(itemStore, auth)
+	handler := NewHandler("test", stubSchema{version: 1}, nil, auth, items)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	password := []byte("TermKeep#2026")
+	mustBootstrap(t, server, "admin@example.com", password)
+	token := mustLogin(t, server, "admin@example.com", password)
+	mutation := VaultMutation{
+		MutationID:   "22222222-2222-4222-8222-222222222222",
+		BaseRevision: 0,
+		Item: OpaqueItem{
+			ItemID:        "11111111-1111-4111-8111-111111111111",
+			SchemaVersion: 1,
+			Revision:      1,
+			Envelope:      []byte("encrypted"),
+		},
+	}
+	first := syncOpaqueItems(
+		t, server, token, "", []VaultMutation{mutation})
+	mutation.Item.Envelope = []byte("different")
+	response := postSync(
+		t, server, token, first.Cursor, []VaultMutation{mutation})
+	response.Body.Close()
+
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf(
+			"reused mutation ID status: want 409, got %d",
+			response.StatusCode,
+		)
+	}
+	stored := itemStore.items[authStore.account.AccountID][mutation.Item.ItemID]
+	if !bytes.Equal(stored.Envelope, []byte("encrypted")) {
+		t.Fatalf("reused mutation ID changed stored item: %q", stored.Envelope)
+	}
+}
+
+func syncOpaqueItems(
+	t *testing.T,
+	server *httptest.Server,
+	token string,
+	cursor string,
+	mutations []VaultMutation,
+) SyncResult {
+	t.Helper()
+	response := postSync(t, server, token, cursor, mutations)
+	if response.StatusCode != http.StatusOK {
+		response.Body.Close()
+		t.Fatalf("sync status: want 200, got %d", response.StatusCode)
+	}
+	var body SyncResult
+	decodeJSON(t, response, &body)
+	return body
+}
+
+func postSync(
+	t *testing.T,
+	server *httptest.Server,
+	token string,
+	cursor string,
+	mutations []VaultMutation,
+) *http.Response {
+	t.Helper()
+	requestBody, err := json.Marshal(syncRequest{
+		Cursor:    cursor,
+		Mutations: mutations,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequest(
+		http.MethodPost,
+		server.URL+"/api/v1/sync",
+		bytes.NewReader(requestBody),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return response
+}
+
 func putOpaqueItem(
 	t *testing.T,
 	server *httptest.Server,
@@ -134,7 +306,9 @@ func putOpaqueItem(
 }
 
 type memoryItemStore struct {
-	items map[string]map[string]OpaqueItem
+	items     map[string]map[string]OpaqueItem
+	mutations map[string]map[string][32]byte
+	changes   map[string][]OpaqueItem
 }
 
 func (s *memoryItemStore) PutItem(_ context.Context, accountID string, item OpaqueItem) error {
@@ -159,4 +333,49 @@ func (s *memoryItemStore) ListItems(_ context.Context, accountID string) ([]Opaq
 		items = append(items, item)
 	}
 	return items, nil
+}
+
+func (s *memoryItemStore) Sync(
+	ctx context.Context,
+	accountID string,
+	cursor string,
+	mutations []VaultMutation,
+) (SyncResult, error) {
+	if s.mutations == nil {
+		s.mutations = make(map[string]map[string][32]byte)
+	}
+	if s.mutations[accountID] == nil {
+		s.mutations[accountID] = make(map[string][32]byte)
+	}
+	if s.changes == nil {
+		s.changes = make(map[string][]OpaqueItem)
+	}
+	result := SyncResult{}
+	for _, mutation := range mutations {
+		digest := vaultMutationDigest(mutation)
+		if stored, exists := s.mutations[accountID][mutation.MutationID]; exists {
+			if stored != digest {
+				return SyncResult{}, ErrMutationIDReuse
+			}
+			result.AppliedMutationIDs = append(
+				result.AppliedMutationIDs, mutation.MutationID)
+			continue
+		}
+		if err := s.PutItem(ctx, accountID, mutation.Item); err != nil {
+			return SyncResult{}, err
+		}
+		s.mutations[accountID][mutation.MutationID] = digest
+		s.changes[accountID] = append(s.changes[accountID], mutation.Item)
+		result.AppliedMutationIDs = append(
+			result.AppliedMutationIDs, mutation.MutationID)
+	}
+	start := 0
+	if cursor != "" {
+		if _, err := fmt.Sscanf(cursor, "%d", &start); err != nil {
+			return SyncResult{}, err
+		}
+	}
+	result.Changes = append(result.Changes, s.changes[accountID][start:]...)
+	result.Cursor = fmt.Sprintf("%d", len(s.changes[accountID]))
+	return result, nil
 }

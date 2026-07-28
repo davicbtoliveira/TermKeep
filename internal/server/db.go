@@ -1,9 +1,13 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib" // PostgreSQL driver for database/sql.
@@ -526,4 +530,225 @@ func (s DBStore) ListItems(ctx context.Context, accountID string) ([]OpaqueItem,
 		return nil, fmt.Errorf("iterate opaque items: %w", err)
 	}
 	return items, nil
+}
+
+// Sync applies an idempotent mutation batch and reads subsequent opaque
+// changes in one transaction. The mutation ledger and change cursor commit at
+// the same durability boundary as vault_items.
+func (s DBStore) Sync(
+	ctx context.Context,
+	accountID string,
+	cursor string,
+	mutations []VaultMutation,
+) (SyncResult, error) {
+	inputCursor, err := parseSyncCursor(cursor)
+	if err != nil {
+		return SyncResult{}, err
+	}
+	tx, err := s.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return SyncResult{}, fmt.Errorf("begin synchronization: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	result := SyncResult{}
+	for _, mutation := range mutations {
+		applied, err := applyVaultMutation(ctx, tx, accountID, mutation)
+		if err != nil {
+			return SyncResult{}, err
+		}
+		if applied {
+			result.AppliedMutationIDs = append(
+				result.AppliedMutationIDs, mutation.MutationID)
+		}
+	}
+
+	var currentCursor uint64
+	err = tx.QueryRowContext(ctx, `
+		SELECT COALESCE(
+			(SELECT cursor FROM vault_sync_state WHERE account_uuid = $1),
+			0
+		)`, accountID).Scan(&currentCursor)
+	if err != nil {
+		return SyncResult{}, fmt.Errorf("read synchronization cursor: %w", err)
+	}
+	if inputCursor > currentCursor {
+		return SyncResult{}, ErrInvalidSyncCursor
+	}
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT cursor, item_uuid::text, schema_version, revision, envelope
+		FROM vault_changes
+		WHERE account_uuid = $1 AND cursor > $2
+		ORDER BY cursor
+		LIMIT 500`, accountID, inputCursor)
+	if err != nil {
+		return SyncResult{}, fmt.Errorf("list synchronization changes: %w", err)
+	}
+	outputCursor := inputCursor
+	for rows.Next() {
+		var (
+			item     OpaqueItem
+			revision int64
+			change   uint64
+		)
+		if err := rows.Scan(
+			&change,
+			&item.ItemID,
+			&item.SchemaVersion,
+			&revision,
+			&item.Envelope,
+		); err != nil {
+			rows.Close()
+			return SyncResult{}, fmt.Errorf("scan synchronization change: %w", err)
+		}
+		item.Revision = uint64(revision)
+		result.Changes = append(result.Changes, item)
+		outputCursor = change
+	}
+	if err := rows.Close(); err != nil {
+		return SyncResult{}, fmt.Errorf("close synchronization changes: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return SyncResult{}, fmt.Errorf("iterate synchronization changes: %w", err)
+	}
+	result.Cursor = strconv.FormatUint(outputCursor, 10)
+	if err := tx.Commit(); err != nil {
+		return SyncResult{}, fmt.Errorf("commit synchronization: %w", err)
+	}
+	return result, nil
+}
+
+func applyVaultMutation(
+	ctx context.Context,
+	tx *sql.Tx,
+	accountID string,
+	mutation VaultMutation,
+) (bool, error) {
+	digest := vaultMutationDigest(mutation)
+	var (
+		itemID       string
+		baseRevision int64
+		revision     int64
+		storedDigest []byte
+	)
+	err := tx.QueryRowContext(ctx, `
+		SELECT item_uuid::text, base_revision, revision, envelope_sha256
+		FROM vault_mutations
+		WHERE account_uuid = $1 AND mutation_uuid = $2`,
+		accountID, mutation.MutationID).Scan(
+		&itemID, &baseRevision, &revision, &storedDigest)
+	switch {
+	case err == nil:
+		if itemID != mutation.Item.ItemID ||
+			uint64(baseRevision) != mutation.BaseRevision ||
+			uint64(revision) != mutation.Item.Revision ||
+			!bytes.Equal(storedDigest, digest[:]) {
+			return false, ErrMutationIDReuse
+		}
+		return true, nil
+	case !errors.Is(err, sql.ErrNoRows):
+		return false, fmt.Errorf("read mutation ledger: %w", err)
+	}
+
+	result, err := tx.ExecContext(ctx, `
+		INSERT INTO vault_items (
+			account_uuid, item_uuid, schema_version, revision, envelope
+		)
+		SELECT $1::uuid, $2::uuid, $3::integer, $4::bigint, $5::bytea
+		WHERE $6::bigint = 0 AND $4::bigint = 1
+		ON CONFLICT (account_uuid, item_uuid) DO UPDATE
+		SET schema_version = EXCLUDED.schema_version,
+		    revision = EXCLUDED.revision,
+		    envelope = EXCLUDED.envelope,
+		    updated_at = now()
+		WHERE vault_items.revision = $6::bigint
+		  AND EXCLUDED.revision = $6::bigint + 1`,
+		accountID,
+		mutation.Item.ItemID,
+		mutation.Item.SchemaVersion,
+		int64(mutation.Item.Revision),
+		mutation.Item.Envelope,
+		int64(mutation.BaseRevision),
+	)
+	if err != nil {
+		return false, fmt.Errorf("apply vault mutation: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("read vault mutation result: %w", err)
+	}
+	if count != 1 {
+		return false, ErrItemRevisionConflict
+	}
+
+	var changeCursor int64
+	err = tx.QueryRowContext(ctx, `
+		INSERT INTO vault_sync_state (account_uuid, cursor)
+		VALUES ($1, 1)
+		ON CONFLICT (account_uuid) DO UPDATE
+		SET cursor = vault_sync_state.cursor + 1
+		RETURNING cursor`, accountID).Scan(&changeCursor)
+	if err != nil {
+		return false, fmt.Errorf("advance synchronization cursor: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO vault_changes (
+			account_uuid, cursor, item_uuid, schema_version, revision, envelope
+		)
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		accountID,
+		changeCursor,
+		mutation.Item.ItemID,
+		mutation.Item.SchemaVersion,
+		int64(mutation.Item.Revision),
+		mutation.Item.Envelope,
+	); err != nil {
+		return false, fmt.Errorf("record synchronization change: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO vault_mutations (
+			account_uuid, mutation_uuid, item_uuid, base_revision,
+			revision, envelope_sha256, change_cursor
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		accountID,
+		mutation.MutationID,
+		mutation.Item.ItemID,
+		int64(mutation.BaseRevision),
+		int64(mutation.Item.Revision),
+		digest[:],
+		changeCursor,
+	); err != nil {
+		return false, fmt.Errorf("record mutation ledger: %w", err)
+	}
+	return true, nil
+}
+
+func parseSyncCursor(value string) (uint64, error) {
+	if value == "" {
+		return 0, nil
+	}
+	cursor, err := strconv.ParseUint(value, 10, 63)
+	if err != nil {
+		return 0, ErrInvalidSyncCursor
+	}
+	return cursor, nil
+}
+
+func vaultMutationDigest(mutation VaultMutation) [sha256.Size]byte {
+	hash := sha256.New()
+	_, _ = fmt.Fprintf(
+		hash,
+		"%s\n%d\n%s\n%d\n%d\n",
+		mutation.MutationID,
+		mutation.BaseRevision,
+		mutation.Item.ItemID,
+		mutation.Item.SchemaVersion,
+		mutation.Item.Revision,
+	)
+	_, _ = hash.Write(mutation.Item.Envelope)
+	var digest [sha256.Size]byte
+	copy(digest[:], hash.Sum(nil))
+	return digest
 }
