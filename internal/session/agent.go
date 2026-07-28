@@ -321,7 +321,8 @@ func Status(ctx context.Context, socketPath string) (Info, error) {
 }
 
 // AccessToken returns a copy of online authorization material to an
-// owner-authenticated local client.
+// owner-authenticated local client. An empty token identifies a valid offline
+// session.
 func AccessToken(ctx context.Context, socketPath string) ([]byte, error) {
 	var dialer net.Dialer
 	conn, err := dialer.DialContext(ctx, "unix", socketPath)
@@ -341,9 +342,6 @@ func AccessToken(ctx context.Context, socketPath string) ([]byte, error) {
 	}
 	if res.Error != "" {
 		return nil, errors.New(res.Error)
-	}
-	if len(res.Token) == 0 {
-		return nil, errors.New("session agent returned no online token")
 	}
 	return res.Token, nil
 }

@@ -79,6 +79,36 @@ func TestAgentProvidesOnlineTokenToOwner(t *testing.T) {
 	}
 }
 
+func TestAgentAllowsOfflineSessionWithoutToken(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "agent.sock")
+	agent, err := session.NewAgent(session.AgentConfig{
+		SocketPath: socketPath,
+		OwnerUID:   uint32(os.Getuid()),
+		VaultKey:   []byte("01234567890123456789012345678901"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- agent.Serve(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		_ = agent.Close()
+		if err := <-done; err != nil {
+			t.Errorf("serve agent: %v", err)
+		}
+	})
+
+	token, err := session.AccessToken(ctx, socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(token) != 0 {
+		t.Fatalf("offline session returned token %q", token)
+	}
+}
+
 func TestAgentSealsAndOpensLoginWithoutExposingVaultKey(t *testing.T) {
 	socketPath := filepath.Join(t.TempDir(), "agent.sock")
 	vaultKey := []byte("01234567890123456789012345678901")

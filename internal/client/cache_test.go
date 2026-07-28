@@ -2,6 +2,9 @@ package client
 
 import (
 	"bytes"
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -174,5 +177,89 @@ func TestSyncResultAtomicallyAdvancesCache(t *testing.T) {
 		items[0].ItemID != local.ItemID ||
 		items[1].ItemID != remote.ItemID {
 		t.Fatalf("pulled items not durable: %+v", items)
+	}
+}
+
+func TestOfflineLoginUnlocksAuthorizedCache(t *testing.T) {
+	password := []byte("TermKeep#2026")
+	accountID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	vault, err := NewVault(password, accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vault.Clear()
+	cfg := Config{
+		ServerURL: "https://offline.invalid",
+		DataDir:   filepath.Join(t.TempDir(), "cache"),
+	}
+	if err := AuthorizeCache(
+		cfg,
+		"user@example.com",
+		accountID,
+		vault.PasswordEnvelope,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := LoginOffline(cfg, LoginInput{
+		Email:          "user@example.com",
+		MasterPassword: string(password),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer result.Clear()
+	if result.AccountID != accountID ||
+		result.AccessToken != "" ||
+		!bytes.Equal(result.VaultKey, vault.Key) {
+		t.Fatalf("unexpected offline login result: %+v", result)
+	}
+}
+
+func TestLoginWithCacheFallsBackWhenServerIsUnavailable(t *testing.T) {
+	password := []byte("TermKeep#2026")
+	accountID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	vault, err := NewVault(password, accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vault.Clear()
+	server := httptest.NewServer(http.HandlerFunc(func(
+		w http.ResponseWriter,
+		_ *http.Request,
+	) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	cfg := Config{
+		ServerURL: server.URL,
+		DataDir:   filepath.Join(t.TempDir(), "cache"),
+	}
+	if err := AuthorizeCache(
+		cfg,
+		"user@example.com",
+		accountID,
+		vault.PasswordEnvelope,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	result, status, err := LoginWithCache(
+		context.Background(),
+		cfg,
+		LoginInput{
+			Email:          "user@example.com",
+			MasterPassword: string(password),
+			Host:           "workstation",
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer result.Clear()
+	if !result.Offline ||
+		status.State != StateUnavailable ||
+		!bytes.Equal(result.VaultKey, vault.Key) {
+		t.Fatalf("unexpected cached login: result=%+v status=%+v", result, status)
 	}
 }

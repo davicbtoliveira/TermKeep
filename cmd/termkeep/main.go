@@ -43,6 +43,7 @@ func run(args []string) int {
 	}
 
 	cfg := client.Config{ServerURL: *serverURL, CACertFile: *caCert}
+	cfg.DataDir = os.Getenv("TERMKEEP_DATA_DIR")
 
 	switch fs.Arg(0) {
 	case "status":
@@ -92,6 +93,15 @@ func runBootstrap(cfg client.Config, args []string) int {
 		return exitUsageFailure
 	}
 	defer result.Vault.Clear()
+	if err := client.AuthorizeCache(
+		cfg,
+		*email,
+		result.AccountID,
+		result.Vault.PasswordEnvelope,
+	); err != nil {
+		fmt.Fprintln(os.Stderr, "error: authorize encrypted cache:", err)
+		return exitUsageFailure
+	}
 
 	fmt.Fprintln(os.Stdout, "Recovery key — save it now. It will not be shown again:")
 	fmt.Fprintln(os.Stdout, result.RecoveryKey)
@@ -127,6 +137,15 @@ func runRegister(cfg client.Config, args []string) int {
 		return exitUsageFailure
 	}
 	defer result.Vault.Clear()
+	if err := client.AuthorizeCache(
+		cfg,
+		*email,
+		result.AccountID,
+		result.Vault.PasswordEnvelope,
+	); err != nil {
+		fmt.Fprintln(os.Stderr, "error: authorize encrypted cache:", err)
+		return exitUsageFailure
+	}
 
 	fmt.Fprintln(os.Stdout, "Recovery key — save it now. It will not be shown again:")
 	fmt.Fprintln(os.Stdout, result.RecoveryKey)
@@ -172,7 +191,7 @@ func runLogin(cfg client.Config, args []string) int {
 		fmt.Fprintln(os.Stderr, "error: read host name:", err)
 		return exitUsageFailure
 	}
-	result, err := client.Login(context.Background(), cfg, client.LoginInput{
+	result, _, err := client.LoginWithCache(context.Background(), cfg, client.LoginInput{
 		Email:          *email,
 		MasterPassword: password,
 		Host:           host,

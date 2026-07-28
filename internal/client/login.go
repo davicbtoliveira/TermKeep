@@ -21,9 +21,11 @@ type LoginInput struct {
 
 // LoginResult contains an unlocked vault key held only by the caller.
 type LoginResult struct {
-	AccountID   string
-	VaultKey    []byte
-	AccessToken string
+	AccountID             string
+	VaultKey              []byte
+	AccessToken           string
+	PasswordVaultEnvelope []byte
+	Offline               bool
 }
 
 type loginStartBody struct {
@@ -126,10 +128,78 @@ func Login(ctx context.Context, cfg Config, input LoginInput) (*LoginResult, err
 		return nil, errors.New("invalid email, master password, or vault envelope")
 	}
 	return &LoginResult{
-		AccountID:   finish.AccountID,
-		VaultKey:    vaultKey,
-		AccessToken: finish.AccessToken,
+		AccountID:             finish.AccountID,
+		VaultKey:              vaultKey,
+		AccessToken:           finish.AccessToken,
+		PasswordVaultEnvelope: envelope,
 	}, nil
+}
+
+// LoginOffline unlocks a previously authorized encrypted cache without
+// contacting the configured Server.
+func LoginOffline(cfg Config, input LoginInput) (*LoginResult, error) {
+	email, err := canonicalBootstrapEmail(input.Email)
+	if err != nil {
+		return nil, err
+	}
+	if input.MasterPassword == "" {
+		return nil, errors.New("master password is required")
+	}
+	cache, err := OpenCache(cfg, email)
+	if err != nil {
+		return nil, err
+	}
+	data, err := cache.read()
+	if err != nil {
+		return nil, err
+	}
+	password := []byte(input.MasterPassword)
+	defer clearBytes(password)
+	vaultKey, err := UnlockVaultWithPassword(
+		data.PasswordVaultEnvelope, password, data.AccountID)
+	if err != nil {
+		return nil, errors.New("invalid email, master password, or encrypted cache")
+	}
+	return &LoginResult{
+		AccountID: data.AccountID,
+		VaultKey:  vaultKey,
+	}, nil
+}
+
+// LoginWithCache authenticates online when possible and authorizes the local
+// cache. It falls back to that cache only after a non-healthy, non-TLS status
+// proves the Server cannot currently complete authentication.
+func LoginWithCache(
+	ctx context.Context,
+	cfg Config,
+	input LoginInput,
+) (*LoginResult, Status, error) {
+	result, loginErr := Login(ctx, cfg, input)
+	if loginErr == nil {
+		if err := AuthorizeCache(
+			cfg,
+			input.Email,
+			result.AccountID,
+			result.PasswordVaultEnvelope,
+		); err != nil {
+			result.Clear()
+			return nil, Status{}, err
+		}
+		return result, Status{State: StateHealthy}, nil
+	}
+	status, statusErr := CheckStatus(ctx, cfg)
+	if statusErr != nil {
+		return nil, Status{}, statusErr
+	}
+	if status.State == StateHealthy || status.State == StateTLSError {
+		return nil, status, loginErr
+	}
+	result, err := LoginOffline(cfg, input)
+	if err != nil {
+		return nil, status, err
+	}
+	result.Offline = true
+	return result, status, nil
 }
 
 // Clear makes a best-effort attempt to erase the unlocked vault key.
@@ -137,4 +207,5 @@ func (r *LoginResult) Clear() {
 	clearBytes(r.VaultKey)
 	r.VaultKey = nil
 	r.AccessToken = ""
+	r.PasswordVaultEnvelope = nil
 }
