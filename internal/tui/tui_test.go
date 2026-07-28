@@ -310,7 +310,7 @@ func TestOfflineVaultAdvertisesLoginEditing(t *testing.T) {
 	}
 }
 
-func TestCachedLoginStoreSavesAndListsOffline(t *testing.T) {
+func TestCachedItemStoreSavesListsAndEditsOffline(t *testing.T) {
 	accountID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 	password := []byte("TermKeep#2026")
 	vault, err := client.NewVault(password, accountID)
@@ -393,6 +393,37 @@ func TestCachedLoginStoreSavesAndListsOffline(t *testing.T) {
 		got[1].RevisionID == "" ||
 		len(got[1].ParentRevisionIDs) != 0 {
 		t.Fatalf("offline Secure Note differs: %+v", got)
+	}
+
+	edited := got[1]
+	note := *edited.SecureNote
+	note.Content = "Updated-Sensitive-Note-Content"
+	edited.SecureNote = &note
+	edited.Revision++
+	edited.ParentRevisionIDs = []string{edited.RevisionID}
+	edited.RevisionID = ""
+	if err := store.Save(ctx, edited); err != nil {
+		t.Fatal(err)
+	}
+	got, err = store.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 ||
+		got[1].SecureNote == nil ||
+		got[1].SecureNote.Content != note.Content ||
+		got[1].Revision != 2 ||
+		len(got[1].ParentRevisionIDs) != 1 {
+		t.Fatalf("offline Secure Note edit differs: %+v", got)
+	}
+	snapshot, err := cache.SyncSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Mutations) != 3 ||
+		snapshot.Mutations[2].BaseRevision != 1 ||
+		snapshot.Mutations[2].Item.ItemID != note.ItemID {
+		t.Fatalf("offline Secure Note mutation queue: %+v", snapshot)
 	}
 }
 
