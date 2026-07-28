@@ -88,7 +88,7 @@ func run() error {
 	accounts := server.NewAccountService(dbStore, auth)
 	sessions := server.NewSessionService(dbStore, auth, audit)
 	activity := server.NewActivityService(audit, auth)
-	items := server.NewItemService(dbStore, auth)
+	items := server.NewItemService(dbStore, auth, audit)
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           server.NewHandler(version, dbStore, trusted, auth, invites, accounts, sessions, activity, items),

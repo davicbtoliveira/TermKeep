@@ -221,6 +221,76 @@ func TestSyncRejectsMutationIDReusedWithDifferentContent(t *testing.T) {
 	}
 }
 
+func TestSyncFailureIsAuditedWithoutSemanticContent(t *testing.T) {
+	authStore := &memoryBootstrapStore{}
+	auth := newTestAuthService(t, authStore)
+	itemStore := &memoryItemStore{}
+	auditStore := &memoryAuditStore{}
+	audit := NewAuditLog(auditStore, defaultAuditRetention)
+	items := NewItemService(itemStore, auth, audit)
+	activity := NewActivityService(audit, auth)
+	handler := NewHandler(
+		"test", stubSchema{version: 1}, nil, auth, items, activity)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	password := []byte("TermKeep#2026")
+	mustBootstrap(t, server, "admin@example.com", password)
+	token := mustLogin(t, server, "admin@example.com", password)
+	first := VaultMutation{
+		MutationID:   "22222222-2222-4222-8222-222222222222",
+		BaseRevision: 0,
+		Item: OpaqueItem{
+			ItemID:        "11111111-1111-4111-8111-111111111111",
+			SchemaVersion: 1,
+			Revision:      1,
+			Envelope:      []byte("Semantic-Envelope-Sentinel"),
+		},
+	}
+	syncOpaqueItems(t, server, token, "", []VaultMutation{first})
+	conflict := first
+	conflict.MutationID = "33333333-3333-4333-8333-333333333333"
+	conflict.Item.Envelope = []byte("Different-Semantic-Sentinel")
+	response := postSync(
+		t, server, token, "1", []VaultMutation{conflict})
+	response.Body.Close()
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("conflict status: want 409, got %d", response.StatusCode)
+	}
+
+	activityResponse := getJSONWithAuth(
+		t, server.URL+"/api/v1/activity", token)
+	if activityResponse.StatusCode != http.StatusOK {
+		activityResponse.Body.Close()
+		t.Fatalf(
+			"activity status: want 200, got %d",
+			activityResponse.StatusCode,
+		)
+	}
+	var body struct {
+		Events []AuditEvent `json:"events"`
+	}
+	decodeJSON(t, activityResponse, &body)
+	if len(body.Events) != 1 ||
+		body.Events[0].Type != "sync.failed" ||
+		body.Events[0].AccountID != authStore.account.AccountID {
+		t.Fatalf("sync failure audit: %+v", body.Events)
+	}
+	encoded, err := json.Marshal(body.Events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{
+		first.Item.ItemID,
+		string(first.Item.Envelope),
+		string(conflict.Item.Envelope),
+	} {
+		if bytes.Contains(encoded, []byte(forbidden)) {
+			t.Fatalf("sync audit contains semantic/Item field %q", forbidden)
+		}
+	}
+}
+
 func syncOpaqueItems(
 	t *testing.T,
 	server *httptest.Server,

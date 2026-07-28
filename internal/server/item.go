@@ -51,11 +51,25 @@ type ItemService struct {
 	store     ItemStore
 	syncStore SyncStore
 	auth      *AuthService
+	audit     *AuditLog
 }
 
-func NewItemService(store ItemStore, auth *AuthService) *ItemService {
+func NewItemService(
+	store ItemStore,
+	auth *AuthService,
+	auditLogs ...*AuditLog,
+) *ItemService {
 	syncStore, _ := store.(SyncStore)
-	return &ItemService{store: store, syncStore: syncStore, auth: auth}
+	var audit *AuditLog
+	if len(auditLogs) > 0 {
+		audit = auditLogs[0]
+	}
+	return &ItemService{
+		store:     store,
+		syncStore: syncStore,
+		auth:      auth,
+		audit:     audit,
+	}
 }
 
 func (s *ItemService) register(mux *http.ServeMux) {
@@ -133,16 +147,19 @@ func (s *ItemService) sync(w http.ResponseWriter, r *http.Request) {
 	}
 	var request syncRequest
 	if !decodeRequest(w, r, &request) {
+		s.auditSyncFailure(r, token.AccountID)
 		return
 	}
 	if s.syncStore == nil || len(request.Mutations) > maximumSyncMutations ||
 		!validMutations(request.Mutations) {
+		s.auditSyncFailure(r, token.AccountID)
 		http.Error(w, "invalid synchronization", http.StatusBadRequest)
 		return
 	}
 	result, err := s.syncStore.Sync(
 		r.Context(), token.AccountID, request.Cursor, request.Mutations)
 	if err != nil {
+		s.auditSyncFailure(r, token.AccountID)
 		if errors.Is(err, ErrItemRevisionConflict) {
 			http.Error(w, "item revision conflict", http.StatusConflict)
 			return
@@ -165,6 +182,15 @@ func (s *ItemService) sync(w http.ResponseWriter, r *http.Request) {
 		result.Changes = []OpaqueItem{}
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *ItemService) auditSyncFailure(r *http.Request, accountID string) {
+	recordAudit(r.Context(), s.audit, AuditEvent{
+		Type:      "sync.failed",
+		AccountID: accountID,
+		ActorID:   accountID,
+		SourceIP:  requestClientIP(r),
+	})
 }
 
 func validMutations(mutations []VaultMutation) bool {
