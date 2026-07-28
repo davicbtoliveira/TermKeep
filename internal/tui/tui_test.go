@@ -260,6 +260,45 @@ func TestUnlockedVaultListsLoginsWithoutPasswords(t *testing.T) {
 	}
 }
 
+func TestUnlockedVaultListsAndOpensSecureNotes(t *testing.T) {
+	record := loginRecord{
+		SecureNote: &client.SecureNoteItem{
+			ItemID:  "11111111-1111-4111-8111-111111111111",
+			Title:   "Production recovery procedure",
+			Content: "Sensitive-Note-Content-Sentinel",
+		},
+		Revision: 1,
+	}
+	initial := model{
+		loaded:     true,
+		vaultOpen:  true,
+		loginStore: &fakeLoginStore{},
+		logins:     []loginRecord{record},
+	}
+	list := initial.View()
+	if !strings.Contains(
+		list, "[Secure Note] "+record.SecureNote.Title,
+	) {
+		t.Fatalf("Vault missing Secure Note title:\n%s", list)
+	}
+	if strings.Contains(list, record.SecureNote.Content) {
+		t.Fatalf("Vault list exposed Secure Note content:\n%s", list)
+	}
+
+	opened, _ := initial.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	detail := opened.(model).View()
+	for _, want := range []string{
+		"Secure Note — " + record.SecureNote.Title,
+		record.SecureNote.Content,
+		"[e] edit",
+		"[d] delete",
+	} {
+		if !strings.Contains(detail, want) {
+			t.Fatalf("Secure Note detail missing %q:\n%s", want, detail)
+		}
+	}
+}
+
 func TestOfflineVaultAdvertisesLoginEditing(t *testing.T) {
 	view := model{
 		loaded:     true,
@@ -326,16 +365,34 @@ func TestCachedLoginStoreSavesAndListsOffline(t *testing.T) {
 	if err := store.Save(ctx, want); err != nil {
 		t.Fatal(err)
 	}
+	wantNote := loginRecord{
+		SecureNote: &client.SecureNoteItem{
+			ItemID:  "22222222-2222-4222-8222-222222222222",
+			Title:   "Offline recovery procedure",
+			Content: "Sensitive-Note-Content-Sentinel",
+		},
+		Revision: 1,
+	}
+	if err := store.Save(ctx, wantNote); err != nil {
+		t.Fatal(err)
+	}
 	got, err := store.List(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 ||
+	if len(got) != 2 ||
 		!reflect.DeepEqual(got[0].Login, want.Login) ||
 		got[0].Revision != want.Revision ||
 		got[0].RevisionID == "" ||
 		len(got[0].ParentRevisionIDs) != 0 {
 		t.Fatalf("offline Login differs: %+v", got)
+	}
+	if got[1].SecureNote == nil ||
+		!reflect.DeepEqual(*got[1].SecureNote, *wantNote.SecureNote) ||
+		got[1].Revision != wantNote.Revision ||
+		got[1].RevisionID == "" ||
+		len(got[1].ParentRevisionIDs) != 0 {
+		t.Fatalf("offline Secure Note differs: %+v", got)
 	}
 }
 
@@ -573,6 +630,100 @@ func TestCreateLoginCapturesAllNativeFields(t *testing.T) {
 	}
 }
 
+func TestCreateSecureNoteCapturesTitleAndContent(t *testing.T) {
+	store := &fakeLoginStore{}
+	var current tea.Model = model{
+		loaded:     true,
+		vaultOpen:  true,
+		loginStore: store,
+	}
+	current, _ = current.Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	if !strings.Contains(current.(model).View(), "New Secure Note") {
+		t.Fatalf("Note key did not open form:\n%s", current.(model).View())
+	}
+	values := []string{
+		"Production recovery procedure",
+		"Sensitive-Note-Content-Sentinel\nSecond line",
+	}
+	var command tea.Cmd
+	for _, value := range values {
+		current, _ = current.Update(
+			tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(value)})
+		current, command = current.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	}
+	if command == nil {
+		t.Fatal("final Secure Note field did not save")
+	}
+	current, _ = current.Update(command())
+
+	if len(store.saved) != 1 || store.saved[0].SecureNote == nil {
+		t.Fatalf("saved Secure Notes: %+v", store.saved)
+	}
+	note := *store.saved[0].SecureNote
+	if note.ItemID == "" ||
+		note.Title != values[0] ||
+		note.Content != values[1] ||
+		store.saved[0].Revision != 1 {
+		t.Fatalf("saved Secure Note differs: %+v", store.saved[0])
+	}
+}
+
+func TestEditSecureNotePreservesItemAndIncrementsRevision(t *testing.T) {
+	revisionID := "22222222-2222-4222-8222-222222222222"
+	record := loginRecord{
+		SecureNote: &client.SecureNoteItem{
+			ItemID:  "11111111-1111-4111-8111-111111111111",
+			Title:   "Old procedure",
+			Content: "Old sensitive content",
+		},
+		Revision:   1,
+		RevisionID: revisionID,
+	}
+	store := &fakeLoginStore{records: []loginRecord{record}}
+	var current tea.Model = model{
+		loaded:     true,
+		vaultOpen:  true,
+		loginStore: store,
+		logins:     store.records,
+	}
+	current, _ = current.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	current, _ = current.Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	if !strings.Contains(current.(model).View(), "Edit Secure Note") {
+		t.Fatalf("edit key did not open Note form:\n%s",
+			current.(model).View())
+	}
+	current, _ = current.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+	current, _ = current.Update(tea.KeyMsg{
+		Type: tea.KeyRunes, Runes: []rune("New procedure"),
+	})
+	current, _ = current.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	current, _ = current.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+	current, _ = current.Update(tea.KeyMsg{
+		Type: tea.KeyRunes, Runes: []rune("New sensitive content"),
+	})
+	current, command := current.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if command == nil {
+		t.Fatal("edited Secure Note was not saved")
+	}
+	current, _ = current.Update(command())
+
+	if len(store.saved) != 1 || store.saved[0].SecureNote == nil {
+		t.Fatalf("saved Secure Notes: %+v", store.saved)
+	}
+	got := store.saved[0]
+	if got.SecureNote.ItemID != record.SecureNote.ItemID ||
+		got.SecureNote.Title != "New procedure" ||
+		got.SecureNote.Content != "New sensitive content" ||
+		got.Revision != 2 ||
+		!reflect.DeepEqual(
+			got.ParentRevisionIDs, []string{revisionID},
+		) {
+		t.Fatalf("edited Secure Note differs: %+v", got)
+	}
+}
+
 func TestEditLoginPreservesFieldsAndIncrementsRevision(t *testing.T) {
 	store := &fakeLoginStore{records: []loginRecord{{
 		Login: client.LoginItem{
@@ -735,6 +886,38 @@ func TestTrashScreenRestoresDeletedLogin(t *testing.T) {
 	}
 }
 
+func TestTrashScreenListsSecureNoteWithoutContent(t *testing.T) {
+	record := loginRecord{
+		SecureNote: &client.SecureNoteItem{
+			ItemID:  "11111111-1111-4111-8111-111111111111",
+			Title:   "Recoverable procedure",
+			Content: "Sensitive-Note-Content-Sentinel",
+		},
+		Revision:   2,
+		RevisionID: "33333333-3333-4333-8333-333333333333",
+		Deleted:    true,
+	}
+	store := &fakeLoginStore{records: []loginRecord{record}}
+	var current tea.Model = model{
+		loaded:     true,
+		vaultOpen:  true,
+		loginStore: store,
+	}
+	current, command := current.Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	if command == nil {
+		t.Fatal("trash key did not load deleted Secure Notes")
+	}
+	current, _ = current.Update(command())
+	view := current.(model).View()
+	if !strings.Contains(view, "[Secure Note] "+record.SecureNote.Title) {
+		t.Fatalf("Trash missing Secure Note title:\n%s", view)
+	}
+	if strings.Contains(view, record.SecureNote.Content) {
+		t.Fatalf("Trash exposed Secure Note content:\n%s", view)
+	}
+}
+
 func TestTrashPermanentDeletionRequiresConfirmation(t *testing.T) {
 	deletedID := "33333333-3333-4333-8333-333333333333"
 	record := loginRecord{
@@ -866,6 +1049,141 @@ func TestConflictScreenPreservesVersionsAndSelectsOne(t *testing.T) {
 			[]string{firstID, secondID},
 		) {
 		t.Fatalf("selected resolution: %+v", resolution)
+	}
+}
+
+func TestSecureNoteConflictPreservesVersionsAndSelectsOne(t *testing.T) {
+	firstID := "22222222-2222-4222-8222-222222222222"
+	secondID := "33333333-3333-4333-8333-333333333333"
+	first := loginRecord{
+		SecureNote: &client.SecureNoteItem{
+			ItemID:  "11111111-1111-4111-8111-111111111111",
+			Title:   "First procedure",
+			Content: "First sensitive content",
+		},
+		Revision:   2,
+		RevisionID: firstID,
+	}
+	second := loginRecord{
+		SecureNote: &client.SecureNoteItem{
+			ItemID:  first.SecureNote.ItemID,
+			Title:   "Second procedure",
+			Content: "Second sensitive content",
+		},
+		Revision:   2,
+		RevisionID: secondID,
+	}
+	conflict := first
+	conflict.ConflictVersions = []loginRecord{first, second}
+	store := &fakeLoginStore{records: []loginRecord{conflict}}
+	initial := model{
+		loaded:        true,
+		vaultOpen:     true,
+		loginStore:    store,
+		logins:        store.records,
+		showLogin:     true,
+		selectedLogin: 0,
+	}
+	view := initial.View()
+	for _, want := range []string{
+		"Conflict",
+		first.SecureNote.Title,
+		first.SecureNote.Content,
+		second.SecureNote.Title,
+		second.SecureNote.Content,
+		"[enter] keep selected",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("Secure Note Conflict missing %q:\n%s", want, view)
+		}
+	}
+
+	updated, command := initial.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if command == nil {
+		t.Fatal("selecting Secure Note Conflict did not save")
+	}
+	updated, _ = updated.(model).Update(command())
+	if len(store.saved) != 1 || store.saved[0].SecureNote == nil {
+		t.Fatalf("saved Secure Note resolutions: %+v", store.saved)
+	}
+	resolution := store.saved[0]
+	if resolution.SecureNote.Title != first.SecureNote.Title ||
+		resolution.Revision != 3 ||
+		!reflect.DeepEqual(
+			resolution.ParentRevisionIDs,
+			[]string{firstID, secondID},
+		) {
+		t.Fatalf("Secure Note resolution: %+v", resolution)
+	}
+}
+
+func TestSecureNoteConflictSavesManualMerge(t *testing.T) {
+	firstID := "22222222-2222-4222-8222-222222222222"
+	secondID := "33333333-3333-4333-8333-333333333333"
+	first := loginRecord{
+		SecureNote: &client.SecureNoteItem{
+			ItemID:  "11111111-1111-4111-8111-111111111111",
+			Title:   "First title",
+			Content: "First content",
+		},
+		Revision:   2,
+		RevisionID: firstID,
+	}
+	second := loginRecord{
+		SecureNote: &client.SecureNoteItem{
+			ItemID:  first.SecureNote.ItemID,
+			Title:   "Second title",
+			Content: "Second content",
+		},
+		Revision:   2,
+		RevisionID: secondID,
+	}
+	conflict := first
+	conflict.ConflictVersions = []loginRecord{first, second}
+	store := &fakeLoginStore{records: []loginRecord{conflict}}
+	var current tea.Model = model{
+		loaded:     true,
+		vaultOpen:  true,
+		loginStore: store,
+		logins:     store.records,
+		showLogin:  true,
+	}
+	current, _ = current.Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	if !strings.Contains(
+		current.(model).View(),
+		"Manual Secure Note Conflict Merge",
+	) {
+		t.Fatalf("Secure Note merge form not opened:\n%s",
+			current.(model).View())
+	}
+	current, _ = current.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+	current, _ = current.Update(tea.KeyMsg{
+		Type: tea.KeyRunes, Runes: []rune("Merged title"),
+	})
+	current, _ = current.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	current, _ = current.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+	current, _ = current.Update(tea.KeyMsg{
+		Type: tea.KeyRunes, Runes: []rune("Merged content"),
+	})
+	current, command := current.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if command == nil {
+		t.Fatal("Secure Note manual merge did not save")
+	}
+	current, _ = current.Update(command())
+
+	if len(store.saved) != 1 || store.saved[0].SecureNote == nil {
+		t.Fatalf("saved Secure Note merges: %+v", store.saved)
+	}
+	merged := store.saved[0]
+	if merged.SecureNote.Title != "Merged title" ||
+		merged.SecureNote.Content != "Merged content" ||
+		merged.Revision != 3 ||
+		!reflect.DeepEqual(
+			merged.ParentRevisionIDs,
+			[]string{firstID, secondID},
+		) {
+		t.Fatalf("Secure Note manual merge: %+v", merged)
 	}
 }
 
@@ -1153,7 +1471,7 @@ func (s *fakeLoginStore) Save(_ context.Context, record loginRecord) error {
 	}
 	s.saved = append(s.saved, record)
 	for index := range s.records {
-		if s.records[index].Login.ItemID == record.Login.ItemID {
+		if recordItemID(s.records[index]) == recordItemID(record) {
 			s.records[index] = record
 			return nil
 		}

@@ -27,6 +27,7 @@ type activityMsg client.ActivityPage
 type activityErrMsg error
 type loginRecord struct {
 	Login             client.LoginItem
+	SecureNote        *client.SecureNoteItem
 	Revision          uint64
 	RevisionID        string
 	ParentRevisionIDs []string
@@ -55,6 +56,7 @@ var periodicSyncInterval = 30 * time.Second
 var loginOperationTimeout = 10 * time.Second
 
 const loginFormFieldCount = 6
+const secureNoteFormFieldCount = 2
 
 var loginFormLabels = [loginFormFieldCount]string{
 	"Name",
@@ -71,6 +73,16 @@ type loginForm struct {
 	parentRevisionIDs []string
 	field             int
 	values            [loginFormFieldCount]string
+	editing           bool
+	manualMerge       bool
+}
+
+type secureNoteForm struct {
+	itemID            string
+	revision          uint64
+	parentRevisionIDs []string
+	field             int
+	values            [secureNoteFormFieldCount]string
 	editing           bool
 	manualMerge       bool
 }
@@ -131,6 +143,8 @@ type model struct {
 	loginStore       loginStore
 	showLoginForm    bool
 	loginForm        loginForm
+	showNoteForm     bool
+	noteForm         secureNoteForm
 	loginFormErr     error
 	loginSaving      bool
 	syncLoading      bool
@@ -365,21 +379,43 @@ func (s cachedLoginStore) openLoginGroups(
 				})
 				continue
 			}
-			login, err := session.OpenLogin(ctx, s.socketPath, item)
+			opened, err := session.OpenNativeItem(
+				ctx, s.socketPath, item)
 			if err != nil {
 				return nil, err
 			}
-			versions = append(versions, loginRecord{
-				Login:      login,
+			record := loginRecord{
 				Revision:   item.Revision,
 				RevisionID: item.RevisionID,
 				ParentRevisionIDs: append(
 					[]string(nil), item.ParentRevisionIDs...),
 				Deleted: item.Deleted,
 				Purged:  item.Purged,
-			})
+			}
+			switch opened.Type {
+			case client.NativeItemTypeLogin:
+				if opened.Login == nil {
+					return nil, client.ErrInvalidItemEnvelope
+				}
+				record.Login = *opened.Login
+			case client.NativeItemTypeSecureNote:
+				if opened.SecureNote == nil {
+					return nil, client.ErrInvalidItemEnvelope
+				}
+				note := *opened.SecureNote
+				record.SecureNote = &note
+			default:
+				return nil, client.ErrInvalidItemEnvelope
+			}
+			versions = append(versions, record)
 		}
 		record := versions[0]
+		for _, version := range versions {
+			if !version.Purged {
+				record = version
+				break
+			}
+		}
 		if len(versions) > 1 {
 			record.ConflictVersions = versions
 		}
@@ -389,8 +425,17 @@ func (s cachedLoginStore) openLoginGroups(
 }
 
 func (s cachedLoginStore) Save(ctx context.Context, record loginRecord) error {
-	item, err := session.SealLogin(
-		ctx, s.socketPath, record.Login, record.Revision)
+	var (
+		item client.EncryptedItem
+		err  error
+	)
+	if record.SecureNote != nil {
+		item, err = session.SealSecureNote(
+			ctx, s.socketPath, *record.SecureNote, record.Revision)
+	} else {
+		item, err = session.SealLogin(
+			ctx, s.socketPath, record.Login, record.Revision)
+	}
 	if err != nil {
 		return err
 	}
@@ -446,6 +491,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.showLoginForm {
 			return m.updateLoginForm(msg)
 		}
+		if m.showNoteForm {
+			return m.updateSecureNoteForm(msg)
+		}
 		switch msg.String() {
 		case "q", "esc", "ctrl+c":
 			return m, tea.Quit
@@ -483,14 +531,47 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.loginFormErr = nil
 				m.loginSaving = false
 			}
+		case "n":
+			if m.showActivity && m.activityPage.NextCursor != "" {
+				m.activityLoading = true
+				m.activityErr = nil
+				return m, loadActivity(
+					m.cfg,
+					m.accessToken,
+					m.activityAll,
+					m.activityPage.NextCursor,
+				)
+			}
+			if m.vaultOpen && m.loginStore != nil &&
+				!m.showSessions && !m.showActivity &&
+				!m.showLogin && !m.showTrash {
+				itemID, err := client.NewItemID()
+				if err != nil {
+					m.loginsErr = err
+					return m, nil
+				}
+				m.showNoteForm = true
+				m.noteForm = secureNoteForm{
+					itemID:   itemID,
+					revision: 1,
+				}
+				m.loginFormErr = nil
+				m.loginSaving = false
+			}
 		case "e":
 			if m.vaultOpen && m.loginStore != nil &&
 				!m.showSessions && !m.showActivity &&
 				m.selectedLogin < len(m.logins) &&
 				len(m.logins[m.selectedLogin].ConflictVersions) == 0 {
+				record := m.logins[m.selectedLogin]
 				m.showLogin = false
-				m.showLoginForm = true
-				m.loginForm = formForLogin(m.logins[m.selectedLogin])
+				if record.SecureNote != nil {
+					m.showNoteForm = true
+					m.noteForm = formForSecureNote(record)
+				} else {
+					m.showLoginForm = true
+					m.loginForm = formForLogin(record)
+				}
 				m.loginFormErr = nil
 				m.loginSaving = false
 			}
@@ -517,11 +598,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				record := m.logins[m.selectedLogin]
 				if len(record.ConflictVersions) > 1 {
 					m.showLogin = false
-					m.showLoginForm = true
-					m.loginForm = formForConflict(
-						record.ConflictVersions,
-						m.selectedConflict,
-					)
+					if record.SecureNote != nil {
+						m.showNoteForm = true
+						m.noteForm = formForSecureNoteConflict(
+							record.ConflictVersions,
+							m.selectedConflict,
+						)
+					} else {
+						m.showLoginForm = true
+						m.loginForm = formForConflict(
+							record.ConflictVersions,
+							m.selectedConflict,
+						)
+					}
 					m.loginFormErr = nil
 					m.loginSaving = false
 				}
@@ -563,17 +652,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, loadActivity(
 					m.cfg, m.accessToken, m.activityAll, "")
 			}
-		case "n":
-			if m.showActivity && m.activityPage.NextCursor != "" {
-				m.activityLoading = true
-				m.activityErr = nil
-				return m, loadActivity(
-					m.cfg,
-					m.accessToken,
-					m.activityAll,
-					m.activityPage.NextCursor,
-				)
-			}
 		case "v":
 			m.showSessions = false
 			m.showActivity = false
@@ -582,6 +660,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.revealPassword = false
 			m.selectedConflict = 0
 			m.purgeConfirm = false
+			m.showNoteForm = false
 			return m, nil
 		case "j", "down":
 			if m.showSessions && m.selectedSession+1 < len(m.sessions) {
@@ -694,6 +773,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.logins = []loginRecord(msg)
 		m.selectedConflict = 0
 		m.showLoginForm = false
+		m.showNoteForm = false
 		m.loginFormErr = nil
 		m.loginSaving = false
 		if m.selectedLogin >= len(m.logins) {
@@ -722,6 +802,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.showTrash = false
 		m.selectedConflict = 0
 		m.showLoginForm = false
+		m.showNoteForm = false
 		m.loginFormErr = nil
 		m.loginSaving = false
 		m.syncErr = msg.syncErr
@@ -752,6 +833,9 @@ func (m model) View() string {
 	if m.showLoginForm {
 		return m.loginFormView()
 	}
+	if m.showNoteForm {
+		return m.secureNoteFormView()
+	}
 	if m.showTrash {
 		return m.trashView()
 	}
@@ -777,15 +861,15 @@ func (m model) View() string {
 		switch {
 		case m.loginsLoading:
 			b.WriteString("Vault:    unlocked\n")
-			b.WriteString("Logins:   loading…\n")
+			b.WriteString("Items:    loading…\n")
 		case m.loginsErr != nil:
 			b.WriteString("Vault:    unlocked\n")
-			b.WriteString("Logins:   error — " + m.loginsErr.Error() + "\n")
+			b.WriteString("Items:    error — " + m.loginsErr.Error() + "\n")
 		case len(m.logins) == 0:
 			b.WriteString("Vault:    unlocked (empty)\n")
 		default:
 			b.WriteString("Vault:    unlocked\n")
-			b.WriteString("Logins:\n")
+			b.WriteString("Items:\n")
 			for index, record := range m.logins {
 				cursor := " "
 				if index == m.selectedLogin {
@@ -796,11 +880,18 @@ func (m model) View() string {
 						&b,
 						"%s ⚠ Conflict — %s (%d versions)\n",
 						cursor,
-						record.Login.Name,
+						recordTitle(record),
 						len(record.ConflictVersions),
 					)
+				} else if record.SecureNote != nil {
+					fmt.Fprintf(
+						&b,
+						"%s [Secure Note] %s\n",
+						cursor,
+						record.SecureNote.Title,
+					)
 				} else {
-					fmt.Fprintf(&b, "%s %s — %s\n",
+					fmt.Fprintf(&b, "%s [Login] %s — %s\n",
 						cursor, record.Login.Name, record.Login.Username)
 				}
 			}
@@ -819,7 +910,10 @@ func (m model) View() string {
 		}
 	}
 	if m.vaultOpen && m.loginStore != nil {
-		b.WriteString("\n[c] new Login  [enter] open  [t] Trash  ")
+		b.WriteString(
+			"\n[c] new Login  [n] new Secure Note  " +
+				"[enter] open  [t] Trash  ",
+		)
 		if m.accessToken != "" {
 			b.WriteString("[a] Activity  [s] Active Sessions  ")
 			b.WriteString("[y] sync  ")
@@ -827,6 +921,105 @@ func (m model) View() string {
 		b.WriteString("[r] refresh  [q] quit\n")
 	} else {
 		b.WriteString("\n[r] refresh  [q] quit\n")
+	}
+	return b.String()
+}
+
+func (m model) updateSecureNoteForm(
+	msg tea.KeyMsg,
+) (tea.Model, tea.Cmd) {
+	if m.loginSaving {
+		if msg.String() == "ctrl+c" {
+			return m, tea.Quit
+		}
+		return m, nil
+	}
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "esc":
+		m.showNoteForm = false
+		m.loginFormErr = nil
+		return m, nil
+	case "ctrl+u":
+		m.noteForm.values[m.noteForm.field] = ""
+	case "backspace":
+		value := []rune(m.noteForm.values[m.noteForm.field])
+		if len(value) > 0 {
+			m.noteForm.values[m.noteForm.field] =
+				string(value[:len(value)-1])
+		}
+	case "enter":
+		if m.noteForm.field+1 < secureNoteFormFieldCount {
+			m.noteForm.field++
+			m.loginFormErr = nil
+			return m, nil
+		}
+		record, err := recordFromSecureNoteForm(m.noteForm)
+		if err != nil {
+			m.loginFormErr = err
+			return m, nil
+		}
+		m.loginSaving = true
+		m.loginFormErr = nil
+		return m, saveLogin(m.loginStore, record)
+	default:
+		if msg.Type == tea.KeyRunes {
+			m.noteForm.values[m.noteForm.field] += string(msg.Runes)
+		}
+	}
+	return m, nil
+}
+
+func recordFromSecureNoteForm(
+	form secureNoteForm,
+) (loginRecord, error) {
+	title := strings.TrimSpace(form.values[0])
+	if title == "" {
+		return loginRecord{}, fmt.Errorf("title is required")
+	}
+	return loginRecord{
+		SecureNote: &client.SecureNoteItem{
+			ItemID:  form.itemID,
+			Title:   title,
+			Content: form.values[1],
+		},
+		Revision: form.revision,
+		ParentRevisionIDs: append(
+			[]string(nil), form.parentRevisionIDs...),
+	}, nil
+}
+
+func (m model) secureNoteFormView() string {
+	title := "New Secure Note"
+	if m.noteForm.manualMerge {
+		title = "Manual Secure Note Conflict Merge"
+	} else if m.noteForm.editing {
+		title = "Edit Secure Note"
+	}
+	labels := [secureNoteFormFieldCount]string{"Title", "Content"}
+	var b strings.Builder
+	fmt.Fprintf(&b, "TermKeep — %s\n\n", title)
+	for index, label := range labels {
+		cursor := " "
+		if index == m.noteForm.field {
+			cursor = ">"
+		}
+		fmt.Fprintf(
+			&b, "%s %s: %s\n",
+			cursor, label, m.noteForm.values[index],
+		)
+	}
+	if m.loginFormErr != nil {
+		fmt.Fprintf(&b, "\nError: %s\n", m.loginFormErr)
+	}
+	if m.loginSaving {
+		b.WriteString("\nSaving…  [ctrl+c] quit\n")
+	} else {
+		b.WriteString(
+			"\n[enter] next/save  [ctrl+u] clear field  " +
+				"[esc] cancel  [ctrl+c] quit\n",
+		)
 	}
 	return b.String()
 }
@@ -941,6 +1134,23 @@ func formForLogin(record loginRecord) loginForm {
 	}
 }
 
+func formForSecureNote(record loginRecord) secureNoteForm {
+	var parentRevisionIDs []string
+	if record.RevisionID != "" {
+		parentRevisionIDs = []string{record.RevisionID}
+	}
+	return secureNoteForm{
+		itemID:            record.SecureNote.ItemID,
+		revision:          record.Revision + 1,
+		parentRevisionIDs: parentRevisionIDs,
+		editing:           true,
+		values: [secureNoteFormFieldCount]string{
+			record.SecureNote.Title,
+			record.SecureNote.Content,
+		},
+	}
+}
+
 func deleteLogin(record loginRecord) loginRecord {
 	record.Revision++
 	record.ParentRevisionIDs = []string{record.RevisionID}
@@ -976,6 +1186,21 @@ func formForConflict(versions []loginRecord, selected int) loginForm {
 	form := formForLogin(loginRecord{
 		Login:    resolution.Login,
 		Revision: resolution.Revision - 1,
+	})
+	form.parentRevisionIDs = append(
+		[]string(nil), resolution.ParentRevisionIDs...)
+	form.manualMerge = true
+	return form
+}
+
+func formForSecureNoteConflict(
+	versions []loginRecord,
+	selected int,
+) secureNoteForm {
+	resolution := resolveConflict(versions, selected)
+	form := formForSecureNote(loginRecord{
+		SecureNote: resolution.SecureNote,
+		Revision:   resolution.Revision - 1,
 	})
 	form.parentRevisionIDs = append(
 		[]string(nil), resolution.ParentRevisionIDs...)
@@ -1048,15 +1273,24 @@ func (m model) trashView() string {
 			if index == m.selectedTrash {
 				cursor = ">"
 			}
-			fmt.Fprintf(&b, "%s %s — %s\n",
-				cursor, record.Login.Name, record.Login.Username)
+			if record.SecureNote != nil {
+				fmt.Fprintf(
+					&b, "%s [Secure Note] %s\n",
+					cursor, record.SecureNote.Title,
+				)
+			} else {
+				fmt.Fprintf(
+					&b, "%s [Login] %s — %s\n",
+					cursor, record.Login.Name, record.Login.Username,
+				)
+			}
 		}
 	}
 	if m.purgeConfirm && m.selectedTrash < len(m.trash) {
 		b.WriteString(
 			"\nWarning: encrypted content cannot be recovered.\n" +
 				"Press [x] again to permanently delete " +
-				m.trash[m.selectedTrash].Login.Name + ".\n",
+				recordTitle(m.trash[m.selectedTrash]) + ".\n",
 		)
 	}
 	b.WriteString(
@@ -1073,6 +1307,19 @@ func (m model) loginView() string {
 	record := m.logins[m.selectedLogin]
 	if len(record.ConflictVersions) > 1 {
 		return m.conflictView(record.ConflictVersions)
+	}
+	if record.SecureNote != nil {
+		var b strings.Builder
+		fmt.Fprintf(
+			&b,
+			"TermKeep — Secure Note — %s\n\n",
+			record.SecureNote.Title,
+		)
+		fmt.Fprintf(&b, "Content:\n%s\n", record.SecureNote.Content)
+		b.WriteString(
+			"\n[e] edit  [d] delete  [v] vault  [q] quit\n",
+		)
+		return b.String()
 	}
 	login := record.Login
 	var b strings.Builder
@@ -1099,6 +1346,20 @@ func (m model) loginView() string {
 	return b.String()
 }
 
+func recordTitle(record loginRecord) string {
+	if record.SecureNote != nil {
+		return record.SecureNote.Title
+	}
+	return record.Login.Name
+}
+
+func recordItemID(record loginRecord) string {
+	if record.SecureNote != nil {
+		return record.SecureNote.ItemID
+	}
+	return record.Login.ItemID
+}
+
 func (m model) conflictView(versions []loginRecord) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "TermKeep — Conflict — %d versions\n\n", len(versions))
@@ -1110,6 +1371,15 @@ func (m model) conflictView(versions []loginRecord) string {
 		fmt.Fprintf(&b, "%s Version %d\n", cursor, index+1)
 		if version.Purged {
 			b.WriteString("  Permanently deleted\n\n")
+			continue
+		}
+		if version.SecureNote != nil {
+			fmt.Fprintf(
+				&b, "  Title: %s\n", version.SecureNote.Title)
+			fmt.Fprintf(
+				&b, "  Content: %s\n\n",
+				version.SecureNote.Content,
+			)
 			continue
 		}
 		fmt.Fprintf(&b, "  Name: %s\n", version.Login.Name)
