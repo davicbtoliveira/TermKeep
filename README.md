@@ -107,6 +107,22 @@ item UUID, schema version, revision number, immutable revision UUID, and
 parent revision UUIDs. It cannot inspect or index Login names, usernames,
 passwords, URLs, notes, or custom fields.
 
+## Secure Notes
+
+Press `n` from an unlocked vault to create a Secure Note with a required title
+and sensitive content. The vault list shows `[Secure Note]` and its title but
+never its content. Open the selected Note with `enter`; use `e` to edit it or
+`d` to move it to encrypted Trash.
+
+Secure Notes use the same encrypted cache, immutable revision graph, mutation
+queue, synchronization, Trash, and explicit Conflict workflow as Logins. They
+remain createable and editable offline. Concurrent versions can be selected
+or manually merged without last-write-wins.
+
+Native Item type and payload version live inside authenticated ciphertext.
+The Server receives the same opaque envelope and generic Item metadata for
+Logins and Secure Notes; it cannot identify titles, content, or native type.
+
 ## Offline use and synchronization
 
 A successful registration or online login authorizes an encrypted local

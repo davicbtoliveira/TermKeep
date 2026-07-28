@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-07-21
+- Updated: 2026-07-28
 
 ## Context
 
@@ -10,6 +11,10 @@ The MVP needs useful credential management and imports without exposing searchab
 ## Decision
 
 The native item types are Login and Secure Note. Login items support name, username, password, multiple URLs, notes, custom fields, TOTP parameters, folder, favorite status, and the five most recent passwords with timestamps. Unsupported imported records are preserved as generic encrypted items instead of losing fields.
+
+Secure Notes contain a required title and sensitive free-form content. They use the same local encrypted cache, immutable revision graph, mutation queue, Trash, synchronization, and explicit Conflict resolution as Logins. Lists expose only decrypted titles in the unlocked Client; Note content appears only when the Item or a Conflict version is opened.
+
+Native type and payload version are authenticated fields inside the encrypted plaintext schema. The outer synchronization contract remains a generic opaque envelope with Item and revision identifiers. Consequently, the Server cannot distinguish a Login from a Secure Note or interpret either payload.
 
 Folders and favorites are supported; tags, cards, identities, passkeys, SSH-key models, attachments, and shared records are deferred.
 
@@ -26,6 +31,6 @@ Encrypted portable backup and guarded plaintext JSON/CSV export are supported. E
 ## Consequences
 
 - Search requires unlocked plaintext in client memory.
+- Native-type dispatch and schema-version compatibility remain Client responsibilities.
 - Import files and plaintext exports require prominent deletion/exposure warnings.
 - The server synchronizes opaque versioned records and does not understand their schema beyond envelope metadata.
-
