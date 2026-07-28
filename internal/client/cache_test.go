@@ -580,6 +580,94 @@ func TestStaleOfflineEditConflictsWithPurgedTombstone(t *testing.T) {
 	}
 }
 
+func TestPurgedTombstonePreservesSynchronizedLiveConflictHead(t *testing.T) {
+	password := []byte("TermKeep#2026")
+	accountID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	vault, err := NewVault(password, accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vault.Clear()
+	cfg := Config{DataDir: filepath.Join(t.TempDir(), "cache")}
+	if err := AuthorizeCache(
+		cfg,
+		"user@example.com",
+		accountID,
+		vault.PasswordEnvelope,
+	); err != nil {
+		t.Fatal(err)
+	}
+	cache, err := OpenCache(cfg, "user@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootID := "22222222-2222-4222-8222-222222222222"
+	deletedID := "33333333-3333-4333-8333-333333333333"
+	liveID := "44444444-4444-4444-8444-444444444444"
+	itemID := "11111111-1111-4111-8111-111111111111"
+	if err := cache.ApplySync(
+		"3",
+		nil,
+		[]EncryptedItem{
+			{
+				ItemID:        itemID,
+				SchemaVersion: 1,
+				Revision:      1,
+				RevisionID:    rootID,
+				Envelope:      []byte("encrypted-root"),
+			},
+			{
+				ItemID:            itemID,
+				SchemaVersion:     1,
+				Revision:          2,
+				RevisionID:        deletedID,
+				ParentRevisionIDs: []string{rootID},
+				Deleted:           true,
+				Envelope:          []byte("encrypted-trash"),
+			},
+			{
+				ItemID:            itemID,
+				SchemaVersion:     1,
+				Revision:          2,
+				RevisionID:        liveID,
+				ParentRevisionIDs: []string{rootID},
+				Envelope:          []byte("encrypted-live"),
+			},
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	tombstone := EncryptedItem{
+		ItemID:            itemID,
+		SchemaVersion:     1,
+		Revision:          3,
+		RevisionID:        "55555555-5555-4555-8555-555555555555",
+		ParentRevisionIDs: []string{deletedID},
+		Deleted:           true,
+		Purged:            true,
+	}
+	if err := cache.ApplySync(
+		"4", nil, []EncryptedItem{tombstone},
+	); err != nil {
+		t.Fatal(err)
+	}
+	active, err := cache.ItemHeads()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != 1 || len(active[0].Revisions) != 2 {
+		t.Fatalf("purged/live Conflict: %+v", active)
+	}
+	got := map[string]EncryptedItem{}
+	for _, head := range active[0].Revisions {
+		got[head.RevisionID] = head
+	}
+	if string(got[liveID].Envelope) != "encrypted-live" ||
+		!got[tombstone.RevisionID].Purged {
+		t.Fatalf("purged/live heads: %+v", got)
+	}
+}
+
 func TestCacheEditDescendsFromItsOnlyHead(t *testing.T) {
 	password := []byte("TermKeep#2026")
 	accountID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"

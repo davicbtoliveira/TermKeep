@@ -365,6 +365,12 @@ func (c *Cache) ApplySync(
 				preserved := map[string]EncryptedItem{
 					change.RevisionID: cloneEncryptedItem(change),
 				}
+				for _, head := range revisionHeads(revisions) {
+					if !head.Deleted {
+						preserved[head.RevisionID] =
+							cloneEncryptedItem(head)
+					}
+				}
 				for _, mutation := range data.Mutations {
 					if mutation.Item.ItemID == change.ItemID {
 						preserved[mutation.Item.RevisionID] =
