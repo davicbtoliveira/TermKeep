@@ -19,6 +19,7 @@ type syncRequest struct {
 
 type syncResponse struct {
 	Cursor             string          `json:"cursor"`
+	FullSnapshot       bool            `json:"full_snapshot"`
 	AppliedMutationIDs []string        `json:"applied_mutation_ids"`
 	Changes            []EncryptedItem `json:"changes"`
 }
@@ -87,9 +88,12 @@ func SyncCache(
 	if err := decoder.Decode(&body); err != nil {
 		return fmt.Errorf("decode synchronization response: %w", err)
 	}
-	if err := cache.ApplySync(
-		body.Cursor, body.AppliedMutationIDs, body.Changes,
-	); err != nil {
+	if err := cache.ApplySyncResult(SyncResult{
+		Cursor:             body.Cursor,
+		FullSnapshot:       body.FullSnapshot,
+		AppliedMutationIDs: body.AppliedMutationIDs,
+		Changes:            body.Changes,
+	}); err != nil {
 		return fmt.Errorf("apply synchronization response: %w", err)
 	}
 	return nil

@@ -46,6 +46,13 @@ type SyncSnapshot struct {
 	Mutations []Mutation
 }
 
+type SyncResult struct {
+	Cursor             string
+	FullSnapshot       bool
+	AppliedMutationIDs []string
+	Changes            []EncryptedItem
+}
+
 type ItemHead struct {
 	ItemID    string
 	Revisions []EncryptedItem
@@ -315,17 +322,26 @@ func (c *Cache) ApplySync(
 	appliedMutationIDs []string,
 	changes []EncryptedItem,
 ) error {
-	if _, err := strconv.ParseUint(cursor, 10, 63); err != nil {
+	return c.ApplySyncResult(SyncResult{
+		Cursor:             cursor,
+		AppliedMutationIDs: appliedMutationIDs,
+		Changes:            changes,
+	})
+}
+
+func (c *Cache) ApplySyncResult(result SyncResult) error {
+	if _, err := strconv.ParseUint(result.Cursor, 10, 63); err != nil {
 		return errors.New("invalid synchronization cursor")
 	}
-	applied := make(map[string]bool, len(appliedMutationIDs))
-	for _, mutationID := range appliedMutationIDs {
+	applied := make(
+		map[string]bool, len(result.AppliedMutationIDs))
+	for _, mutationID := range result.AppliedMutationIDs {
 		if mutationID == "" {
 			return errors.New("invalid applied mutation ID")
 		}
 		applied[mutationID] = true
 	}
-	for _, change := range changes {
+	for _, change := range result.Changes {
 		if change.ItemID == "" || change.SchemaVersion < 1 ||
 			change.Revision < 1 || change.RevisionID == "" ||
 			!validEncryptedItemContent(change) {
@@ -351,7 +367,14 @@ func (c *Cache) ApplySync(
 			}
 		}
 		data.Mutations = pending
-		for _, change := range changes {
+		if result.FullSnapshot {
+			data.Revisions = make(
+				map[string]map[string]EncryptedItem)
+			for _, mutation := range data.Mutations {
+				addCachedRevision(&data, mutation.Item)
+			}
+		}
+		for _, change := range result.Changes {
 			revisions := data.Revisions[change.ItemID]
 			if revisions == nil {
 				revisions = make(map[string]EncryptedItem)
@@ -382,7 +405,7 @@ func (c *Cache) ApplySync(
 				revisions[change.RevisionID] = cloneEncryptedItem(change)
 			}
 		}
-		data.Cursor = cursor
+		data.Cursor = result.Cursor
 		return writeCacheFile(c.path, data)
 	})
 }

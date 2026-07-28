@@ -185,6 +185,63 @@ func TestSyncResultAtomicallyAdvancesCache(t *testing.T) {
 	}
 }
 
+func TestFullSnapshotReplacesMissingCachedItems(t *testing.T) {
+	password := []byte("TermKeep#2026")
+	accountID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	vault, err := NewVault(password, accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vault.Clear()
+	cfg := Config{DataDir: filepath.Join(t.TempDir(), "cache")}
+	if err := AuthorizeCache(
+		cfg,
+		"user@example.com",
+		accountID,
+		vault.PasswordEnvelope,
+	); err != nil {
+		t.Fatal(err)
+	}
+	cache, err := OpenCache(cfg, "user@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := EncryptedItem{
+		ItemID:        "11111111-1111-4111-8111-111111111111",
+		SchemaVersion: 1,
+		Revision:      1,
+		RevisionID:    "22222222-2222-4222-8222-222222222222",
+		Envelope:      []byte("stale-encrypted"),
+	}
+	if err := cache.ApplySync(
+		"1", nil, []EncryptedItem{stale},
+	); err != nil {
+		t.Fatal(err)
+	}
+	current := EncryptedItem{
+		ItemID:        "33333333-3333-4333-8333-333333333333",
+		SchemaVersion: 1,
+		Revision:      1,
+		RevisionID:    "44444444-4444-4444-8444-444444444444",
+		Envelope:      []byte("current-encrypted"),
+	}
+	if err := cache.ApplySyncResult(SyncResult{
+		Cursor:       "9",
+		FullSnapshot: true,
+		Changes:      []EncryptedItem{current},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	active, err := cache.ItemHeads()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != 1 ||
+		active[0].ItemID != current.ItemID {
+		t.Fatalf("full snapshot resurrected stale Item: %+v", active)
+	}
+}
+
 func TestCachePreservesAndResolvesConcurrentRevisionHeads(t *testing.T) {
 	password := []byte("TermKeep#2026")
 	accountID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
