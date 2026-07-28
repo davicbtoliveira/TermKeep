@@ -1120,6 +1120,7 @@ func (s *stack) testOfflineLoginSynchronization(t *testing.T) {
 		offlineName  = "Offline-Login-Sentinel"
 		offlineUser  = "offline-user-sentinel@example.com"
 		offlinePass  = "Offline-Password-Sentinel"
+		rotatedPass  = "Offline-Rotated-Password-Sentinel"
 		offlineNotes = "Offline-Notes-Sentinel"
 	)
 	command := fmt.Sprintf("%q --server %q --ca-cert %q login --email %q\n",
@@ -1208,7 +1209,107 @@ func (s *stack) testOfflineLoginSynchronization(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(snapshot.Mutations) != 1 {
-		t.Fatalf("offline mutation queue: want 1, got %+v", snapshot)
+		t.Fatalf("offline create queue: want 1, got %+v", snapshot)
+	}
+
+	groups, err := cache.ItemHeads()
+	if err != nil {
+		t.Fatal(err)
+	}
+	offlineIndex := -1
+	itemIndex := 0
+	for _, group := range groups {
+		groupIsFolder := false
+		for _, encrypted := range group.Revisions {
+			if encrypted.Purged {
+				continue
+			}
+			opened, err := session.OpenNativeItem(
+				context.Background(), sockets[0], encrypted)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if opened.Folder != nil {
+				groupIsFolder = true
+			}
+			if opened.Login != nil &&
+				opened.Login.Name == offlineName {
+				offlineIndex = itemIndex
+			}
+		}
+		if !groupIsFolder {
+			itemIndex++
+		}
+	}
+	if offlineIndex < 0 {
+		t.Fatal("offline cache missing created Login")
+	}
+	for range itemIndex + 1 {
+		write(t, shell.ptmx, "k")
+		time.Sleep(50 * time.Millisecond)
+	}
+	for range offlineIndex {
+		write(t, shell.ptmx, "j")
+		time.Sleep(50 * time.Millisecond)
+	}
+	shell.clear()
+	write(t, shell.ptmx, "\r")
+	shell.waitFor(10*time.Second, "Login — "+offlineName)
+	write(t, shell.ptmx, "e")
+	shell.waitFor(10*time.Second, "Edit Login")
+	write(t, shell.ptmx, "\r")
+	shell.waitFor(10*time.Second, "> Username:")
+	write(t, shell.ptmx, "\r")
+	shell.waitFor(10*time.Second, "> Password:")
+	write(t, shell.ptmx, "\x15")
+	write(t, shell.ptmx, rotatedPass+"\r")
+	shell.waitFor(10*time.Second, "> URLs (comma-separated):")
+	write(t, shell.ptmx, "\r")
+	shell.waitFor(10*time.Second, "> Notes:")
+	write(t, shell.ptmx, "\r")
+	shell.waitFor(
+		10*time.Second,
+		"> Custom fields (name=value, comma-separated):",
+	)
+	shell.clear()
+	write(t, shell.ptmx, "\r")
+	shell.waitFor(30*time.Second, "[Login] "+offlineName)
+
+	snapshot, err = cache.SyncSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Mutations) != 2 {
+		t.Fatalf("offline history queue: want 2, got %+v", snapshot)
+	}
+	groups, err = cache.ItemHeads()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rotated *client.LoginItem
+	for _, group := range groups {
+		for _, encrypted := range group.Revisions {
+			if encrypted.Purged {
+				continue
+			}
+			opened, err := session.OpenNativeItem(
+				context.Background(), sockets[0], encrypted)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if opened.Login != nil &&
+				opened.Login.Name == offlineName {
+				login := *opened.Login
+				rotated = &login
+			}
+		}
+	}
+	if rotated == nil ||
+		rotated.Password != rotatedPass ||
+		len(rotated.PasswordHistory) != 1 ||
+		rotated.PasswordHistory[0].Password != offlinePass ||
+		rotated.PasswordHistory[0].ChangedAt.IsZero() {
+		t.Fatalf("offline password history differs: %+v", rotated)
 	}
 
 	if out, err := s.composeCmd(
@@ -1247,6 +1348,47 @@ func (s *stack) testOfflineLoginSynchronization(t *testing.T) {
 	}
 	if len(items) != 2 {
 		t.Fatalf("reconnected Server items: want 2, got %d", len(items))
+	}
+	apiBody, err := json.Marshal(items)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbBody := []byte(s.queryDatabaseScalar(t, `
+		SELECT COALESCE(
+			string_agg(row_to_json(vault_revision)::text, E'\n'),
+			''
+		)
+		FROM vault_revisions AS vault_revision`))
+	auditBody := []byte(s.queryDatabaseScalar(t, `
+		SELECT COALESCE(
+			string_agg(row_to_json(event)::text, E'\n'),
+			''
+		)
+		FROM audit_events AS event`))
+	logBody, err := s.composeCmd(
+		context.Background(), "logs", "server").CombinedOutput()
+	if err != nil {
+		t.Fatalf("read server logs: %v\n%s", err, logBody)
+	}
+	for surface, body := range map[string][]byte{
+		"API":        apiBody,
+		"PostgreSQL": dbBody,
+		"audit":      auditBody,
+		"logs":       logBody,
+	} {
+		for _, forbidden := range []string{
+			offlinePass,
+			rotatedPass,
+			"password_history",
+		} {
+			if bytes.Contains(body, []byte(forbidden)) {
+				t.Fatalf(
+					"%s contains password history field %q",
+					surface,
+					forbidden,
+				)
+			}
+		}
 	}
 	write(t, shell.ptmx, "q")
 	shell.waitFor(10*time.Second, terminalShellPrompt)
