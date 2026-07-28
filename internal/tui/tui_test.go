@@ -235,7 +235,7 @@ func TestActivityLoadsNextPageFromCursor(t *testing.T) {
 
 func TestUnlockedVaultListsLoginsWithoutPasswords(t *testing.T) {
 	initial := model{loaded: true, vaultOpen: true}
-	updated, _ := initial.Update(loginsMsg{{
+	updated, _ := initial.Update(itemsMsg{{
 		Login: client.LoginItem{
 			ItemID:   "11111111-1111-4111-8111-111111111111",
 			Name:     "Production database",
@@ -261,7 +261,7 @@ func TestUnlockedVaultListsLoginsWithoutPasswords(t *testing.T) {
 }
 
 func TestUnlockedVaultListsAndOpensSecureNotes(t *testing.T) {
-	record := loginRecord{
+	record := itemRecord{
 		SecureNote: &client.SecureNoteItem{
 			ItemID:  "11111111-1111-4111-8111-111111111111",
 			Title:   "Production recovery procedure",
@@ -270,10 +270,10 @@ func TestUnlockedVaultListsAndOpensSecureNotes(t *testing.T) {
 		Revision: 1,
 	}
 	initial := model{
-		loaded:     true,
-		vaultOpen:  true,
-		loginStore: &fakeLoginStore{},
-		logins:     []loginRecord{record},
+		loaded:    true,
+		vaultOpen: true,
+		itemStore: &fakeItemStore{},
+		items:     []itemRecord{record},
 	}
 	list := initial.View()
 	if !strings.Contains(
@@ -301,9 +301,9 @@ func TestUnlockedVaultListsAndOpensSecureNotes(t *testing.T) {
 
 func TestOfflineVaultAdvertisesLoginEditing(t *testing.T) {
 	view := model{
-		loaded:     true,
-		vaultOpen:  true,
-		loginStore: &fakeLoginStore{},
+		loaded:    true,
+		vaultOpen: true,
+		itemStore: &fakeItemStore{},
 	}.View()
 	if !strings.Contains(view, "[c] new Login") {
 		t.Fatalf("offline Vault hides Login editing:\n%s", view)
@@ -352,8 +352,8 @@ func TestCachedLoginStoreSavesAndListsOffline(t *testing.T) {
 		}
 	})
 
-	store := cachedLoginStore{cache: cache, socketPath: socketPath}
-	want := loginRecord{
+	store := cachedItemStore{cache: cache, socketPath: socketPath}
+	want := itemRecord{
 		Login: client.LoginItem{
 			ItemID:   "11111111-1111-4111-8111-111111111111",
 			Name:     "Offline account",
@@ -365,7 +365,7 @@ func TestCachedLoginStoreSavesAndListsOffline(t *testing.T) {
 	if err := store.Save(ctx, want); err != nil {
 		t.Fatal(err)
 	}
-	wantNote := loginRecord{
+	wantNote := itemRecord{
 		SecureNote: &client.SecureNoteItem{
 			ItemID:  "22222222-2222-4222-8222-222222222222",
 			Title:   "Offline recovery procedure",
@@ -400,7 +400,7 @@ func TestLoginDetailShowsFieldsWithMaskedPassword(t *testing.T) {
 	initial := model{
 		loaded:    true,
 		vaultOpen: true,
-		logins: []loginRecord{{
+		items: []itemRecord{{
 			Login: client.LoginItem{
 				ItemID:   "11111111-1111-4111-8111-111111111111",
 				Name:     "Production database",
@@ -442,7 +442,7 @@ func TestLoginPasswordRevealsOnlyAfterExplicitKey(t *testing.T) {
 	initial := model{
 		loaded:    true,
 		vaultOpen: true,
-		logins: []loginRecord{{
+		items: []itemRecord{{
 			Login: client.LoginItem{
 				ItemID:   "11111111-1111-4111-8111-111111111111",
 				Name:     "Production database",
@@ -461,7 +461,7 @@ func TestLoginPasswordRevealsOnlyAfterExplicitKey(t *testing.T) {
 }
 
 func TestVaultRefreshLoadsDecryptedLogins(t *testing.T) {
-	store := &fakeLoginStore{records: []loginRecord{{
+	store := &fakeItemStore{records: []itemRecord{{
 		Login: client.LoginItem{
 			ItemID:   "11111111-1111-4111-8111-111111111111",
 			Name:     "Mail account",
@@ -470,9 +470,9 @@ func TestVaultRefreshLoadsDecryptedLogins(t *testing.T) {
 		Revision: 1,
 	}}}
 	initial := model{
-		loaded:     true,
-		vaultOpen:  true,
-		loginStore: store,
+		loaded:    true,
+		vaultOpen: true,
+		itemStore: store,
 	}
 	updated, command := initial.Update(
 		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
@@ -487,8 +487,8 @@ func TestVaultRefreshLoadsDecryptedLogins(t *testing.T) {
 }
 
 func TestManualSyncReloadsVault(t *testing.T) {
-	store := &fakeSyncLoginStore{fakeLoginStore: fakeLoginStore{
-		records: []loginRecord{{
+	store := &fakeSyncItemStore{fakeItemStore: fakeItemStore{
+		records: []itemRecord{{
 			Login: client.LoginItem{
 				ItemID: "11111111-1111-4111-8111-111111111111",
 				Name:   "Synchronized account",
@@ -500,7 +500,7 @@ func TestManualSyncReloadsVault(t *testing.T) {
 		loaded:      true,
 		vaultOpen:   true,
 		accessToken: "access-token",
-		loginStore:  store,
+		itemStore:   store,
 	}
 	updated, command := initial.Update(
 		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
@@ -522,7 +522,7 @@ func TestUnlockedVaultSynchronizesOnInit(t *testing.T) {
 	previous := periodicSyncInterval
 	periodicSyncInterval = time.Millisecond
 	t.Cleanup(func() { periodicSyncInterval = previous })
-	store := &fakeSyncLoginStore{}
+	store := &fakeSyncItemStore{}
 	command := model{
 		cfg: client.Config{
 			ServerURL: "http://127.0.0.1:1",
@@ -530,7 +530,7 @@ func TestUnlockedVaultSynchronizesOnInit(t *testing.T) {
 		},
 		vaultOpen:   true,
 		accessToken: "access-token",
-		loginStore:  store,
+		itemStore:   store,
 	}.Init()
 	if command == nil {
 		t.Fatal("unlocked Vault returned no init command")
@@ -553,12 +553,12 @@ func TestPeriodicSyncWhileVaultIsOpen(t *testing.T) {
 	previous := periodicSyncInterval
 	periodicSyncInterval = time.Millisecond
 	t.Cleanup(func() { periodicSyncInterval = previous })
-	store := &fakeSyncLoginStore{}
+	store := &fakeSyncItemStore{}
 	initial := model{
 		loaded:      true,
 		vaultOpen:   true,
 		accessToken: "access-token",
-		loginStore:  store,
+		itemStore:   store,
 	}
 	_, command := initial.Update(periodicSyncMsg{})
 	if command == nil {
@@ -579,11 +579,11 @@ func TestPeriodicSyncWhileVaultIsOpen(t *testing.T) {
 }
 
 func TestCreateLoginCapturesAllNativeFields(t *testing.T) {
-	store := &fakeLoginStore{}
+	store := &fakeItemStore{}
 	var current tea.Model = model{
-		loaded:     true,
-		vaultOpen:  true,
-		loginStore: store,
+		loaded:    true,
+		vaultOpen: true,
+		itemStore: store,
 	}
 	current, _ = current.Update(
 		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
@@ -631,11 +631,11 @@ func TestCreateLoginCapturesAllNativeFields(t *testing.T) {
 }
 
 func TestCreateSecureNoteCapturesTitleAndContent(t *testing.T) {
-	store := &fakeLoginStore{}
+	store := &fakeItemStore{}
 	var current tea.Model = model{
-		loaded:     true,
-		vaultOpen:  true,
-		loginStore: store,
+		loaded:    true,
+		vaultOpen: true,
+		itemStore: store,
 	}
 	current, _ = current.Update(
 		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
@@ -671,7 +671,7 @@ func TestCreateSecureNoteCapturesTitleAndContent(t *testing.T) {
 
 func TestEditSecureNotePreservesItemAndIncrementsRevision(t *testing.T) {
 	revisionID := "22222222-2222-4222-8222-222222222222"
-	record := loginRecord{
+	record := itemRecord{
 		SecureNote: &client.SecureNoteItem{
 			ItemID:  "11111111-1111-4111-8111-111111111111",
 			Title:   "Old procedure",
@@ -680,12 +680,12 @@ func TestEditSecureNotePreservesItemAndIncrementsRevision(t *testing.T) {
 		Revision:   1,
 		RevisionID: revisionID,
 	}
-	store := &fakeLoginStore{records: []loginRecord{record}}
+	store := &fakeItemStore{records: []itemRecord{record}}
 	var current tea.Model = model{
-		loaded:     true,
-		vaultOpen:  true,
-		loginStore: store,
-		logins:     store.records,
+		loaded:    true,
+		vaultOpen: true,
+		itemStore: store,
+		items:     store.records,
 	}
 	current, _ = current.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	current, _ = current.Update(
@@ -725,7 +725,7 @@ func TestEditSecureNotePreservesItemAndIncrementsRevision(t *testing.T) {
 }
 
 func TestEditLoginPreservesFieldsAndIncrementsRevision(t *testing.T) {
-	store := &fakeLoginStore{records: []loginRecord{{
+	store := &fakeItemStore{records: []itemRecord{{
 		Login: client.LoginItem{
 			ItemID:   "11111111-1111-4111-8111-111111111111",
 			Name:     "Old name",
@@ -740,10 +740,10 @@ func TestEditLoginPreservesFieldsAndIncrementsRevision(t *testing.T) {
 		Revision: 1,
 	}}}
 	var current tea.Model = model{
-		loaded:     true,
-		vaultOpen:  true,
-		loginStore: store,
-		logins:     store.records,
+		loaded:    true,
+		vaultOpen: true,
+		itemStore: store,
+		items:     store.records,
 	}
 	current, _ = current.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	current, _ = current.Update(
@@ -785,7 +785,7 @@ func TestEditLoginPreservesFieldsAndIncrementsRevision(t *testing.T) {
 
 func TestDeleteLoginMovesItToTrash(t *testing.T) {
 	rootID := "22222222-2222-4222-8222-222222222222"
-	record := loginRecord{
+	record := itemRecord{
 		Login: client.LoginItem{
 			ItemID:   "11111111-1111-4111-8111-111111111111",
 			Name:     "Obsolete account",
@@ -795,13 +795,13 @@ func TestDeleteLoginMovesItToTrash(t *testing.T) {
 		Revision:   1,
 		RevisionID: rootID,
 	}
-	store := &fakeLoginStore{records: []loginRecord{record}}
+	store := &fakeItemStore{records: []itemRecord{record}}
 	initial := model{
-		loaded:     true,
-		vaultOpen:  true,
-		loginStore: store,
-		logins:     store.records,
-		showLogin:  true,
+		loaded:    true,
+		vaultOpen: true,
+		itemStore: store,
+		items:     store.records,
+		showItem:  true,
 	}
 	updated, command := initial.Update(
 		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
@@ -826,7 +826,7 @@ func TestDeleteLoginMovesItToTrash(t *testing.T) {
 
 func TestTrashScreenRestoresDeletedLogin(t *testing.T) {
 	deletedID := "33333333-3333-4333-8333-333333333333"
-	record := loginRecord{
+	record := itemRecord{
 		Login: client.LoginItem{
 			ItemID:   "11111111-1111-4111-8111-111111111111",
 			Name:     "Recoverable account",
@@ -837,11 +837,11 @@ func TestTrashScreenRestoresDeletedLogin(t *testing.T) {
 		RevisionID: deletedID,
 		Deleted:    true,
 	}
-	store := &fakeLoginStore{records: []loginRecord{record}}
+	store := &fakeItemStore{records: []itemRecord{record}}
 	var current tea.Model = model{
-		loaded:     true,
-		vaultOpen:  true,
-		loginStore: store,
+		loaded:    true,
+		vaultOpen: true,
+		itemStore: store,
 	}
 	current, command := current.Update(
 		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
@@ -887,7 +887,7 @@ func TestTrashScreenRestoresDeletedLogin(t *testing.T) {
 }
 
 func TestTrashScreenListsSecureNoteWithoutContent(t *testing.T) {
-	record := loginRecord{
+	record := itemRecord{
 		SecureNote: &client.SecureNoteItem{
 			ItemID:  "11111111-1111-4111-8111-111111111111",
 			Title:   "Recoverable procedure",
@@ -897,11 +897,11 @@ func TestTrashScreenListsSecureNoteWithoutContent(t *testing.T) {
 		RevisionID: "33333333-3333-4333-8333-333333333333",
 		Deleted:    true,
 	}
-	store := &fakeLoginStore{records: []loginRecord{record}}
+	store := &fakeItemStore{records: []itemRecord{record}}
 	var current tea.Model = model{
-		loaded:     true,
-		vaultOpen:  true,
-		loginStore: store,
+		loaded:    true,
+		vaultOpen: true,
+		itemStore: store,
 	}
 	current, command := current.Update(
 		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
@@ -920,7 +920,7 @@ func TestTrashScreenListsSecureNoteWithoutContent(t *testing.T) {
 
 func TestTrashPermanentDeletionRequiresConfirmation(t *testing.T) {
 	deletedID := "33333333-3333-4333-8333-333333333333"
-	record := loginRecord{
+	record := itemRecord{
 		Login: client.LoginItem{
 			ItemID:   "11111111-1111-4111-8111-111111111111",
 			Name:     "Destroy account",
@@ -931,11 +931,11 @@ func TestTrashPermanentDeletionRequiresConfirmation(t *testing.T) {
 		RevisionID: deletedID,
 		Deleted:    true,
 	}
-	store := &fakeLoginStore{records: []loginRecord{record}}
+	store := &fakeItemStore{records: []itemRecord{record}}
 	var current tea.Model = model{
-		loaded:     true,
-		vaultOpen:  true,
-		loginStore: store,
+		loaded:    true,
+		vaultOpen: true,
+		itemStore: store,
 	}
 	current, command := current.Update(
 		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
@@ -981,7 +981,7 @@ func TestTrashPermanentDeletionRequiresConfirmation(t *testing.T) {
 func TestConflictScreenPreservesVersionsAndSelectsOne(t *testing.T) {
 	firstID := "22222222-2222-4222-8222-222222222222"
 	secondID := "33333333-3333-4333-8333-333333333333"
-	first := loginRecord{
+	first := itemRecord{
 		Login: client.LoginItem{
 			ItemID:   "11111111-1111-4111-8111-111111111111",
 			Name:     "Work account",
@@ -992,7 +992,7 @@ func TestConflictScreenPreservesVersionsAndSelectsOne(t *testing.T) {
 		Revision:   2,
 		RevisionID: firstID,
 	}
-	second := loginRecord{
+	second := itemRecord{
 		Login: client.LoginItem{
 			ItemID:   first.Login.ItemID,
 			Name:     "Personal account",
@@ -1004,15 +1004,15 @@ func TestConflictScreenPreservesVersionsAndSelectsOne(t *testing.T) {
 		RevisionID: secondID,
 	}
 	conflict := first
-	conflict.ConflictVersions = []loginRecord{first, second}
-	store := &fakeLoginStore{records: []loginRecord{conflict}}
+	conflict.ConflictVersions = []itemRecord{first, second}
+	store := &fakeItemStore{records: []itemRecord{conflict}}
 	initial := model{
-		loaded:        true,
-		vaultOpen:     true,
-		loginStore:    store,
-		logins:        store.records,
-		showLogin:     true,
-		selectedLogin: 0,
+		loaded:       true,
+		vaultOpen:    true,
+		itemStore:    store,
+		items:        store.records,
+		showItem:     true,
+		selectedItem: 0,
 	}
 	view := initial.View()
 	for _, want := range []string{
@@ -1055,7 +1055,7 @@ func TestConflictScreenPreservesVersionsAndSelectsOne(t *testing.T) {
 func TestSecureNoteConflictPreservesVersionsAndSelectsOne(t *testing.T) {
 	firstID := "22222222-2222-4222-8222-222222222222"
 	secondID := "33333333-3333-4333-8333-333333333333"
-	first := loginRecord{
+	first := itemRecord{
 		SecureNote: &client.SecureNoteItem{
 			ItemID:  "11111111-1111-4111-8111-111111111111",
 			Title:   "First procedure",
@@ -1064,7 +1064,7 @@ func TestSecureNoteConflictPreservesVersionsAndSelectsOne(t *testing.T) {
 		Revision:   2,
 		RevisionID: firstID,
 	}
-	second := loginRecord{
+	second := itemRecord{
 		SecureNote: &client.SecureNoteItem{
 			ItemID:  first.SecureNote.ItemID,
 			Title:   "Second procedure",
@@ -1074,15 +1074,15 @@ func TestSecureNoteConflictPreservesVersionsAndSelectsOne(t *testing.T) {
 		RevisionID: secondID,
 	}
 	conflict := first
-	conflict.ConflictVersions = []loginRecord{first, second}
-	store := &fakeLoginStore{records: []loginRecord{conflict}}
+	conflict.ConflictVersions = []itemRecord{first, second}
+	store := &fakeItemStore{records: []itemRecord{conflict}}
 	initial := model{
-		loaded:        true,
-		vaultOpen:     true,
-		loginStore:    store,
-		logins:        store.records,
-		showLogin:     true,
-		selectedLogin: 0,
+		loaded:       true,
+		vaultOpen:    true,
+		itemStore:    store,
+		items:        store.records,
+		showItem:     true,
+		selectedItem: 0,
 	}
 	view := initial.View()
 	for _, want := range []string{
@@ -1120,7 +1120,7 @@ func TestSecureNoteConflictPreservesVersionsAndSelectsOne(t *testing.T) {
 func TestSecureNoteConflictSavesManualMerge(t *testing.T) {
 	firstID := "22222222-2222-4222-8222-222222222222"
 	secondID := "33333333-3333-4333-8333-333333333333"
-	first := loginRecord{
+	first := itemRecord{
 		SecureNote: &client.SecureNoteItem{
 			ItemID:  "11111111-1111-4111-8111-111111111111",
 			Title:   "First title",
@@ -1129,7 +1129,7 @@ func TestSecureNoteConflictSavesManualMerge(t *testing.T) {
 		Revision:   2,
 		RevisionID: firstID,
 	}
-	second := loginRecord{
+	second := itemRecord{
 		SecureNote: &client.SecureNoteItem{
 			ItemID:  first.SecureNote.ItemID,
 			Title:   "Second title",
@@ -1139,14 +1139,14 @@ func TestSecureNoteConflictSavesManualMerge(t *testing.T) {
 		RevisionID: secondID,
 	}
 	conflict := first
-	conflict.ConflictVersions = []loginRecord{first, second}
-	store := &fakeLoginStore{records: []loginRecord{conflict}}
+	conflict.ConflictVersions = []itemRecord{first, second}
+	store := &fakeItemStore{records: []itemRecord{conflict}}
 	var current tea.Model = model{
-		loaded:     true,
-		vaultOpen:  true,
-		loginStore: store,
-		logins:     store.records,
-		showLogin:  true,
+		loaded:    true,
+		vaultOpen: true,
+		itemStore: store,
+		items:     store.records,
+		showItem:  true,
 	}
 	current, _ = current.Update(
 		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
@@ -1190,7 +1190,7 @@ func TestSecureNoteConflictSavesManualMerge(t *testing.T) {
 func TestConflictScreenSavesManualMerge(t *testing.T) {
 	firstID := "22222222-2222-4222-8222-222222222222"
 	secondID := "33333333-3333-4333-8333-333333333333"
-	first := loginRecord{
+	first := itemRecord{
 		Login: client.LoginItem{
 			ItemID:   "11111111-1111-4111-8111-111111111111",
 			Name:     "First name",
@@ -1201,7 +1201,7 @@ func TestConflictScreenSavesManualMerge(t *testing.T) {
 		Revision:   2,
 		RevisionID: firstID,
 	}
-	second := loginRecord{
+	second := itemRecord{
 		Login: client.LoginItem{
 			ItemID:   first.Login.ItemID,
 			Name:     "Second name",
@@ -1213,14 +1213,14 @@ func TestConflictScreenSavesManualMerge(t *testing.T) {
 		RevisionID: secondID,
 	}
 	conflict := first
-	conflict.ConflictVersions = []loginRecord{first, second}
-	store := &fakeLoginStore{records: []loginRecord{conflict}}
+	conflict.ConflictVersions = []itemRecord{first, second}
+	store := &fakeItemStore{records: []itemRecord{conflict}}
 	var current tea.Model = model{
-		loaded:     true,
-		vaultOpen:  true,
-		loginStore: store,
-		logins:     store.records,
-		showLogin:  true,
+		loaded:    true,
+		vaultOpen: true,
+		itemStore: store,
+		items:     store.records,
+		showItem:  true,
 	}
 	current, _ = current.Update(
 		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
@@ -1260,7 +1260,7 @@ func TestConflictScreenSavesManualMerge(t *testing.T) {
 func TestConflictScreenCanKeepPurgedTombstone(t *testing.T) {
 	liveID := "33333333-3333-4333-8333-333333333333"
 	tombstoneID := "44444444-4444-4444-8444-444444444444"
-	live := loginRecord{
+	live := itemRecord{
 		Login: client.LoginItem{
 			ItemID:   "11111111-1111-4111-8111-111111111111",
 			Name:     "Offline edit",
@@ -1270,7 +1270,7 @@ func TestConflictScreenCanKeepPurgedTombstone(t *testing.T) {
 		Revision:   2,
 		RevisionID: liveID,
 	}
-	tombstone := loginRecord{
+	tombstone := itemRecord{
 		Login: client.LoginItem{
 			ItemID: live.Login.ItemID,
 		},
@@ -1280,14 +1280,14 @@ func TestConflictScreenCanKeepPurgedTombstone(t *testing.T) {
 		Purged:     true,
 	}
 	conflict := live
-	conflict.ConflictVersions = []loginRecord{live, tombstone}
-	store := &fakeLoginStore{records: []loginRecord{conflict}}
+	conflict.ConflictVersions = []itemRecord{live, tombstone}
+	store := &fakeItemStore{records: []itemRecord{conflict}}
 	var current tea.Model = model{
-		loaded:     true,
-		vaultOpen:  true,
-		loginStore: store,
-		logins:     store.records,
-		showLogin:  true,
+		loaded:    true,
+		vaultOpen: true,
+		itemStore: store,
+		items:     store.records,
+		showItem:  true,
 	}
 	if !strings.Contains(
 		current.(model).View(), "Permanently deleted") {
@@ -1317,11 +1317,11 @@ func TestConflictScreenCanKeepPurgedTombstone(t *testing.T) {
 }
 
 func TestLoginFormIgnoresDuplicateSaveWhileSaving(t *testing.T) {
-	store := &fakeLoginStore{}
+	store := &fakeItemStore{}
 	initial := model{
 		loaded:        true,
 		vaultOpen:     true,
-		loginStore:    store,
+		itemStore:     store,
 		showLoginForm: true,
 		loginForm: loginForm{
 			itemID:   "11111111-1111-4111-8111-111111111111",
@@ -1343,12 +1343,12 @@ func TestLoginFormIgnoresDuplicateSaveWhileSaving(t *testing.T) {
 }
 
 func TestOnlineLoginSaveSynchronizesAfterLocalCommit(t *testing.T) {
-	store := &fakeSyncLoginStore{}
+	store := &fakeSyncItemStore{}
 	initial := model{
 		loaded:        true,
 		vaultOpen:     true,
 		accessToken:   "access-token",
-		loginStore:    store,
+		itemStore:     store,
 		showLoginForm: true,
 		loginForm: loginForm{
 			itemID:   "11111111-1111-4111-8111-111111111111",
@@ -1377,15 +1377,15 @@ func TestOnlineLoginSaveSynchronizesAfterLocalCommit(t *testing.T) {
 }
 
 func TestLoginSaveRemainsCommittedWhenSyncTimesOut(t *testing.T) {
-	previous := loginOperationTimeout
-	loginOperationTimeout = time.Millisecond
-	t.Cleanup(func() { loginOperationTimeout = previous })
-	store := &fakeSyncLoginStore{waitForContext: true}
+	previous := itemOperationTimeout
+	itemOperationTimeout = time.Millisecond
+	t.Cleanup(func() { itemOperationTimeout = previous })
+	store := &fakeSyncItemStore{waitForContext: true}
 	initial := model{
 		loaded:        true,
 		vaultOpen:     true,
 		accessToken:   "access-token",
-		loginStore:    store,
+		itemStore:     store,
 		showLoginForm: true,
 		loginForm: loginForm{
 			itemID:   "11111111-1111-4111-8111-111111111111",
@@ -1414,21 +1414,21 @@ func TestLoginSaveRemainsCommittedWhenSyncTimesOut(t *testing.T) {
 	}
 }
 
-type fakeLoginStore struct {
-	records []loginRecord
-	saved   []loginRecord
+type fakeItemStore struct {
+	records []itemRecord
+	saved   []itemRecord
 	err     error
 }
 
-type fakeSyncLoginStore struct {
-	fakeLoginStore
+type fakeSyncItemStore struct {
+	fakeItemStore
 	syncCalls      int
 	syncErr        error
 	pending        int
 	waitForContext bool
 }
 
-func (s *fakeSyncLoginStore) Sync(ctx context.Context) error {
+func (s *fakeSyncItemStore) Sync(ctx context.Context) error {
 	s.syncCalls++
 	if s.waitForContext {
 		<-ctx.Done()
@@ -1437,16 +1437,16 @@ func (s *fakeSyncLoginStore) Sync(ctx context.Context) error {
 	return s.syncErr
 }
 
-func (s *fakeSyncLoginStore) Pending() (int, error) {
+func (s *fakeSyncItemStore) Pending() (int, error) {
 	return s.pending, nil
 }
 
-func (s *fakeSyncLoginStore) CanSync() bool {
+func (s *fakeSyncItemStore) CanSync() bool {
 	return true
 }
 
-func (s *fakeLoginStore) List(context.Context) ([]loginRecord, error) {
-	var active []loginRecord
+func (s *fakeItemStore) List(context.Context) ([]itemRecord, error) {
+	var active []itemRecord
 	for _, record := range s.records {
 		if !record.Deleted {
 			active = append(active, record)
@@ -1455,8 +1455,8 @@ func (s *fakeLoginStore) List(context.Context) ([]loginRecord, error) {
 	return active, s.err
 }
 
-func (s *fakeLoginStore) Trash(context.Context) ([]loginRecord, error) {
-	var trash []loginRecord
+func (s *fakeItemStore) Trash(context.Context) ([]itemRecord, error) {
+	var trash []itemRecord
 	for _, record := range s.records {
 		if record.Deleted && !record.Purged {
 			trash = append(trash, record)
@@ -1465,7 +1465,7 @@ func (s *fakeLoginStore) Trash(context.Context) ([]loginRecord, error) {
 	return trash, s.err
 }
 
-func (s *fakeLoginStore) Save(_ context.Context, record loginRecord) error {
+func (s *fakeItemStore) Save(_ context.Context, record itemRecord) error {
 	if s.err != nil {
 		return s.err
 	}

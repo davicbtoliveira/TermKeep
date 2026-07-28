@@ -25,35 +25,35 @@ type sessionsErrMsg error
 type sessionRevokedMsg struct{}
 type activityMsg client.ActivityPage
 type activityErrMsg error
-type loginRecord struct {
+type itemRecord struct {
 	Login             client.LoginItem
 	SecureNote        *client.SecureNoteItem
 	Revision          uint64
 	RevisionID        string
 	ParentRevisionIDs []string
-	ConflictVersions  []loginRecord
+	ConflictVersions  []itemRecord
 	Deleted           bool
 	Purged            bool
 }
-type loginsMsg []loginRecord
-type loginsErrMsg error
-type trashMsg []loginRecord
+type itemsMsg []itemRecord
+type itemsErrMsg error
+type trashMsg []itemRecord
 type trashErrMsg error
-type loginSaveErrMsg error
-type loginSavedMsg struct {
-	logins  []loginRecord
+type itemSaveErrMsg error
+type itemSavedMsg struct {
+	items   []itemRecord
 	pending int
 	syncErr error
 }
 type syncResultMsg struct {
-	logins  []loginRecord
+	items   []itemRecord
 	pending int
 	err     error
 }
 type periodicSyncMsg struct{}
 
 var periodicSyncInterval = 30 * time.Second
-var loginOperationTimeout = 10 * time.Second
+var itemOperationTimeout = 10 * time.Second
 
 const loginFormFieldCount = 6
 const secureNoteFormFieldCount = 2
@@ -87,22 +87,22 @@ type secureNoteForm struct {
 	manualMerge       bool
 }
 
-type loginStore interface {
-	List(ctx context.Context) ([]loginRecord, error)
-	Save(ctx context.Context, record loginRecord) error
+type itemStore interface {
+	List(ctx context.Context) ([]itemRecord, error)
+	Save(ctx context.Context, record itemRecord) error
 }
 
-type syncLoginStore interface {
+type syncItemStore interface {
 	Sync(ctx context.Context) error
 	Pending() (int, error)
 	CanSync() bool
 }
 
-type trashLoginStore interface {
-	Trash(ctx context.Context) ([]loginRecord, error)
+type trashItemStore interface {
+	Trash(ctx context.Context) ([]itemRecord, error)
 }
 
-type cachedLoginStore struct {
+type cachedItemStore struct {
 	cfg         client.Config
 	accessToken string
 	socketPath  string
@@ -127,26 +127,26 @@ type model struct {
 	activityLoading  bool
 	activityPage     client.ActivityPage
 	activityErr      error
-	loginsLoading    bool
-	logins           []loginRecord
-	selectedLogin    int
+	itemsLoading     bool
+	items            []itemRecord
+	selectedItem     int
 	selectedConflict int
-	loginsErr        error
+	itemsErr         error
 	showTrash        bool
 	trashLoading     bool
-	trash            []loginRecord
+	trash            []itemRecord
 	selectedTrash    int
 	trashErr         error
 	purgeConfirm     bool
-	showLogin        bool
+	showItem         bool
 	revealPassword   bool
-	loginStore       loginStore
+	itemStore        itemStore
 	showLoginForm    bool
 	loginForm        loginForm
 	showNoteForm     bool
 	noteForm         secureNoteForm
-	loginFormErr     error
-	loginSaving      bool
+	itemFormErr      error
+	itemSaving       bool
 	syncLoading      bool
 	syncErr          error
 	pendingMutations int
@@ -175,13 +175,13 @@ func RunVault(cfg client.Config, accessToken, socketPath string) error {
 		if err != nil {
 			return err
 		}
-		m.loginStore = cachedLoginStore{
+		m.itemStore = cachedItemStore{
 			cfg:         cfg,
 			accessToken: accessToken,
 			socketPath:  socketPath,
 			cache:       cache,
 		}
-		m.loginsLoading = true
+		m.itemsLoading = true
 	}
 	p := tea.NewProgram(m)
 	_, err := p.Run()
@@ -189,16 +189,16 @@ func RunVault(cfg client.Config, accessToken, socketPath string) error {
 }
 
 func (m model) Init() tea.Cmd {
-	if m.loginStore != nil {
+	if m.itemStore != nil {
 		if m.accessToken != "" {
 			return tea.Batch(
 				checkStatus(m.cfg),
-				loadLogins(m.loginStore),
-				syncLogins(m.loginStore),
+				loadItems(m.itemStore),
+				syncItems(m.itemStore),
 				schedulePeriodicSync(),
 			)
 		}
-		return tea.Batch(checkStatus(m.cfg), loadLogins(m.loginStore))
+		return tea.Batch(checkStatus(m.cfg), loadItems(m.itemStore))
 	}
 	return checkStatus(m.cfg)
 }
@@ -250,27 +250,27 @@ func loadActivity(cfg client.Config, accessToken string, allAccounts bool, curso
 	}
 }
 
-func loadLogins(store loginStore) tea.Cmd {
+func loadItems(store itemStore) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(
-			context.Background(), loginOperationTimeout)
+			context.Background(), itemOperationTimeout)
 		defer cancel()
-		logins, err := store.List(ctx)
+		items, err := store.List(ctx)
 		if err != nil {
-			return loginsErrMsg(err)
+			return itemsErrMsg(err)
 		}
-		return loginsMsg(logins)
+		return itemsMsg(items)
 	}
 }
 
-func loadTrash(store loginStore) tea.Cmd {
+func loadTrash(store itemStore) tea.Cmd {
 	return func() tea.Msg {
-		trashStore, ok := store.(trashLoginStore)
+		trashStore, ok := store.(trashItemStore)
 		if !ok {
 			return trashErrMsg(errors.New("trash unavailable"))
 		}
 		ctx, cancel := context.WithTimeout(
-			context.Background(), loginOperationTimeout)
+			context.Background(), itemOperationTimeout)
 		defer cancel()
 		records, err := trashStore.Trash(ctx)
 		if err != nil {
@@ -280,23 +280,23 @@ func loadTrash(store loginStore) tea.Cmd {
 	}
 }
 
-func saveLogin(store loginStore, record loginRecord) tea.Cmd {
+func saveItem(store itemStore, record itemRecord) tea.Cmd {
 	return func() tea.Msg {
 		saveCtx, cancelSave := context.WithTimeout(
-			context.Background(), loginOperationTimeout)
+			context.Background(), itemOperationTimeout)
 		err := store.Save(saveCtx, record)
 		cancelSave()
 		if err != nil {
-			return loginSaveErrMsg(err)
+			return itemSaveErrMsg(err)
 		}
 		var (
 			syncErr error
 			pending int
 		)
-		if syncStore, ok := store.(syncLoginStore); ok {
+		if syncStore, ok := store.(syncItemStore); ok {
 			if syncStore.CanSync() {
 				syncCtx, cancelSync := context.WithTimeout(
-					context.Background(), loginOperationTimeout)
+					context.Background(), itemOperationTimeout)
 				syncErr = syncStore.Sync(syncCtx)
 				cancelSync()
 			}
@@ -305,67 +305,67 @@ func saveLogin(store loginStore, record loginRecord) tea.Cmd {
 			syncErr = errors.Join(syncErr, pendingErr)
 		}
 		listCtx, cancelList := context.WithTimeout(
-			context.Background(), loginOperationTimeout)
-		logins, listErr := store.List(listCtx)
+			context.Background(), itemOperationTimeout)
+		items, listErr := store.List(listCtx)
 		cancelList()
 		syncErr = errors.Join(syncErr, listErr)
-		return loginSavedMsg{
-			logins:  logins,
+		return itemSavedMsg{
+			items:   items,
 			pending: pending,
 			syncErr: syncErr,
 		}
 	}
 }
 
-func syncLogins(store loginStore) tea.Cmd {
+func syncItems(store itemStore) tea.Cmd {
 	return func() tea.Msg {
-		syncStore, ok := store.(syncLoginStore)
+		syncStore, ok := store.(syncItemStore)
 		if !ok {
 			return syncResultMsg{err: errors.New("synchronization unavailable")}
 		}
 		syncCtx, cancelSync := context.WithTimeout(
-			context.Background(), loginOperationTimeout)
+			context.Background(), itemOperationTimeout)
 		syncErr := syncStore.Sync(syncCtx)
 		cancelSync()
 		listCtx, cancelList := context.WithTimeout(
-			context.Background(), loginOperationTimeout)
-		logins, listErr := store.List(listCtx)
+			context.Background(), itemOperationTimeout)
+		items, listErr := store.List(listCtx)
 		cancelList()
 		pending, pendingErr := syncStore.Pending()
 		return syncResultMsg{
-			logins:  logins,
+			items:   items,
 			pending: pending,
 			err:     errors.Join(syncErr, listErr, pendingErr),
 		}
 	}
 }
 
-func (s cachedLoginStore) List(ctx context.Context) ([]loginRecord, error) {
+func (s cachedItemStore) List(ctx context.Context) ([]itemRecord, error) {
 	groups, err := s.cache.ItemHeads()
 	if err != nil {
 		return nil, err
 	}
-	return s.openLoginGroups(ctx, groups)
+	return s.openItemGroups(ctx, groups)
 }
 
-func (s cachedLoginStore) Trash(ctx context.Context) ([]loginRecord, error) {
+func (s cachedItemStore) Trash(ctx context.Context) ([]itemRecord, error) {
 	groups, err := s.cache.TrashHeads()
 	if err != nil {
 		return nil, err
 	}
-	return s.openLoginGroups(ctx, groups)
+	return s.openItemGroups(ctx, groups)
 }
 
-func (s cachedLoginStore) openLoginGroups(
+func (s cachedItemStore) openItemGroups(
 	ctx context.Context,
 	groups []client.ItemHead,
-) ([]loginRecord, error) {
-	logins := make([]loginRecord, 0, len(groups))
+) ([]itemRecord, error) {
+	items := make([]itemRecord, 0, len(groups))
 	for _, group := range groups {
-		versions := make([]loginRecord, 0, len(group.Revisions))
+		versions := make([]itemRecord, 0, len(group.Revisions))
 		for _, item := range group.Revisions {
 			if item.Purged {
-				versions = append(versions, loginRecord{
+				versions = append(versions, itemRecord{
 					Login: client.LoginItem{
 						ItemID: item.ItemID,
 						Name:   "Permanently deleted",
@@ -384,7 +384,7 @@ func (s cachedLoginStore) openLoginGroups(
 			if err != nil {
 				return nil, err
 			}
-			record := loginRecord{
+			record := itemRecord{
 				Revision:   item.Revision,
 				RevisionID: item.RevisionID,
 				ParentRevisionIDs: append(
@@ -419,12 +419,12 @@ func (s cachedLoginStore) openLoginGroups(
 		if len(versions) > 1 {
 			record.ConflictVersions = versions
 		}
-		logins = append(logins, record)
+		items = append(items, record)
 	}
-	return logins, nil
+	return items, nil
 }
 
-func (s cachedLoginStore) Save(ctx context.Context, record loginRecord) error {
+func (s cachedItemStore) Save(ctx context.Context, record itemRecord) error {
 	var (
 		item client.EncryptedItem
 		err  error
@@ -455,14 +455,14 @@ func (s cachedLoginStore) Save(ctx context.Context, record loginRecord) error {
 	return err
 }
 
-func (s cachedLoginStore) Sync(ctx context.Context) error {
+func (s cachedItemStore) Sync(ctx context.Context) error {
 	if s.accessToken == "" {
 		return errors.New("online authentication required")
 	}
 	return client.SyncCache(ctx, s.cfg, s.accessToken, s.cache)
 }
 
-func (s cachedLoginStore) Pending() (int, error) {
+func (s cachedItemStore) Pending() (int, error) {
 	snapshot, err := s.cache.SyncSnapshot()
 	if err != nil {
 		return 0, err
@@ -470,18 +470,18 @@ func (s cachedLoginStore) Pending() (int, error) {
 	return len(snapshot.Mutations), nil
 }
 
-func (s cachedLoginStore) CanSync() bool {
+func (s cachedItemStore) CanSync() bool {
 	return s.accessToken != ""
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case periodicSyncMsg:
-		if m.vaultOpen && m.loginStore != nil &&
+		if m.vaultOpen && m.itemStore != nil &&
 			m.accessToken != "" && !m.syncLoading {
 			m.syncLoading = true
 			return m, tea.Batch(
-				syncLogins(m.loginStore),
+				syncItems(m.itemStore),
 				checkStatus(m.cfg),
 				schedulePeriodicSync(),
 			)
@@ -515,12 +515,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, loadActivity(m.cfg, m.accessToken, false, "")
 			}
 		case "c":
-			if m.vaultOpen && m.loginStore != nil &&
+			if m.vaultOpen && m.itemStore != nil &&
 				!m.showSessions && !m.showActivity &&
-				!m.showLogin && !m.showTrash {
+				!m.showItem && !m.showTrash {
 				itemID, err := client.NewItemID()
 				if err != nil {
-					m.loginsErr = err
+					m.itemsErr = err
 					return m, nil
 				}
 				m.showLoginForm = true
@@ -528,8 +528,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					itemID:   itemID,
 					revision: 1,
 				}
-				m.loginFormErr = nil
-				m.loginSaving = false
+				m.itemFormErr = nil
+				m.itemSaving = false
 			}
 		case "n":
 			if m.showActivity && m.activityPage.NextCursor != "" {
@@ -542,12 +542,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.activityPage.NextCursor,
 				)
 			}
-			if m.vaultOpen && m.loginStore != nil &&
+			if m.vaultOpen && m.itemStore != nil &&
 				!m.showSessions && !m.showActivity &&
-				!m.showLogin && !m.showTrash {
+				!m.showItem && !m.showTrash {
 				itemID, err := client.NewItemID()
 				if err != nil {
-					m.loginsErr = err
+					m.itemsErr = err
 					return m, nil
 				}
 				m.showNoteForm = true
@@ -555,16 +555,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					itemID:   itemID,
 					revision: 1,
 				}
-				m.loginFormErr = nil
-				m.loginSaving = false
+				m.itemFormErr = nil
+				m.itemSaving = false
 			}
 		case "e":
-			if m.vaultOpen && m.loginStore != nil &&
+			if m.vaultOpen && m.itemStore != nil &&
 				!m.showSessions && !m.showActivity &&
-				m.selectedLogin < len(m.logins) &&
-				len(m.logins[m.selectedLogin].ConflictVersions) == 0 {
-				record := m.logins[m.selectedLogin]
-				m.showLogin = false
+				m.selectedItem < len(m.items) &&
+				len(m.items[m.selectedItem].ConflictVersions) == 0 {
+				record := m.items[m.selectedItem]
+				m.showItem = false
 				if record.SecureNote != nil {
 					m.showNoteForm = true
 					m.noteForm = formForSecureNote(record)
@@ -572,32 +572,32 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.showLoginForm = true
 					m.loginForm = formForLogin(record)
 				}
-				m.loginFormErr = nil
-				m.loginSaving = false
+				m.itemFormErr = nil
+				m.itemSaving = false
 			}
 		case "d":
-			if m.showLogin && m.loginStore != nil &&
-				m.selectedLogin < len(m.logins) {
-				record := m.logins[m.selectedLogin]
+			if m.showItem && m.itemStore != nil &&
+				m.selectedItem < len(m.items) {
+				record := m.items[m.selectedItem]
 				if len(record.ConflictVersions) == 0 &&
 					!record.Deleted {
-					m.loginSaving = true
-					return m, saveLogin(
-						m.loginStore,
-						deleteLogin(record),
+					m.itemSaving = true
+					return m, saveItem(
+						m.itemStore,
+						deleteItem(record),
 					)
 				}
 			}
 		case "p":
-			if m.showLogin && m.selectedLogin < len(m.logins) &&
-				len(m.logins[m.selectedLogin].ConflictVersions) == 0 {
+			if m.showItem && m.selectedItem < len(m.items) &&
+				len(m.items[m.selectedItem].ConflictVersions) == 0 {
 				m.revealPassword = !m.revealPassword
 			}
 		case "m":
-			if m.showLogin && m.selectedLogin < len(m.logins) {
-				record := m.logins[m.selectedLogin]
+			if m.showItem && m.selectedItem < len(m.items) {
+				record := m.items[m.selectedItem]
 				if len(record.ConflictVersions) > 1 {
-					m.showLogin = false
+					m.showItem = false
 					if record.SecureNote != nil {
 						m.showNoteForm = true
 						m.noteForm = formForSecureNoteConflict(
@@ -611,27 +611,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.selectedConflict,
 						)
 					}
-					m.loginFormErr = nil
-					m.loginSaving = false
+					m.itemFormErr = nil
+					m.itemSaving = false
 				}
 			}
 		case "t":
-			if m.vaultOpen && m.loginStore != nil &&
+			if m.vaultOpen && m.itemStore != nil &&
 				!m.showSessions && !m.showActivity &&
-				!m.showLogin {
+				!m.showItem {
 				m.showTrash = true
 				m.trashLoading = true
 				m.trashErr = nil
 				m.purgeConfirm = false
-				return m, loadTrash(m.loginStore)
+				return m, loadTrash(m.itemStore)
 			}
 		case "enter":
-			if m.showLogin && m.selectedLogin < len(m.logins) {
-				record := m.logins[m.selectedLogin]
+			if m.showItem && m.selectedItem < len(m.items) {
+				record := m.items[m.selectedItem]
 				if len(record.ConflictVersions) > 1 {
-					m.loginSaving = true
-					return m, saveLogin(
-						m.loginStore,
+					m.itemSaving = true
+					return m, saveItem(
+						m.itemStore,
 						resolveConflict(
 							record.ConflictVersions,
 							m.selectedConflict,
@@ -639,8 +639,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					)
 				}
 			} else if m.vaultOpen && !m.showSessions && !m.showActivity &&
-				m.selectedLogin < len(m.logins) {
-				m.showLogin = true
+				m.selectedItem < len(m.items) {
+				m.showItem = true
 				m.revealPassword = false
 				m.selectedConflict = 0
 			}
@@ -655,7 +655,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "v":
 			m.showSessions = false
 			m.showActivity = false
-			m.showLogin = false
+			m.showItem = false
 			m.showTrash = false
 			m.revealPassword = false
 			m.selectedConflict = 0
@@ -665,29 +665,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "j", "down":
 			if m.showSessions && m.selectedSession+1 < len(m.sessions) {
 				m.selectedSession++
-			} else if m.showLogin && m.selectedLogin < len(m.logins) &&
+			} else if m.showItem && m.selectedItem < len(m.items) &&
 				m.selectedConflict+1 <
-					len(m.logins[m.selectedLogin].ConflictVersions) {
+					len(m.items[m.selectedItem].ConflictVersions) {
 				m.selectedConflict++
 			} else if m.showTrash &&
 				m.selectedTrash+1 < len(m.trash) {
 				m.selectedTrash++
 				m.purgeConfirm = false
-			} else if !m.showSessions && !m.showActivity && !m.showLogin &&
-				m.selectedLogin+1 < len(m.logins) {
-				m.selectedLogin++
+			} else if !m.showSessions && !m.showActivity && !m.showItem &&
+				m.selectedItem+1 < len(m.items) {
+				m.selectedItem++
 			}
 		case "k", "up":
 			if m.showSessions && m.selectedSession > 0 {
 				m.selectedSession--
-			} else if m.showLogin && m.selectedConflict > 0 {
+			} else if m.showItem && m.selectedConflict > 0 {
 				m.selectedConflict--
 			} else if m.showTrash && m.selectedTrash > 0 {
 				m.selectedTrash--
 				m.purgeConfirm = false
-			} else if !m.showSessions && !m.showActivity && !m.showLogin &&
-				m.selectedLogin > 0 {
-				m.selectedLogin--
+			} else if !m.showSessions && !m.showActivity && !m.showItem &&
+				m.selectedItem > 0 {
+				m.selectedItem--
 			}
 		case "x":
 			if m.showTrash && m.selectedTrash < len(m.trash) {
@@ -695,10 +695,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.purgeConfirm = true
 					return m, nil
 				}
-				m.loginSaving = true
-				return m, saveLogin(
-					m.loginStore,
-					purgeLogin(m.trash[m.selectedTrash]),
+				m.itemSaving = true
+				return m, saveItem(
+					m.itemStore,
+					purgeItem(m.trash[m.selectedTrash]),
 				)
 			}
 			if m.showSessions && m.selectedSession < len(m.sessions) {
@@ -711,10 +711,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "r":
 			if m.showTrash && m.selectedTrash < len(m.trash) {
-				m.loginSaving = true
-				return m, saveLogin(
-					m.loginStore,
-					restoreLogin(m.trash[m.selectedTrash]),
+				m.itemSaving = true
+				return m, saveItem(
+					m.itemStore,
+					restoreItem(m.trash[m.selectedTrash]),
 				)
 			}
 			if m.showActivity {
@@ -727,19 +727,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.sessionsErr = nil
 				return m, loadSessions(m.cfg, m.accessToken)
 			}
-			if m.vaultOpen && m.loginStore != nil {
-				m.loginsLoading = true
-				m.loginsErr = nil
-				return m, loadLogins(m.loginStore)
+			if m.vaultOpen && m.itemStore != nil {
+				m.itemsLoading = true
+				m.itemsErr = nil
+				return m, loadItems(m.itemStore)
 			}
 			m.loaded = false
 			return m, checkStatus(m.cfg)
 		case "y":
-			if m.vaultOpen && m.loginStore != nil &&
+			if m.vaultOpen && m.itemStore != nil &&
 				m.accessToken != "" && !m.syncLoading {
 				m.syncLoading = true
 				m.syncErr = nil
-				return m, syncLogins(m.loginStore)
+				return m, syncItems(m.itemStore)
 			}
 		}
 	case statusMsg:
@@ -768,23 +768,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case activityErrMsg:
 		m.activityLoading = false
 		m.activityErr = msg
-	case loginsMsg:
-		m.loginsLoading = false
-		m.logins = []loginRecord(msg)
+	case itemsMsg:
+		m.itemsLoading = false
+		m.items = []itemRecord(msg)
 		m.selectedConflict = 0
 		m.showLoginForm = false
 		m.showNoteForm = false
-		m.loginFormErr = nil
-		m.loginSaving = false
-		if m.selectedLogin >= len(m.logins) {
-			m.selectedLogin = 0
+		m.itemFormErr = nil
+		m.itemSaving = false
+		if m.selectedItem >= len(m.items) {
+			m.selectedItem = 0
 		}
-	case loginsErrMsg:
-		m.loginsLoading = false
-		m.loginsErr = msg
+	case itemsErrMsg:
+		m.itemsLoading = false
+		m.itemsErr = msg
 	case trashMsg:
 		m.trashLoading = false
-		m.trash = []loginRecord(msg)
+		m.trash = []itemRecord(msg)
 		m.trashErr = nil
 		m.purgeConfirm = false
 		if m.selectedTrash >= len(m.trash) {
@@ -793,22 +793,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case trashErrMsg:
 		m.trashLoading = false
 		m.trashErr = msg
-	case loginSaveErrMsg:
-		m.loginFormErr = msg
-		m.loginSaving = false
-	case loginSavedMsg:
-		m.logins = msg.logins
-		m.showLogin = false
+	case itemSaveErrMsg:
+		m.itemFormErr = msg
+		m.itemSaving = false
+	case itemSavedMsg:
+		m.items = msg.items
+		m.showItem = false
 		m.showTrash = false
 		m.selectedConflict = 0
 		m.showLoginForm = false
 		m.showNoteForm = false
-		m.loginFormErr = nil
-		m.loginSaving = false
+		m.itemFormErr = nil
+		m.itemSaving = false
 		m.syncErr = msg.syncErr
 		m.pendingMutations = msg.pending
-		if m.selectedLogin >= len(m.logins) {
-			m.selectedLogin = 0
+		if m.selectedItem >= len(m.items) {
+			m.selectedItem = 0
 		}
 		if msg.syncErr != nil {
 			return m, checkStatus(m.cfg)
@@ -817,10 +817,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncLoading = false
 		m.syncErr = msg.err
 		m.pendingMutations = msg.pending
-		m.logins = msg.logins
+		m.items = msg.items
 		m.selectedConflict = 0
-		if m.selectedLogin >= len(m.logins) {
-			m.selectedLogin = 0
+		if m.selectedItem >= len(m.items) {
+			m.selectedItem = 0
 		}
 		if msg.err != nil {
 			return m, checkStatus(m.cfg)
@@ -839,8 +839,8 @@ func (m model) View() string {
 	if m.showTrash {
 		return m.trashView()
 	}
-	if m.showLogin {
-		return m.loginView()
+	if m.showItem {
+		return m.itemView()
 	}
 	if m.showActivity {
 		return m.activityView()
@@ -859,20 +859,20 @@ func (m model) View() string {
 	}
 	if m.vaultOpen {
 		switch {
-		case m.loginsLoading:
+		case m.itemsLoading:
 			b.WriteString("Vault:    unlocked\n")
 			b.WriteString("Items:    loading…\n")
-		case m.loginsErr != nil:
+		case m.itemsErr != nil:
 			b.WriteString("Vault:    unlocked\n")
-			b.WriteString("Items:    error — " + m.loginsErr.Error() + "\n")
-		case len(m.logins) == 0:
+			b.WriteString("Items:    error — " + m.itemsErr.Error() + "\n")
+		case len(m.items) == 0:
 			b.WriteString("Vault:    unlocked (empty)\n")
 		default:
 			b.WriteString("Vault:    unlocked\n")
 			b.WriteString("Items:\n")
-			for index, record := range m.logins {
+			for index, record := range m.items {
 				cursor := " "
-				if index == m.selectedLogin {
+				if index == m.selectedItem {
 					cursor = ">"
 				}
 				if len(record.ConflictVersions) > 1 {
@@ -909,7 +909,7 @@ func (m model) View() string {
 			b.WriteString("Sync:     offline\n")
 		}
 	}
-	if m.vaultOpen && m.loginStore != nil {
+	if m.vaultOpen && m.itemStore != nil {
 		b.WriteString(
 			"\n[c] new Login  [n] new Secure Note  " +
 				"[enter] open  [t] Trash  ",
@@ -928,7 +928,7 @@ func (m model) View() string {
 func (m model) updateSecureNoteForm(
 	msg tea.KeyMsg,
 ) (tea.Model, tea.Cmd) {
-	if m.loginSaving {
+	if m.itemSaving {
 		if msg.String() == "ctrl+c" {
 			return m, tea.Quit
 		}
@@ -939,7 +939,7 @@ func (m model) updateSecureNoteForm(
 		return m, tea.Quit
 	case "esc":
 		m.showNoteForm = false
-		m.loginFormErr = nil
+		m.itemFormErr = nil
 		return m, nil
 	case "ctrl+u":
 		m.noteForm.values[m.noteForm.field] = ""
@@ -952,17 +952,17 @@ func (m model) updateSecureNoteForm(
 	case "enter":
 		if m.noteForm.field+1 < secureNoteFormFieldCount {
 			m.noteForm.field++
-			m.loginFormErr = nil
+			m.itemFormErr = nil
 			return m, nil
 		}
 		record, err := recordFromSecureNoteForm(m.noteForm)
 		if err != nil {
-			m.loginFormErr = err
+			m.itemFormErr = err
 			return m, nil
 		}
-		m.loginSaving = true
-		m.loginFormErr = nil
-		return m, saveLogin(m.loginStore, record)
+		m.itemSaving = true
+		m.itemFormErr = nil
+		return m, saveItem(m.itemStore, record)
 	default:
 		if msg.Type == tea.KeyRunes {
 			m.noteForm.values[m.noteForm.field] += string(msg.Runes)
@@ -973,12 +973,12 @@ func (m model) updateSecureNoteForm(
 
 func recordFromSecureNoteForm(
 	form secureNoteForm,
-) (loginRecord, error) {
+) (itemRecord, error) {
 	title := strings.TrimSpace(form.values[0])
 	if title == "" {
-		return loginRecord{}, fmt.Errorf("title is required")
+		return itemRecord{}, fmt.Errorf("title is required")
 	}
-	return loginRecord{
+	return itemRecord{
 		SecureNote: &client.SecureNoteItem{
 			ItemID:  form.itemID,
 			Title:   title,
@@ -1010,10 +1010,10 @@ func (m model) secureNoteFormView() string {
 			cursor, label, m.noteForm.values[index],
 		)
 	}
-	if m.loginFormErr != nil {
-		fmt.Fprintf(&b, "\nError: %s\n", m.loginFormErr)
+	if m.itemFormErr != nil {
+		fmt.Fprintf(&b, "\nError: %s\n", m.itemFormErr)
 	}
-	if m.loginSaving {
+	if m.itemSaving {
 		b.WriteString("\nSaving…  [ctrl+c] quit\n")
 	} else {
 		b.WriteString(
@@ -1025,7 +1025,7 @@ func (m model) secureNoteFormView() string {
 }
 
 func (m model) updateLoginForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if m.loginSaving {
+	if m.itemSaving {
 		if msg.String() == "ctrl+c" {
 			return m, tea.Quit
 		}
@@ -1036,7 +1036,7 @@ func (m model) updateLoginForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "esc":
 		m.showLoginForm = false
-		m.loginFormErr = nil
+		m.itemFormErr = nil
 		return m, nil
 	case "ctrl+u":
 		m.loginForm.values[m.loginForm.field] = ""
@@ -1048,17 +1048,17 @@ func (m model) updateLoginForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		if m.loginForm.field+1 < loginFormFieldCount {
 			m.loginForm.field++
-			m.loginFormErr = nil
+			m.itemFormErr = nil
 			return m, nil
 		}
 		record, err := recordFromLoginForm(m.loginForm)
 		if err != nil {
-			m.loginFormErr = err
+			m.itemFormErr = err
 			return m, nil
 		}
-		m.loginSaving = true
-		m.loginFormErr = nil
-		return m, saveLogin(m.loginStore, record)
+		m.itemSaving = true
+		m.itemFormErr = nil
+		return m, saveItem(m.itemStore, record)
 	default:
 		if msg.Type == tea.KeyRunes {
 			m.loginForm.values[m.loginForm.field] += string(msg.Runes)
@@ -1067,10 +1067,10 @@ func (m model) updateLoginForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func recordFromLoginForm(form loginForm) (loginRecord, error) {
+func recordFromLoginForm(form loginForm) (itemRecord, error) {
 	name := strings.TrimSpace(form.values[0])
 	if name == "" {
-		return loginRecord{}, fmt.Errorf("name is required")
+		return itemRecord{}, fmt.Errorf("name is required")
 	}
 	var urls []string
 	for _, value := range strings.Split(form.values[3], ",") {
@@ -1086,14 +1086,14 @@ func recordFromLoginForm(form loginForm) (loginRecord, error) {
 		}
 		fieldName, fieldValue, ok := strings.Cut(value, "=")
 		if !ok || strings.TrimSpace(fieldName) == "" {
-			return loginRecord{}, fmt.Errorf("custom fields must use name=value")
+			return itemRecord{}, fmt.Errorf("custom fields must use name=value")
 		}
 		customFields = append(customFields, client.CustomField{
 			Name:  strings.TrimSpace(fieldName),
 			Value: strings.TrimSpace(fieldValue),
 		})
 	}
-	return loginRecord{
+	return itemRecord{
 		Login: client.LoginItem{
 			ItemID:       form.itemID,
 			Name:         name,
@@ -1109,7 +1109,7 @@ func recordFromLoginForm(form loginForm) (loginRecord, error) {
 	}, nil
 }
 
-func formForLogin(record loginRecord) loginForm {
+func formForLogin(record itemRecord) loginForm {
 	customFields := make([]string, 0, len(record.Login.CustomFields))
 	for _, field := range record.Login.CustomFields {
 		customFields = append(customFields, field.Name+"="+field.Value)
@@ -1134,7 +1134,7 @@ func formForLogin(record loginRecord) loginForm {
 	}
 }
 
-func formForSecureNote(record loginRecord) secureNoteForm {
+func formForSecureNote(record itemRecord) secureNoteForm {
 	var parentRevisionIDs []string
 	if record.RevisionID != "" {
 		parentRevisionIDs = []string{record.RevisionID}
@@ -1151,7 +1151,7 @@ func formForSecureNote(record loginRecord) secureNoteForm {
 	}
 }
 
-func deleteLogin(record loginRecord) loginRecord {
+func deleteItem(record itemRecord) itemRecord {
 	record.Revision++
 	record.ParentRevisionIDs = []string{record.RevisionID}
 	record.RevisionID = ""
@@ -1161,7 +1161,7 @@ func deleteLogin(record loginRecord) loginRecord {
 	return record
 }
 
-func restoreLogin(record loginRecord) loginRecord {
+func restoreItem(record itemRecord) itemRecord {
 	record.Revision++
 	record.ParentRevisionIDs = []string{record.RevisionID}
 	record.RevisionID = ""
@@ -1171,7 +1171,7 @@ func restoreLogin(record loginRecord) loginRecord {
 	return record
 }
 
-func purgeLogin(record loginRecord) loginRecord {
+func purgeItem(record itemRecord) itemRecord {
 	record.Revision++
 	record.ParentRevisionIDs = []string{record.RevisionID}
 	record.RevisionID = ""
@@ -1181,9 +1181,9 @@ func purgeLogin(record loginRecord) loginRecord {
 	return record
 }
 
-func formForConflict(versions []loginRecord, selected int) loginForm {
+func formForConflict(versions []itemRecord, selected int) loginForm {
 	resolution := resolveConflict(versions, selected)
-	form := formForLogin(loginRecord{
+	form := formForLogin(itemRecord{
 		Login:    resolution.Login,
 		Revision: resolution.Revision - 1,
 	})
@@ -1194,11 +1194,11 @@ func formForConflict(versions []loginRecord, selected int) loginForm {
 }
 
 func formForSecureNoteConflict(
-	versions []loginRecord,
+	versions []itemRecord,
 	selected int,
 ) secureNoteForm {
 	resolution := resolveConflict(versions, selected)
-	form := formForSecureNote(loginRecord{
+	form := formForSecureNote(itemRecord{
 		SecureNote: resolution.SecureNote,
 		Revision:   resolution.Revision - 1,
 	})
@@ -1208,7 +1208,7 @@ func formForSecureNoteConflict(
 	return form
 }
 
-func resolveConflict(versions []loginRecord, selected int) loginRecord {
+func resolveConflict(versions []itemRecord, selected int) itemRecord {
 	if selected < 0 || selected >= len(versions) {
 		selected = 0
 	}
@@ -1246,10 +1246,10 @@ func (m model) loginFormView() string {
 		}
 		fmt.Fprintf(&b, "%s %s: %s\n", cursor, label, value)
 	}
-	if m.loginFormErr != nil {
-		fmt.Fprintf(&b, "\nError: %s\n", m.loginFormErr)
+	if m.itemFormErr != nil {
+		fmt.Fprintf(&b, "\nError: %s\n", m.itemFormErr)
 	}
-	if m.loginSaving {
+	if m.itemSaving {
 		b.WriteString("\nSaving…  [ctrl+c] quit\n")
 	} else {
 		b.WriteString("\n[enter] next/save  [ctrl+u] clear field  [esc] cancel  [ctrl+c] quit\n")
@@ -1300,11 +1300,11 @@ func (m model) trashView() string {
 	return b.String()
 }
 
-func (m model) loginView() string {
-	if m.selectedLogin >= len(m.logins) {
+func (m model) itemView() string {
+	if m.selectedItem >= len(m.items) {
 		return "TermKeep — Login\n\nLogin not found.\n\n[v] vault  [q] quit\n"
 	}
-	record := m.logins[m.selectedLogin]
+	record := m.items[m.selectedItem]
 	if len(record.ConflictVersions) > 1 {
 		return m.conflictView(record.ConflictVersions)
 	}
@@ -1346,21 +1346,21 @@ func (m model) loginView() string {
 	return b.String()
 }
 
-func recordTitle(record loginRecord) string {
+func recordTitle(record itemRecord) string {
 	if record.SecureNote != nil {
 		return record.SecureNote.Title
 	}
 	return record.Login.Name
 }
 
-func recordItemID(record loginRecord) string {
+func recordItemID(record itemRecord) string {
 	if record.SecureNote != nil {
 		return record.SecureNote.ItemID
 	}
 	return record.Login.ItemID
 }
 
-func (m model) conflictView(versions []loginRecord) string {
+func (m model) conflictView(versions []itemRecord) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "TermKeep — Conflict — %d versions\n\n", len(versions))
 	for index, version := range versions {
