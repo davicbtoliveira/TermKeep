@@ -55,6 +55,13 @@ func TestEncryptedLoginRoundTripHidesSemanticFields(t *testing.T) {
 		Name:     "Production database",
 		Username: "operator@example.com",
 		Password: "Database-Password-Sentinel",
+		PasswordHistory: []PasswordHistoryEntry{
+			{
+				Password: "Previous-Database-Password-Sentinel",
+				ChangedAt: time.Date(
+					2026, time.July, 28, 13, 45, 0, 0, time.UTC),
+			},
+		},
 		FolderID: "22222222-2222-4222-8222-222222222222",
 		Favorite: true,
 		URLs:     []string{"https://db.example.com", "postgres://db.internal"},
@@ -78,6 +85,8 @@ func TestEncryptedLoginRoundTripHidesSemanticFields(t *testing.T) {
 		login.Name,
 		login.Username,
 		login.Password,
+		login.PasswordHistory[0].Password,
+		login.PasswordHistory[0].ChangedAt.Format(time.RFC3339),
 		login.URLs[0],
 		login.Notes,
 		login.CustomFields[0].Value,
