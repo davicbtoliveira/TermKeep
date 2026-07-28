@@ -1197,6 +1197,16 @@ func formForSecureNoteConflict(
 	versions []itemRecord,
 	selected int,
 ) secureNoteForm {
+	if selected < 0 ||
+		selected >= len(versions) ||
+		versions[selected].SecureNote == nil {
+		for index, version := range versions {
+			if version.SecureNote != nil {
+				selected = index
+				break
+			}
+		}
+	}
 	resolution := resolveConflict(versions, selected)
 	form := formForSecureNote(itemRecord{
 		SecureNote: resolution.SecureNote,

@@ -1218,6 +1218,44 @@ func TestSecureNoteConflictSavesManualMerge(t *testing.T) {
 	}
 }
 
+func TestSecureNoteManualMergeSkipsSelectedTombstoneContent(t *testing.T) {
+	liveID := "22222222-2222-4222-8222-222222222222"
+	tombstoneID := "33333333-3333-4333-8333-333333333333"
+	live := itemRecord{
+		SecureNote: &client.SecureNoteItem{
+			ItemID:  "11111111-1111-4111-8111-111111111111",
+			Title:   "Offline procedure",
+			Content: "Offline sensitive edit",
+		},
+		Revision:   2,
+		RevisionID: liveID,
+	}
+	tombstone := itemRecord{
+		Login:      client.LoginItem{ItemID: live.SecureNote.ItemID},
+		Revision:   3,
+		RevisionID: tombstoneID,
+		Deleted:    true,
+		Purged:     true,
+	}
+	conflict := live
+	conflict.ConflictVersions = []itemRecord{live, tombstone}
+	current, _ := model{
+		loaded:           true,
+		vaultOpen:        true,
+		itemStore:        &fakeItemStore{},
+		items:            []itemRecord{conflict},
+		showItem:         true,
+		selectedConflict: 1,
+	}.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+
+	view := current.(model).View()
+	if !strings.Contains(
+		view, "Manual Secure Note Conflict Merge",
+	) || !strings.Contains(view, live.SecureNote.Title) {
+		t.Fatalf("manual merge did not use live Note content:\n%s", view)
+	}
+}
+
 func TestConflictScreenSavesManualMerge(t *testing.T) {
 	firstID := "22222222-2222-4222-8222-222222222222"
 	secondID := "33333333-3333-4333-8333-333333333333"
