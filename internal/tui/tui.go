@@ -172,6 +172,7 @@ type model struct {
 	showPasswordHistory bool
 	selectedHistory     int
 	revealHistory       bool
+	historyClearConfirm bool
 	itemStore           itemStore
 	showLoginForm       bool
 	loginForm           loginForm
@@ -882,6 +883,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.showPasswordHistory = true
 				m.selectedHistory = 0
 				m.revealHistory = false
+				m.historyClearConfirm = false
 			}
 		case "f":
 			record, selected := m.selectedItemRecord()
@@ -1044,6 +1046,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showMoveFolder = false
 			m.showFolderForm = false
 			m.showPasswordHistory = false
+			m.historyClearConfirm = false
 			m.revealPassword = false
 			m.revealHistory = false
 			m.selectedConflict = 0
@@ -1210,6 +1213,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.showMoveFolder = false
 		m.showFolderConflict = false
 		m.showPasswordHistory = false
+		m.historyClearConfirm = false
 		m.selectedConflict = 0
 		m.showLoginForm = false
 		m.showNoteForm = false
@@ -2033,6 +2037,12 @@ func (m model) trashView() string {
 func (m model) updatePasswordHistory(
 	msg tea.KeyMsg,
 ) (tea.Model, tea.Cmd) {
+	if m.itemSaving {
+		if msg.String() == "ctrl+c" {
+			return m, tea.Quit
+		}
+		return m, nil
+	}
 	record, ok := m.selectedItemRecord()
 	if !ok || record.SecureNote != nil {
 		m.showPasswordHistory = false
@@ -2045,24 +2055,46 @@ func (m model) updatePasswordHistory(
 	case "esc":
 		m.showPasswordHistory = false
 		m.revealHistory = false
+		m.historyClearConfirm = false
 	case "v":
 		m.showPasswordHistory = false
 		m.showItem = false
 		m.revealHistory = false
+		m.historyClearConfirm = false
 	case "j", "down":
 		if m.selectedHistory+1 < len(history) {
 			m.selectedHistory++
 			m.revealHistory = false
+			m.historyClearConfirm = false
 		}
 	case "k", "up":
 		if m.selectedHistory > 0 {
 			m.selectedHistory--
 			m.revealHistory = false
+			m.historyClearConfirm = false
 		}
 	case "p":
 		if m.selectedHistory < len(history) {
 			m.revealHistory = !m.revealHistory
+			m.historyClearConfirm = false
 		}
+	case "x":
+		if len(history) == 0 {
+			return m, nil
+		}
+		if !m.historyClearConfirm {
+			m.historyClearConfirm = true
+			m.revealHistory = false
+			return m, nil
+		}
+		record.Login.PasswordHistory = nil
+		record.Revision++
+		record.ParentRevisionIDs = []string{record.RevisionID}
+		record.RevisionID = ""
+		record.ConflictVersions = nil
+		m.itemSaving = true
+		m.itemFormErr = nil
+		return m, saveItem(m.itemStore, record)
 	}
 	return m, nil
 }
@@ -2099,8 +2131,23 @@ func (m model) passwordHistoryView() string {
 			)
 		}
 	}
+	if m.historyClearConfirm {
+		fmt.Fprintf(
+			&b,
+			"\nWarning: historical passwords cannot be recovered.\n"+
+				"Press [x] again to clear all %d entries.\n",
+			len(record.Login.PasswordHistory),
+		)
+	}
+	if m.itemFormErr != nil {
+		fmt.Fprintf(&b, "\nError: %s\n", m.itemFormErr)
+	}
+	if m.itemSaving {
+		b.WriteString("\nSaving…  [ctrl+c] quit\n")
+		return b.String()
+	}
 	b.WriteString(
-		"\n[j/k] select  [p] reveal/hide selected  " +
+		"\n[j/k] select  [p] reveal/hide selected  [x] clear all  " +
 			"[esc] Login  [v] vault  [q] quit\n",
 	)
 	return b.String()

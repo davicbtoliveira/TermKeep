@@ -989,6 +989,74 @@ func TestPasswordHistoryRequiresIntentionalOpenAndReveal(t *testing.T) {
 	}
 }
 
+func TestPasswordHistoryClearRequiresConfirmation(t *testing.T) {
+	revisionID := "22222222-2222-4222-8222-222222222222"
+	record := itemRecord{
+		Login: client.LoginItem{
+			ItemID:   "11111111-1111-4111-8111-111111111111",
+			Name:     "Production database",
+			Password: "Current-Password-Sentinel",
+			PasswordHistory: []client.PasswordHistoryEntry{
+				{
+					Password: "Previous-Password-Sentinel",
+					ChangedAt: time.Date(
+						2026, time.July, 28, 15, 0, 0, 0, time.UTC),
+				},
+				{
+					Password: "Oldest-Password-Sentinel",
+					ChangedAt: time.Date(
+						2026, time.July, 27, 15, 0, 0, 0, time.UTC),
+				},
+			},
+		},
+		Revision:   2,
+		RevisionID: revisionID,
+	}
+	store := &fakeItemStore{records: []itemRecord{record}}
+	var current tea.Model = model{
+		loaded:    true,
+		vaultOpen: true,
+		itemStore: store,
+		items:     store.records,
+		showItem:  true,
+	}
+	current, _ = current.Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
+	current, command := current.Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	if command != nil || len(store.saved) != 0 {
+		t.Fatal("first clear key changed password history")
+	}
+	warning := current.(model).View()
+	if !strings.Contains(
+		warning,
+		"Press [x] again to clear all 2 entries.",
+	) {
+		t.Fatalf("history clear warning missing:\n%s", warning)
+	}
+
+	current, command = current.Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	if command == nil {
+		t.Fatal("confirmed history clear did not save")
+	}
+	current, _ = current.Update(command())
+
+	if len(store.saved) != 1 {
+		t.Fatalf("history clear saves: %+v", store.saved)
+	}
+	cleared := store.saved[0]
+	if cleared.Login.Password != record.Login.Password ||
+		len(cleared.Login.PasswordHistory) != 0 ||
+		cleared.Revision != 3 ||
+		!reflect.DeepEqual(
+			cleared.ParentRevisionIDs,
+			[]string{revisionID},
+		) {
+		t.Fatalf("cleared history differs: %+v", cleared)
+	}
+}
+
 func TestDeleteLoginMovesItToTrash(t *testing.T) {
 	rootID := "22222222-2222-4222-8222-222222222222"
 	record := itemRecord{
