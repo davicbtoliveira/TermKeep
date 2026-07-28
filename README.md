@@ -123,6 +123,26 @@ Native Item type and payload version live inside authenticated ciphertext.
 The Server receives the same opaque envelope and generic Item metadata for
 Logins and Secure Notes; it cannot identify titles, content, or native type.
 
+## Folders and favorites
+
+Press `f` in the vault to switch the Favorites view on or off. From a Login or
+Secure Note detail view, `f` favorites or unfavorites that Item and `o` moves it
+to one Folder or to `No Folder`.
+
+Press `o` in the vault to manage Folders. Use `c` to create one, `e` to rename
+the selected Folder, or `enter` to navigate its Items. `a` returns to all Items
+and `u` shows Items without a Folder. Removing a Folder requires a second `d`;
+the warning states how many Items will move to `No Folder`. Those Items remain
+live and retain their favorite status.
+
+Folder names are encrypted Folder records in the same local revision graph as
+other vault content. An Item's optional Folder UUID and favorite status are
+inside its encrypted native payload. Creates, moves, favorite changes,
+renames, and removals work offline and synchronize through the durable mutation
+queue. Concurrent organization changes remain explicit Conflicts. The Server
+sees only generic Item/revision metadata and cannot identify Folder names,
+associations, favorite status, or native record types.
+
 ## Offline use and synchronization
 
 A successful registration or online login authorizes an encrypted local

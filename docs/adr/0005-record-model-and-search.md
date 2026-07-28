@@ -16,7 +16,11 @@ Secure Notes contain a required title and sensitive free-form content. They use 
 
 Native type and payload version are authenticated fields inside the encrypted plaintext schema. The outer synchronization contract remains a generic opaque envelope with Item and revision identifiers. Consequently, the Server cannot distinguish a Login from a Secure Note or interpret either payload.
 
-Folders and favorites are supported; tags, cards, identities, passkeys, SSH-key models, attachments, and shared records are deferred.
+Folders are encrypted organization records with an Item UUID and name. Login and Secure Note payloads contain an optional Folder UUID and a favorite flag inside ciphertext. An Item belongs to at most one Folder. Renaming a Folder changes only its record; moving or favoriting an Item changes only that Item.
+
+The unlocked TUI provides All Items, No Folder, individual Folder, and Favorites views. Removing a Folder requires an explicit warning and queues new revisions that move its assigned Items to No Folder before deleting the Folder record; it never deletes those Items and preserves their favorite status. Folder creation, rename, removal, Item movement, and favorite changes use the same local revision graph, mutation queue, and explicit Conflict workflow as content edits.
+
+The Server cannot distinguish Folder records from content records or inspect Folder names, associations, or favorite status. Folders and favorites are supported; tags, cards, identities, passkeys, SSH-key models, attachments, and shared records are deferred.
 
 After unlock, the client builds an in-memory fuzzy index over item name, username, domain/URL, folder, and custom-field names. Passwords, TOTP secrets, and hidden values are never indexed. Notes enter search only through an explicit content-search action. No semantic search index is stored by the server.
 
@@ -32,5 +36,6 @@ Encrypted portable backup and guarded plaintext JSON/CSV export are supported. E
 
 - Search requires unlocked plaintext in client memory.
 - Native-type dispatch and schema-version compatibility remain Client responsibilities.
+- Organization views require decrypting Folder records and Item organization fields locally.
 - Import files and plaintext exports require prominent deletion/exposure warnings.
 - The server synchronizes opaque versioned records and does not understand their schema beyond envelope metadata.

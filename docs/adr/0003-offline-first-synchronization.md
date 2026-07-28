@@ -14,6 +14,8 @@ The client keeps a complete encrypted cache and an idempotent local mutation que
 
 Concurrent changes are never resolved with silent last-write-wins. Both revisions are preserved and presented in the TUI for explicit selection or manual merge. Deleted items remain in an encrypted trash for 30 days; permanent deletion retains only the technical tombstone needed for stale-client reconciliation.
 
+Folder records, Item-to-Folder associations, and favorite flags follow the same rules. Concurrent Folder renames or Item organization edits remain multiple heads until explicit resolution. Removing a Folder queues revisions that clear its UUID from assigned Items, followed by a deleted Folder revision, so the Items remain live and appear under No Folder.
+
 Each accepted mutation UUID is also its immutable revision UUID. Revisions form an append-only directed acyclic graph through parent revision UUIDs. Active heads are derived from that graph instead of from arrival order. Selecting a version or saving a manual merge creates one new revision with every conflicting head as a parent.
 
 Deletion appends a normal encrypted revision marked `deleted`; it leaves the normal list and becomes visible in Trash. Restoration appends a live child revision before expiration. Permanent deletion requires an explicit TUI confirmation and a Tombstone that descends from every current head. The first synchronization at or after 30 days creates the same Tombstone automatically for an unconflicted deleted head.

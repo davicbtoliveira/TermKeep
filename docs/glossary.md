@@ -6,8 +6,10 @@
 - **Client**: The Linux `termkeep` CLI/TUI that owns plaintext processing and cryptographic operations.
 - **Conflict**: Two valid item revisions descended from the same base revision and changed independently.
 - **Encrypted cache**: The complete local vault replica used for offline unlock, reads, writes, search, and queued synchronization.
+- **Favorite**: An encrypted per-Item organization flag used by the unlocked Client to build the Favorites view.
+- **Folder**: A named encrypted vault record. A Login or Secure Note may reference at most one Folder UUID inside its encrypted payload.
 - **Head revision**: An item revision that is not the parent of another preserved revision; multiple heads represent a Conflict.
-- **Item**: A versioned encrypted vault record, initially a Login or Secure Note.
+- **Item**: A versioned encrypted vault record. Native content records are Login and Secure Note; Folder records organize them without changing the Server contract.
 - **Master password**: The user-chosen secret used locally to unlock the vault and participate in online authentication. It is never sent to the server.
 - **Recovery key**: A high-entropy, user-controlled secret that can rewrap the vault key under a new master password.
 - **Revision graph**: The append-only set of encrypted item revisions connected by immutable parent revision UUIDs.
