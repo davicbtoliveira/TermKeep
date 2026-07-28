@@ -169,6 +169,9 @@ type model struct {
 	purgeConfirm        bool
 	showItem            bool
 	revealPassword      bool
+	showPasswordHistory bool
+	selectedHistory     int
+	revealHistory       bool
 	itemStore           itemStore
 	showLoginForm       bool
 	loginForm           loginForm
@@ -715,6 +718,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.showMoveFolder {
 			return m.updateMoveFolder(msg)
 		}
+		if m.showPasswordHistory {
+			return m.updatePasswordHistory(msg)
+		}
 		switch msg.String() {
 		case "q", "esc", "ctrl+c":
 			return m, tea.Quit
@@ -867,6 +873,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				len(record.ConflictVersions) == 0 &&
 				record.SecureNote == nil {
 				m.revealPassword = !m.revealPassword
+			}
+		case "h":
+			record, selected := m.selectedItemRecord()
+			if m.showItem && selected &&
+				len(record.ConflictVersions) == 0 &&
+				record.SecureNote == nil {
+				m.showPasswordHistory = true
+				m.selectedHistory = 0
+				m.revealHistory = false
 			}
 		case "f":
 			record, selected := m.selectedItemRecord()
@@ -1028,7 +1043,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showFolderConflict = false
 			m.showMoveFolder = false
 			m.showFolderForm = false
+			m.showPasswordHistory = false
 			m.revealPassword = false
+			m.revealHistory = false
 			m.selectedConflict = 0
 			m.purgeConfirm = false
 			m.folderDeleteConfirm = false
@@ -1192,6 +1209,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.showTrash = false
 		m.showMoveFolder = false
 		m.showFolderConflict = false
+		m.showPasswordHistory = false
 		m.selectedConflict = 0
 		m.showLoginForm = false
 		m.showNoteForm = false
@@ -1230,6 +1248,9 @@ func (m model) View() string {
 	}
 	if m.showMoveFolder {
 		return m.moveFolderView()
+	}
+	if m.showPasswordHistory {
+		return m.passwordHistoryView()
 	}
 	if m.showFolderConflict {
 		if m.selectedFolder >= len(m.folders) {
@@ -2009,6 +2030,82 @@ func (m model) trashView() string {
 	return b.String()
 }
 
+func (m model) updatePasswordHistory(
+	msg tea.KeyMsg,
+) (tea.Model, tea.Cmd) {
+	record, ok := m.selectedItemRecord()
+	if !ok || record.SecureNote != nil {
+		m.showPasswordHistory = false
+		return m, nil
+	}
+	history := record.Login.PasswordHistory
+	switch msg.String() {
+	case "q", "ctrl+c":
+		return m, tea.Quit
+	case "esc":
+		m.showPasswordHistory = false
+		m.revealHistory = false
+	case "v":
+		m.showPasswordHistory = false
+		m.showItem = false
+		m.revealHistory = false
+	case "j", "down":
+		if m.selectedHistory+1 < len(history) {
+			m.selectedHistory++
+			m.revealHistory = false
+		}
+	case "k", "up":
+		if m.selectedHistory > 0 {
+			m.selectedHistory--
+			m.revealHistory = false
+		}
+	case "p":
+		if m.selectedHistory < len(history) {
+			m.revealHistory = !m.revealHistory
+		}
+	}
+	return m, nil
+}
+
+func (m model) passwordHistoryView() string {
+	record, ok := m.selectedItemRecord()
+	if !ok || record.SecureNote != nil {
+		return "TermKeep — Password History\n\nLogin not found.\n\n[v] vault  [q] quit\n"
+	}
+	var b strings.Builder
+	fmt.Fprintf(
+		&b,
+		"TermKeep — Password History — %s\n\n",
+		record.Login.Name,
+	)
+	if len(record.Login.PasswordHistory) == 0 {
+		b.WriteString("Password history is empty.\n")
+	} else {
+		for index, entry := range record.Login.PasswordHistory {
+			cursor := " "
+			if index == m.selectedHistory {
+				cursor = ">"
+			}
+			password := "••••••••"
+			if index == m.selectedHistory && m.revealHistory {
+				password = entry.Password
+			}
+			fmt.Fprintf(
+				&b,
+				"%s %s — %s\n",
+				cursor,
+				entry.ChangedAt.UTC().Format(time.RFC3339),
+				password,
+			)
+		}
+	}
+	b.WriteString(
+		"\n[j/k] select  [p] reveal/hide selected  " +
+			"[esc] Login  [v] vault  [q] quit\n",
+	)
+	return b.String()
+}
+
 func (m model) itemView() string {
 	record, ok := m.selectedItemRecord()
 	if !ok {
@@ -2063,6 +2160,7 @@ func (m model) itemView() string {
 	}
 	b.WriteString(
 		"\n[p] reveal/hide password  [e] edit  " +
+			"[h] password history  " +
 			"[f] favorite/unfavorite  [o] move  [d] delete  " +
 			"[v] vault  [q] quit\n",
 	)

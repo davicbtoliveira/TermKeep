@@ -918,6 +918,77 @@ func TestEditLoginRotatesPasswordIntoEncryptedHistory(t *testing.T) {
 	}
 }
 
+func TestPasswordHistoryRequiresIntentionalOpenAndReveal(t *testing.T) {
+	firstChangedAt := time.Date(
+		2026, time.July, 28, 15, 0, 0, 0, time.UTC)
+	record := itemRecord{
+		Login: client.LoginItem{
+			ItemID:   "11111111-1111-4111-8111-111111111111",
+			Name:     "Production database",
+			Password: "Current-Password-Sentinel",
+			PasswordHistory: []client.PasswordHistoryEntry{
+				{
+					Password:  "Previous-Password-Sentinel",
+					ChangedAt: firstChangedAt,
+				},
+				{
+					Password:  "Oldest-Password-Sentinel",
+					ChangedAt: firstChangedAt.Add(-24 * time.Hour),
+				},
+			},
+		},
+		Revision: 2,
+	}
+	var current tea.Model = model{
+		loaded:    true,
+		vaultOpen: true,
+		itemStore: &fakeItemStore{},
+		items:     []itemRecord{record},
+		showItem:  true,
+	}
+	detail := current.(model).View()
+	if !strings.Contains(detail, "[h] password history") {
+		t.Fatalf("Login detail missing history action:\n%s", detail)
+	}
+	for _, hidden := range record.Login.PasswordHistory {
+		if strings.Contains(detail, hidden.Password) {
+			t.Fatalf("Login detail exposed historical password:\n%s", detail)
+		}
+	}
+
+	current, _ = current.Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
+	history := current.(model).View()
+	for _, want := range []string{
+		"Password History",
+		firstChangedAt.Format(time.RFC3339),
+		"••••••••",
+	} {
+		if !strings.Contains(history, want) {
+			t.Fatalf("history view missing %q:\n%s", want, history)
+		}
+	}
+	for _, hidden := range record.Login.PasswordHistory {
+		if strings.Contains(history, hidden.Password) {
+			t.Fatalf("masked history exposed %q:\n%s",
+				hidden.Password, history)
+		}
+	}
+
+	current, _ = current.Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	revealed := current.(model).View()
+	if !strings.Contains(
+		revealed,
+		record.Login.PasswordHistory[0].Password,
+	) || strings.Contains(
+		revealed,
+		record.Login.PasswordHistory[1].Password,
+	) {
+		t.Fatalf("history reveal scope differs:\n%s", revealed)
+	}
+}
+
 func TestDeleteLoginMovesItToTrash(t *testing.T) {
 	rootID := "22222222-2222-4222-8222-222222222222"
 	record := itemRecord{
