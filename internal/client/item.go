@@ -42,6 +42,19 @@ type SecureNoteItem struct {
 	Content string `json:"content"`
 }
 
+type NativeItemType string
+
+const (
+	NativeItemTypeLogin      NativeItemType = "login"
+	NativeItemTypeSecureNote NativeItemType = "secure_note"
+)
+
+type NativeItem struct {
+	Type       NativeItemType  `json:"type"`
+	Login      *LoginItem      `json:"login,omitempty"`
+	SecureNote *SecureNoteItem `json:"secure_note,omitempty"`
+}
+
 type EncryptedItem struct {
 	ItemID            string   `json:"item_id"`
 	SchemaVersion     int      `json:"schema_version"`
@@ -181,25 +194,14 @@ func DecryptLogin(
 	accountID string,
 	item EncryptedItem,
 ) (LoginItem, error) {
-	if len(vaultKey) != chacha20poly1305.KeySize ||
-		accountID == "" || item.ItemID == "" ||
-		item.SchemaVersion != loginItemSchemaVersion || item.Revision == 0 {
-		return LoginItem{}, ErrInvalidItemEnvelope
-	}
-	plaintext, err := decryptItem(vaultKey, accountID, item)
+	opened, err := DecryptNativeItem(vaultKey, accountID, item)
 	if err != nil {
 		return LoginItem{}, err
 	}
-	defer clearBytes(plaintext)
-	var decoded loginPlaintext
-	if err := json.Unmarshal(plaintext, &decoded); err != nil ||
-		decoded.Type != "login" ||
-		(decoded.Version != 0 &&
-			decoded.Version != itemPlaintextVersion) ||
-		decoded.ItemID != item.ItemID {
+	if opened.Type != NativeItemTypeLogin || opened.Login == nil {
 		return LoginItem{}, ErrInvalidItemEnvelope
 	}
-	return decoded.LoginItem, nil
+	return *opened.Login, nil
 }
 
 func DecryptSecureNote(
@@ -207,25 +209,68 @@ func DecryptSecureNote(
 	accountID string,
 	item EncryptedItem,
 ) (SecureNoteItem, error) {
-	if len(vaultKey) != chacha20poly1305.KeySize ||
-		accountID == "" || item.ItemID == "" ||
-		item.SchemaVersion != secureNoteItemSchemaVersion ||
-		item.Revision == 0 {
-		return SecureNoteItem{}, ErrInvalidItemEnvelope
-	}
-	plaintext, err := decryptItem(vaultKey, accountID, item)
+	opened, err := DecryptNativeItem(vaultKey, accountID, item)
 	if err != nil {
 		return SecureNoteItem{}, err
 	}
-	defer clearBytes(plaintext)
-	var decoded secureNotePlaintext
-	if err := json.Unmarshal(plaintext, &decoded); err != nil ||
-		decoded.Type != "secure_note" ||
-		decoded.Version != itemPlaintextVersion ||
-		decoded.ItemID != item.ItemID {
+	if opened.Type != NativeItemTypeSecureNote ||
+		opened.SecureNote == nil {
 		return SecureNoteItem{}, ErrInvalidItemEnvelope
 	}
-	return decoded.SecureNoteItem, nil
+	return *opened.SecureNote, nil
+}
+
+func DecryptNativeItem(
+	vaultKey []byte,
+	accountID string,
+	item EncryptedItem,
+) (NativeItem, error) {
+	if len(vaultKey) != chacha20poly1305.KeySize ||
+		accountID == "" || item.ItemID == "" ||
+		item.SchemaVersion < 1 || item.Revision == 0 {
+		return NativeItem{}, ErrInvalidItemEnvelope
+	}
+	plaintext, err := decryptItem(vaultKey, accountID, item)
+	if err != nil {
+		return NativeItem{}, err
+	}
+	defer clearBytes(plaintext)
+	var header struct {
+		Type    NativeItemType `json:"type"`
+		Version int            `json:"version"`
+	}
+	if err := json.Unmarshal(plaintext, &header); err != nil {
+		return NativeItem{}, ErrInvalidItemEnvelope
+	}
+	switch header.Type {
+	case NativeItemTypeLogin:
+		var decoded loginPlaintext
+		if item.SchemaVersion != loginItemSchemaVersion ||
+			json.Unmarshal(plaintext, &decoded) != nil ||
+			(decoded.Version != 0 &&
+				decoded.Version != itemPlaintextVersion) ||
+			decoded.ItemID != item.ItemID {
+			return NativeItem{}, ErrInvalidItemEnvelope
+		}
+		return NativeItem{
+			Type:  NativeItemTypeLogin,
+			Login: &decoded.LoginItem,
+		}, nil
+	case NativeItemTypeSecureNote:
+		var decoded secureNotePlaintext
+		if item.SchemaVersion != secureNoteItemSchemaVersion ||
+			json.Unmarshal(plaintext, &decoded) != nil ||
+			decoded.Version != itemPlaintextVersion ||
+			decoded.ItemID != item.ItemID {
+			return NativeItem{}, ErrInvalidItemEnvelope
+		}
+		return NativeItem{
+			Type:       NativeItemTypeSecureNote,
+			SecureNote: &decoded.SecureNoteItem,
+		}, nil
+	default:
+		return NativeItem{}, ErrInvalidItemEnvelope
+	}
 }
 
 func decryptItem(

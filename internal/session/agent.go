@@ -62,12 +62,13 @@ type request struct {
 }
 
 type response struct {
-	Info  *Info                  `json:"info,omitempty"`
-	Token []byte                 `json:"token,omitempty"`
-	Item  *client.EncryptedItem  `json:"item,omitempty"`
-	Login *client.LoginItem      `json:"login,omitempty"`
-	Note  *client.SecureNoteItem `json:"note,omitempty"`
-	Error string                 `json:"error,omitempty"`
+	Info   *Info                  `json:"info,omitempty"`
+	Token  []byte                 `json:"token,omitempty"`
+	Item   *client.EncryptedItem  `json:"item,omitempty"`
+	Native *client.NativeItem     `json:"native,omitempty"`
+	Login  *client.LoginItem      `json:"login,omitempty"`
+	Note   *client.SecureNoteItem `json:"note,omitempty"`
+	Error  string                 `json:"error,omitempty"`
 }
 
 // NewAgent binds a terminal session socket and takes an in-memory copy of the
@@ -253,6 +254,18 @@ func (a *Agent) handle(conn *net.UnixConn) {
 			return
 		}
 		_ = json.NewEncoder(conn).Encode(response{Note: &note})
+	case "open-native-item":
+		if req.Item == nil {
+			_ = json.NewEncoder(conn).Encode(response{Error: "item is required"})
+			return
+		}
+		item, err := client.DecryptNativeItem(
+			a.vaultKey, a.accountID, *req.Item)
+		if err != nil {
+			_ = json.NewEncoder(conn).Encode(response{Error: err.Error()})
+			return
+		}
+		_ = json.NewEncoder(conn).Encode(response{Native: &item})
 	default:
 		_ = json.NewEncoder(conn).Encode(response{Error: "unknown session action"})
 	}
@@ -448,6 +461,25 @@ func OpenSecureNote(
 			"session agent returned no Secure Note")
 	}
 	return *res.Note, nil
+}
+
+func OpenNativeItem(
+	ctx context.Context,
+	socketPath string,
+	item client.EncryptedItem,
+) (client.NativeItem, error) {
+	res, err := requestAgent(ctx, socketPath, request{
+		Action: "open-native-item",
+		Item:   &item,
+	})
+	if err != nil {
+		return client.NativeItem{}, err
+	}
+	if res.Native == nil {
+		return client.NativeItem{}, errors.New(
+			"session agent returned no native Item")
+	}
+	return *res.Native, nil
 }
 
 func requestAgent(ctx context.Context, socketPath string, req request) (response, error) {

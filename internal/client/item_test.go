@@ -129,6 +129,32 @@ func TestEncryptedItemTypeCannotBeOpenedAsAnotherNativeType(t *testing.T) {
 	}
 }
 
+func TestDecryptNativeItemReportsEncryptedType(t *testing.T) {
+	vaultKey := bytes.Repeat([]byte{0x42}, 32)
+	accountID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	note := SecureNoteItem{
+		ItemID:  "11111111-1111-4111-8111-111111111111",
+		Title:   "Recovery procedure",
+		Content: "Sensitive content",
+	}
+	encrypted, err := EncryptSecureNote(
+		vaultKey, accountID, note, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	opened, err := DecryptNativeItem(vaultKey, accountID, encrypted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opened.Type != NativeItemTypeSecureNote ||
+		opened.SecureNote == nil ||
+		opened.Login != nil ||
+		!reflect.DeepEqual(*opened.SecureNote, note) {
+		t.Fatalf("native Item type/content: %+v", opened)
+	}
+}
+
 func TestEncryptedLoginUsesRandomNonce(t *testing.T) {
 	vaultKey := bytes.Repeat([]byte{0x42}, 32)
 	login := LoginItem{

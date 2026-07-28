@@ -201,6 +201,16 @@ func TestAgentSealsAndOpensSecureNoteWithoutExposingVaultKey(t *testing.T) {
 		t.Fatalf("opened Note differs:\nwant: %+v\ngot:  %+v",
 			note, opened)
 	}
+	native, err := session.OpenNativeItem(ctx, socketPath, encrypted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if native.Type != client.NativeItemTypeSecureNote ||
+		native.SecureNote == nil ||
+		native.Login != nil ||
+		!reflect.DeepEqual(*native.SecureNote, note) {
+		t.Fatalf("opened native Item differs: %+v", native)
+	}
 }
 
 func TestAgentSocketIsOwnerOnly(t *testing.T) {
