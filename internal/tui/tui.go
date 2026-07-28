@@ -28,6 +28,7 @@ type activityErrMsg error
 type itemRecord struct {
 	Login             client.LoginItem
 	SecureNote        *client.SecureNoteItem
+	Folder            *client.FolderItem
 	Revision          uint64
 	RevisionID        string
 	ParentRevisionIDs []string
@@ -71,6 +72,8 @@ type loginForm struct {
 	itemID            string
 	revision          uint64
 	parentRevisionIDs []string
+	folderID          string
+	favorite          bool
 	field             int
 	values            [loginFormFieldCount]string
 	editing           bool
@@ -81,6 +84,8 @@ type secureNoteForm struct {
 	itemID            string
 	revision          uint64
 	parentRevisionIDs []string
+	folderID          string
+	favorite          bool
 	field             int
 	values            [secureNoteFormFieldCount]string
 	editing           bool
@@ -404,6 +409,12 @@ func (s cachedItemStore) openItemGroups(
 				}
 				note := *opened.SecureNote
 				record.SecureNote = &note
+			case client.NativeItemTypeFolder:
+				if opened.Folder == nil {
+					return nil, client.ErrInvalidItemEnvelope
+				}
+				folder := *opened.Folder
+				record.Folder = &folder
 			default:
 				return nil, client.ErrInvalidItemEnvelope
 			}
@@ -429,7 +440,10 @@ func (s cachedItemStore) Save(ctx context.Context, record itemRecord) error {
 		item client.EncryptedItem
 		err  error
 	)
-	if record.SecureNote != nil {
+	if record.Folder != nil {
+		item, err = session.SealFolder(
+			ctx, s.socketPath, *record.Folder, record.Revision)
+	} else if record.SecureNote != nil {
 		item, err = session.SealSecureNote(
 			ctx, s.socketPath, *record.SecureNote, record.Revision)
 	} else {
@@ -980,9 +994,11 @@ func recordFromSecureNoteForm(
 	}
 	return itemRecord{
 		SecureNote: &client.SecureNoteItem{
-			ItemID:  form.itemID,
-			Title:   title,
-			Content: form.values[1],
+			ItemID:   form.itemID,
+			Title:    title,
+			Content:  form.values[1],
+			FolderID: form.folderID,
+			Favorite: form.favorite,
 		},
 		Revision: form.revision,
 		ParentRevisionIDs: append(
@@ -1099,6 +1115,8 @@ func recordFromLoginForm(form loginForm) (itemRecord, error) {
 			Name:         name,
 			Username:     strings.TrimSpace(form.values[1]),
 			Password:     form.values[2],
+			FolderID:     form.folderID,
+			Favorite:     form.favorite,
 			URLs:         urls,
 			Notes:        form.values[4],
 			CustomFields: customFields,
@@ -1122,6 +1140,8 @@ func formForLogin(record itemRecord) loginForm {
 		itemID:            record.Login.ItemID,
 		revision:          record.Revision + 1,
 		parentRevisionIDs: parentRevisionIDs,
+		folderID:          record.Login.FolderID,
+		favorite:          record.Login.Favorite,
 		editing:           true,
 		values: [loginFormFieldCount]string{
 			record.Login.Name,
@@ -1143,6 +1163,8 @@ func formForSecureNote(record itemRecord) secureNoteForm {
 		itemID:            record.SecureNote.ItemID,
 		revision:          record.Revision + 1,
 		parentRevisionIDs: parentRevisionIDs,
+		folderID:          record.SecureNote.FolderID,
+		favorite:          record.SecureNote.Favorite,
 		editing:           true,
 		values: [secureNoteFormFieldCount]string{
 			record.SecureNote.Title,
@@ -1357,6 +1379,9 @@ func (m model) itemView() string {
 }
 
 func recordTitle(record itemRecord) string {
+	if record.Folder != nil {
+		return record.Folder.Name
+	}
 	if record.SecureNote != nil {
 		return record.SecureNote.Title
 	}
@@ -1364,6 +1389,9 @@ func recordTitle(record itemRecord) string {
 }
 
 func recordItemID(record itemRecord) string {
+	if record.Folder != nil {
+		return record.Folder.ItemID
+	}
 	if record.SecureNote != nil {
 		return record.SecureNote.ItemID
 	}

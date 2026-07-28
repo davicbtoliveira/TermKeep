@@ -353,12 +353,15 @@ func TestCachedItemStoreSavesListsAndEditsOffline(t *testing.T) {
 	})
 
 	store := cachedItemStore{cache: cache, socketPath: socketPath}
+	folderID := "33333333-3333-4333-8333-333333333333"
 	want := itemRecord{
 		Login: client.LoginItem{
 			ItemID:   "11111111-1111-4111-8111-111111111111",
 			Name:     "Offline account",
 			Username: "user@example.com",
 			Password: "Password-Sentinel",
+			FolderID: folderID,
+			Favorite: true,
 		},
 		Revision: 1,
 	}
@@ -367,20 +370,31 @@ func TestCachedItemStoreSavesListsAndEditsOffline(t *testing.T) {
 	}
 	wantNote := itemRecord{
 		SecureNote: &client.SecureNoteItem{
-			ItemID:  "22222222-2222-4222-8222-222222222222",
-			Title:   "Offline recovery procedure",
-			Content: "Sensitive-Note-Content-Sentinel",
+			ItemID:   "22222222-2222-4222-8222-222222222222",
+			Title:    "Offline recovery procedure",
+			Content:  "Sensitive-Note-Content-Sentinel",
+			FolderID: folderID,
 		},
 		Revision: 1,
 	}
 	if err := store.Save(ctx, wantNote); err != nil {
 		t.Fatal(err)
 	}
+	wantFolder := itemRecord{
+		Folder: &client.FolderItem{
+			ItemID: folderID,
+			Name:   "Production infrastructure",
+		},
+		Revision: 1,
+	}
+	if err := store.Save(ctx, wantFolder); err != nil {
+		t.Fatal(err)
+	}
 	got, err := store.List(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 2 ||
+	if len(got) != 3 ||
 		!reflect.DeepEqual(got[0].Login, want.Login) ||
 		got[0].Revision != want.Revision ||
 		got[0].RevisionID == "" ||
@@ -393,6 +407,13 @@ func TestCachedItemStoreSavesListsAndEditsOffline(t *testing.T) {
 		got[1].RevisionID == "" ||
 		len(got[1].ParentRevisionIDs) != 0 {
 		t.Fatalf("offline Secure Note differs: %+v", got)
+	}
+	if got[2].Folder == nil ||
+		!reflect.DeepEqual(*got[2].Folder, *wantFolder.Folder) ||
+		got[2].Revision != wantFolder.Revision ||
+		got[2].RevisionID == "" ||
+		len(got[2].ParentRevisionIDs) != 0 {
+		t.Fatalf("offline Folder differs: %+v", got)
 	}
 
 	edited := got[1]
@@ -409,7 +430,7 @@ func TestCachedItemStoreSavesListsAndEditsOffline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 2 ||
+	if len(got) != 3 ||
 		got[1].SecureNote == nil ||
 		got[1].SecureNote.Content != note.Content ||
 		got[1].Revision != 2 ||
@@ -420,9 +441,9 @@ func TestCachedItemStoreSavesListsAndEditsOffline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshot.Mutations) != 3 ||
-		snapshot.Mutations[2].BaseRevision != 1 ||
-		snapshot.Mutations[2].Item.ItemID != note.ItemID {
+	if len(snapshot.Mutations) != 4 ||
+		snapshot.Mutations[3].BaseRevision != 1 ||
+		snapshot.Mutations[3].Item.ItemID != note.ItemID {
 		t.Fatalf("offline Secure Note mutation queue: %+v", snapshot)
 	}
 }
@@ -704,9 +725,11 @@ func TestEditSecureNotePreservesItemAndIncrementsRevision(t *testing.T) {
 	revisionID := "22222222-2222-4222-8222-222222222222"
 	record := itemRecord{
 		SecureNote: &client.SecureNoteItem{
-			ItemID:  "11111111-1111-4111-8111-111111111111",
-			Title:   "Old procedure",
-			Content: "Old sensitive content",
+			ItemID:   "11111111-1111-4111-8111-111111111111",
+			Title:    "Old procedure",
+			Content:  "Old sensitive content",
+			FolderID: "33333333-3333-4333-8333-333333333333",
+			Favorite: true,
 		},
 		Revision:   1,
 		RevisionID: revisionID,
@@ -747,6 +770,8 @@ func TestEditSecureNotePreservesItemAndIncrementsRevision(t *testing.T) {
 	if got.SecureNote.ItemID != record.SecureNote.ItemID ||
 		got.SecureNote.Title != "New procedure" ||
 		got.SecureNote.Content != "New sensitive content" ||
+		got.SecureNote.FolderID != record.SecureNote.FolderID ||
+		got.SecureNote.Favorite != record.SecureNote.Favorite ||
 		got.Revision != 2 ||
 		!reflect.DeepEqual(
 			got.ParentRevisionIDs, []string{revisionID},
@@ -762,6 +787,8 @@ func TestEditLoginPreservesFieldsAndIncrementsRevision(t *testing.T) {
 			Name:     "Old name",
 			Username: "operator@example.com",
 			Password: "Password-Sentinel",
+			FolderID: "33333333-3333-4333-8333-333333333333",
+			Favorite: true,
 			URLs:     []string{"https://db.example.com"},
 			Notes:    "Primary credentials",
 			CustomFields: []client.CustomField{
@@ -805,6 +832,8 @@ func TestEditLoginPreservesFieldsAndIncrementsRevision(t *testing.T) {
 	if got.Login.Name != "New name" ||
 		got.Login.Username != "operator@example.com" ||
 		got.Login.Password != "Password-Sentinel" ||
+		got.Login.FolderID != "33333333-3333-4333-8333-333333333333" ||
+		!got.Login.Favorite ||
 		!reflect.DeepEqual(got.Login.URLs, []string{"https://db.example.com"}) ||
 		got.Login.Notes != "Primary credentials" ||
 		!reflect.DeepEqual(got.Login.CustomFields, []client.CustomField{
