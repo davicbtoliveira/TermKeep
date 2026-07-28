@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -121,5 +122,28 @@ func TestCheckStatusRejectsPlainHTTPOutsideLocalhost(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("want insecure-scheme error, got nil")
+	}
+}
+
+func TestConnectivityStatesHaveDistinctOperatorLabels(t *testing.T) {
+	tests := []struct {
+		state State
+		want  string
+	}{
+		{state: StateClientOffline, want: "Status:   Client offline"},
+		{state: StateServerUnavailable, want: "Status:   Server unavailable"},
+		{state: StateTLSError, want: "Status:   TLS validation failed"},
+		{state: StateConnectionUnavailable, want: "Status:   Connection unavailable"},
+	}
+	for _, test := range tests {
+		t.Run(test.want, func(t *testing.T) {
+			lines := strings.Join(Lines("https://vault.example.com", Status{
+				State:  test.state,
+				Detail: "classified detail",
+			}), "\n")
+			if !strings.Contains(lines, test.want) {
+				t.Fatalf("connection label missing:\n%s", lines)
+			}
+		})
 	}
 }

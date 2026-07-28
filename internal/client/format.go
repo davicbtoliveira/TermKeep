@@ -19,14 +19,19 @@ func Lines(serverURL string, st Status) []string {
 			"Status:   TLS validation failed",
 			"Detail:   "+st.Detail,
 		)
-	case StateUnreachable:
+	case StateClientOffline:
 		lines = append(lines,
-			"Status:   unavailable (unreachable)",
+			"Status:   Client offline",
 			"Detail:   "+st.Detail,
 		)
-	case StateUnavailable:
+	case StateServerUnavailable:
 		lines = append(lines,
-			"Status:   unavailable (instance unhealthy)",
+			"Status:   Server unavailable",
+			"Detail:   "+st.Detail,
+		)
+	case StateConnectionUnavailable:
+		lines = append(lines,
+			"Status:   Connection unavailable",
 			"Detail:   "+st.Detail,
 		)
 	}

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -13,6 +15,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/davicbtoliveira/TermKeep/internal/client"
+	"github.com/davicbtoliveira/TermKeep/internal/session"
 )
 
 func TestActiveSessionsScreenShowsSessionMetadata(t *testing.T) {
@@ -257,6 +260,81 @@ func TestUnlockedVaultListsLoginsWithoutPasswords(t *testing.T) {
 	}
 }
 
+func TestOfflineVaultAdvertisesLoginEditing(t *testing.T) {
+	view := model{
+		loaded:     true,
+		vaultOpen:  true,
+		loginStore: &fakeLoginStore{},
+	}.View()
+	if !strings.Contains(view, "[c] new Login") {
+		t.Fatalf("offline Vault hides Login editing:\n%s", view)
+	}
+}
+
+func TestCachedLoginStoreSavesAndListsOffline(t *testing.T) {
+	accountID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	password := []byte("TermKeep#2026")
+	vault, err := client.NewVault(password, accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vault.Clear()
+	cfg := client.Config{DataDir: filepath.Join(t.TempDir(), "cache")}
+	if err := client.AuthorizeCache(
+		cfg,
+		"user@example.com",
+		accountID,
+		vault.PasswordEnvelope,
+	); err != nil {
+		t.Fatal(err)
+	}
+	cache, err := client.OpenCache(cfg, "user@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	socketPath := filepath.Join(t.TempDir(), "agent.sock")
+	agent, err := session.NewAgent(session.AgentConfig{
+		SocketPath: socketPath,
+		OwnerUID:   uint32(os.Getuid()),
+		AccountID:  accountID,
+		VaultKey:   vault.Key,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- agent.Serve(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		_ = agent.Close()
+		if err := <-done; err != nil {
+			t.Errorf("serve agent: %v", err)
+		}
+	})
+
+	store := cachedLoginStore{cache: cache, socketPath: socketPath}
+	want := loginRecord{
+		Login: client.LoginItem{
+			ItemID:   "11111111-1111-4111-8111-111111111111",
+			Name:     "Offline account",
+			Username: "user@example.com",
+			Password: "Password-Sentinel",
+		},
+		Revision: 1,
+	}
+	if err := store.Save(ctx, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || !reflect.DeepEqual(got[0], want) {
+		t.Fatalf("offline Login differs: %+v", got)
+	}
+}
+
 func TestLoginDetailShowsFieldsWithMaskedPassword(t *testing.T) {
 	initial := model{
 		loaded:    true,
@@ -344,6 +422,98 @@ func TestVaultRefreshLoadsDecryptedLogins(t *testing.T) {
 	view := updated.(model).View()
 	if !strings.Contains(view, "Mail account") {
 		t.Fatalf("refreshed Vault missing Login:\n%s", view)
+	}
+}
+
+func TestManualSyncReloadsVault(t *testing.T) {
+	store := &fakeSyncLoginStore{fakeLoginStore: fakeLoginStore{
+		records: []loginRecord{{
+			Login: client.LoginItem{
+				ItemID: "11111111-1111-4111-8111-111111111111",
+				Name:   "Synchronized account",
+			},
+			Revision: 1,
+		}},
+	}}
+	initial := model{
+		loaded:      true,
+		vaultOpen:   true,
+		accessToken: "access-token",
+		loginStore:  store,
+	}
+	updated, command := initial.Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if command == nil {
+		t.Fatal("manual sync key returned no command")
+	}
+	updated, _ = updated.(model).Update(command())
+	if store.syncCalls != 1 {
+		t.Fatalf("manual sync calls: want 1, got %d", store.syncCalls)
+	}
+	view := updated.(model).View()
+	if !strings.Contains(view, "Synchronized account") ||
+		!strings.Contains(view, "Sync:     up to date") {
+		t.Fatalf("manual sync result missing:\n%s", view)
+	}
+}
+
+func TestUnlockedVaultSynchronizesOnInit(t *testing.T) {
+	previous := periodicSyncInterval
+	periodicSyncInterval = time.Millisecond
+	t.Cleanup(func() { periodicSyncInterval = previous })
+	store := &fakeSyncLoginStore{}
+	command := model{
+		cfg: client.Config{
+			ServerURL: "http://127.0.0.1:1",
+			Timeout:   10 * time.Millisecond,
+		},
+		vaultOpen:   true,
+		accessToken: "access-token",
+		loginStore:  store,
+	}.Init()
+	if command == nil {
+		t.Fatal("unlocked Vault returned no init command")
+	}
+	batch, ok := command().(tea.BatchMsg)
+	if !ok {
+		t.Fatal("unlocked Vault init did not batch commands")
+	}
+	for _, batched := range batch {
+		if batched != nil {
+			_ = batched()
+		}
+	}
+	if store.syncCalls != 1 {
+		t.Fatalf("unlock sync calls: want 1, got %d", store.syncCalls)
+	}
+}
+
+func TestPeriodicSyncWhileVaultIsOpen(t *testing.T) {
+	previous := periodicSyncInterval
+	periodicSyncInterval = time.Millisecond
+	t.Cleanup(func() { periodicSyncInterval = previous })
+	store := &fakeSyncLoginStore{}
+	initial := model{
+		loaded:      true,
+		vaultOpen:   true,
+		accessToken: "access-token",
+		loginStore:  store,
+	}
+	_, command := initial.Update(periodicSyncMsg{})
+	if command == nil {
+		t.Fatal("periodic tick returned no command")
+	}
+	batch, ok := command().(tea.BatchMsg)
+	if !ok {
+		t.Fatal("periodic tick did not batch sync and next tick")
+	}
+	for _, batched := range batch {
+		if batched != nil {
+			_ = batched()
+		}
+	}
+	if store.syncCalls != 1 {
+		t.Fatalf("periodic sync calls: want 1, got %d", store.syncCalls)
 	}
 }
 
@@ -484,10 +654,64 @@ func TestLoginFormIgnoresDuplicateSaveWhileSaving(t *testing.T) {
 	}
 }
 
+func TestOnlineLoginSaveSynchronizesAfterLocalCommit(t *testing.T) {
+	store := &fakeSyncLoginStore{}
+	initial := model{
+		loaded:        true,
+		vaultOpen:     true,
+		accessToken:   "access-token",
+		loginStore:    store,
+		showLoginForm: true,
+		loginForm: loginForm{
+			itemID:   "11111111-1111-4111-8111-111111111111",
+			revision: 1,
+			field:    loginFormFieldCount - 1,
+			values: [loginFormFieldCount]string{
+				"Production database",
+			},
+		},
+	}
+	updated, command := initial.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if command == nil {
+		t.Fatal("Login save returned no command")
+	}
+	updated, _ = updated.(model).Update(command())
+	if len(store.saved) != 1 || store.syncCalls != 1 {
+		t.Fatalf(
+			"save/sync calls: saved=%d sync=%d",
+			len(store.saved),
+			store.syncCalls,
+		)
+	}
+	if updated.(model).showLoginForm {
+		t.Fatal("successful local save left form open")
+	}
+}
+
 type fakeLoginStore struct {
 	records []loginRecord
 	saved   []loginRecord
 	err     error
+}
+
+type fakeSyncLoginStore struct {
+	fakeLoginStore
+	syncCalls int
+	syncErr   error
+	pending   int
+}
+
+func (s *fakeSyncLoginStore) Sync(context.Context) error {
+	s.syncCalls++
+	return s.syncErr
+}
+
+func (s *fakeSyncLoginStore) Pending() (int, error) {
+	return s.pending, nil
+}
+
+func (s *fakeSyncLoginStore) CanSync() bool {
+	return true
 }
 
 func (s *fakeLoginStore) List(context.Context) ([]loginRecord, error) {

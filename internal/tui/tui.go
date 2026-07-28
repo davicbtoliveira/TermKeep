@@ -4,6 +4,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -31,6 +32,19 @@ type loginRecord struct {
 type loginsMsg []loginRecord
 type loginsErrMsg error
 type loginSaveErrMsg error
+type loginSavedMsg struct {
+	logins  []loginRecord
+	pending int
+	syncErr error
+}
+type syncResultMsg struct {
+	logins  []loginRecord
+	pending int
+	err     error
+}
+type periodicSyncMsg struct{}
+
+var periodicSyncInterval = 30 * time.Second
 
 const loginFormFieldCount = 6
 
@@ -56,41 +70,51 @@ type loginStore interface {
 	Save(ctx context.Context, record loginRecord) error
 }
 
-type remoteLoginStore struct {
+type syncLoginStore interface {
+	Sync(ctx context.Context) error
+	Pending() (int, error)
+	CanSync() bool
+}
+
+type cachedLoginStore struct {
 	cfg         client.Config
 	accessToken string
 	socketPath  string
+	cache       *client.Cache
 }
 
 // model is the single-screen state: the shared status lines plus keys.
 type model struct {
-	cfg             client.Config
-	lines           []string
-	err             error
-	loaded          bool
-	vaultOpen       bool
-	accessToken     string
-	showSessions    bool
-	sessionsLoading bool
-	sessions        []client.OnlineSession
-	selectedSession int
-	sessionsErr     error
-	showActivity    bool
-	activityAll     bool
-	activityLoading bool
-	activityPage    client.ActivityPage
-	activityErr     error
-	loginsLoading   bool
-	logins          []loginRecord
-	selectedLogin   int
-	loginsErr       error
-	showLogin       bool
-	revealPassword  bool
-	loginStore      loginStore
-	showLoginForm   bool
-	loginForm       loginForm
-	loginFormErr    error
-	loginSaving     bool
+	cfg              client.Config
+	lines            []string
+	err              error
+	loaded           bool
+	vaultOpen        bool
+	accessToken      string
+	showSessions     bool
+	sessionsLoading  bool
+	sessions         []client.OnlineSession
+	selectedSession  int
+	sessionsErr      error
+	showActivity     bool
+	activityAll      bool
+	activityLoading  bool
+	activityPage     client.ActivityPage
+	activityErr      error
+	loginsLoading    bool
+	logins           []loginRecord
+	selectedLogin    int
+	loginsErr        error
+	showLogin        bool
+	revealPassword   bool
+	loginStore       loginStore
+	showLoginForm    bool
+	loginForm        loginForm
+	loginFormErr     error
+	loginSaving      bool
+	syncLoading      bool
+	syncErr          error
+	pendingMutations int
 }
 
 // Run starts the Bubble Tea program on the controlling terminal.
@@ -105,11 +129,22 @@ func Run(cfg client.Config) error {
 // stays with the caller; this package receives no secret material.
 func RunVault(cfg client.Config, accessToken, socketPath string) error {
 	m := model{cfg: cfg, vaultOpen: true, accessToken: accessToken}
-	if accessToken != "" && socketPath != "" {
-		m.loginStore = remoteLoginStore{
+	if socketPath != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		info, err := session.Status(ctx, socketPath)
+		cancel()
+		if err != nil {
+			return err
+		}
+		cache, err := client.OpenCache(cfg, info.Email)
+		if err != nil {
+			return err
+		}
+		m.loginStore = cachedLoginStore{
 			cfg:         cfg,
 			accessToken: accessToken,
 			socketPath:  socketPath,
+			cache:       cache,
 		}
 		m.loginsLoading = true
 	}
@@ -120,9 +155,23 @@ func RunVault(cfg client.Config, accessToken, socketPath string) error {
 
 func (m model) Init() tea.Cmd {
 	if m.loginStore != nil {
+		if m.accessToken != "" {
+			return tea.Batch(
+				checkStatus(m.cfg),
+				loadLogins(m.loginStore),
+				syncLogins(m.loginStore),
+				schedulePeriodicSync(),
+			)
+		}
 		return tea.Batch(checkStatus(m.cfg), loadLogins(m.loginStore))
 	}
 	return checkStatus(m.cfg)
+}
+
+func schedulePeriodicSync() tea.Cmd {
+	return tea.Tick(periodicSyncInterval, func(time.Time) tea.Msg {
+		return periodicSyncMsg{}
+	})
 }
 
 // checkStatus performs the one-shot instance query off the UI goroutine.
@@ -185,16 +234,59 @@ func saveLogin(store loginStore, record loginRecord) tea.Cmd {
 		if err := store.Save(ctx, record); err != nil {
 			return loginSaveErrMsg(err)
 		}
+		var (
+			syncErr error
+			pending int
+		)
+		if syncStore, ok := store.(syncLoginStore); ok {
+			if syncStore.CanSync() {
+				syncErr = syncStore.Sync(ctx)
+			}
+			var pendingErr error
+			pending, pendingErr = syncStore.Pending()
+			if syncErr == nil {
+				syncErr = pendingErr
+			}
+		}
 		logins, err := store.List(ctx)
 		if err != nil {
 			return loginSaveErrMsg(err)
 		}
-		return loginsMsg(logins)
+		return loginSavedMsg{
+			logins:  logins,
+			pending: pending,
+			syncErr: syncErr,
+		}
 	}
 }
 
-func (s remoteLoginStore) List(ctx context.Context) ([]loginRecord, error) {
-	encrypted, err := client.ListItems(ctx, s.cfg, s.accessToken)
+func syncLogins(store loginStore) tea.Cmd {
+	return func() tea.Msg {
+		syncStore, ok := store.(syncLoginStore)
+		if !ok {
+			return syncResultMsg{err: errors.New("synchronization unavailable")}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		syncErr := syncStore.Sync(ctx)
+		logins, listErr := store.List(ctx)
+		if listErr != nil {
+			return syncResultMsg{err: listErr}
+		}
+		pending, pendingErr := syncStore.Pending()
+		if pendingErr != nil {
+			return syncResultMsg{err: pendingErr}
+		}
+		return syncResultMsg{
+			logins:  logins,
+			pending: pending,
+			err:     syncErr,
+		}
+	}
+}
+
+func (s cachedLoginStore) List(ctx context.Context) ([]loginRecord, error) {
+	encrypted, err := s.cache.Items()
 	if err != nil {
 		return nil, err
 	}
@@ -212,17 +304,48 @@ func (s remoteLoginStore) List(ctx context.Context) ([]loginRecord, error) {
 	return logins, nil
 }
 
-func (s remoteLoginStore) Save(ctx context.Context, record loginRecord) error {
+func (s cachedLoginStore) Save(ctx context.Context, record loginRecord) error {
 	item, err := session.SealLogin(
 		ctx, s.socketPath, record.Login, record.Revision)
 	if err != nil {
 		return err
 	}
-	return client.PutItem(ctx, s.cfg, s.accessToken, item)
+	_, err = s.cache.QueueMutation(item, record.Revision-1)
+	return err
+}
+
+func (s cachedLoginStore) Sync(ctx context.Context) error {
+	if s.accessToken == "" {
+		return errors.New("online authentication required")
+	}
+	return client.SyncCache(ctx, s.cfg, s.accessToken, s.cache)
+}
+
+func (s cachedLoginStore) Pending() (int, error) {
+	snapshot, err := s.cache.SyncSnapshot()
+	if err != nil {
+		return 0, err
+	}
+	return len(snapshot.Mutations), nil
+}
+
+func (s cachedLoginStore) CanSync() bool {
+	return s.accessToken != ""
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case periodicSyncMsg:
+		if m.vaultOpen && m.loginStore != nil &&
+			m.accessToken != "" && !m.syncLoading {
+			m.syncLoading = true
+			return m, tea.Batch(
+				syncLogins(m.loginStore),
+				checkStatus(m.cfg),
+				schedulePeriodicSync(),
+			)
+		}
+		return m, schedulePeriodicSync()
 	case tea.KeyMsg:
 		if m.showLoginForm {
 			return m.updateLoginForm(msg)
@@ -349,6 +472,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.loaded = false
 			return m, checkStatus(m.cfg)
+		case "y":
+			if m.vaultOpen && m.loginStore != nil &&
+				m.accessToken != "" && !m.syncLoading {
+				m.syncLoading = true
+				m.syncErr = nil
+				return m, syncLogins(m.loginStore)
+			}
 		}
 	case statusMsg:
 		m.loaded = true
@@ -391,6 +521,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case loginSaveErrMsg:
 		m.loginFormErr = msg
 		m.loginSaving = false
+	case loginSavedMsg:
+		m.logins = msg.logins
+		m.showLoginForm = false
+		m.loginFormErr = nil
+		m.loginSaving = false
+		m.syncErr = msg.syncErr
+		m.pendingMutations = msg.pending
+		if m.selectedLogin >= len(m.logins) {
+			m.selectedLogin = 0
+		}
+		if msg.syncErr != nil {
+			return m, checkStatus(m.cfg)
+		}
+	case syncResultMsg:
+		m.syncLoading = false
+		m.syncErr = msg.err
+		m.pendingMutations = msg.pending
+		m.logins = msg.logins
+		if m.selectedLogin >= len(m.logins) {
+			m.selectedLogin = 0
+		}
+		if msg.err != nil {
+			return m, checkStatus(m.cfg)
+		}
 	}
 	return m, nil
 }
@@ -439,9 +593,26 @@ func (m model) View() string {
 					cursor, record.Login.Name, record.Login.Username)
 			}
 		}
+		switch {
+		case m.syncLoading:
+			b.WriteString("Sync:     syncing…\n")
+		case m.syncErr != nil:
+			b.WriteString("Sync:     error — " + m.syncErr.Error() + "\n")
+		case m.pendingMutations > 0:
+			fmt.Fprintf(&b, "Sync:     %d pending\n", m.pendingMutations)
+		case m.accessToken != "":
+			b.WriteString("Sync:     up to date\n")
+		default:
+			b.WriteString("Sync:     offline\n")
+		}
 	}
-	if m.vaultOpen && m.accessToken != "" {
-		b.WriteString("\n[c] new Login  [enter] open  [a] Activity  [s] Active Sessions  [r] refresh  [q] quit\n")
+	if m.vaultOpen && m.loginStore != nil {
+		b.WriteString("\n[c] new Login  [enter] open  ")
+		if m.accessToken != "" {
+			b.WriteString("[a] Activity  [s] Active Sessions  ")
+			b.WriteString("[y] sync  ")
+		}
+		b.WriteString("[r] refresh  [q] quit\n")
 	} else {
 		b.WriteString("\n[r] refresh  [q] quit\n")
 	}

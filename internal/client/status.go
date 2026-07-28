@@ -14,6 +14,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"syscall"
 	"time"
 )
 
@@ -23,23 +24,31 @@ import (
 type State int
 
 const (
-	StateHealthy     State = iota // instance answered 200 with a valid status body
-	StateTLSError                 // certificate or handshake validation failed
-	StateUnreachable              // DNS, routing, refusal, or timeout
-	StateUnavailable              // reachable, but the instance reported unhealth
+	StateHealthy State = iota
+	StateClientOffline
+	StateServerUnavailable
+	StateTLSError
+	StateConnectionUnavailable
 )
+
+// Compatibility aliases for callers built against the earlier coarse
+// taxonomy.
+const StateUnreachable = StateConnectionUnavailable
+const StateUnavailable = StateServerUnavailable
 
 // String renders the state for CLI and TUI output.
 func (s State) String() string {
 	switch s {
 	case StateHealthy:
 		return "healthy"
+	case StateClientOffline:
+		return "client-offline"
+	case StateServerUnavailable:
+		return "server-unavailable"
 	case StateTLSError:
 		return "tls-error"
-	case StateUnreachable:
-		return "unreachable"
-	case StateUnavailable:
-		return "unavailable"
+	case StateConnectionUnavailable:
+		return "connection-unavailable"
 	default:
 		return "unknown"
 	}
@@ -101,7 +110,7 @@ func CheckStatus(ctx context.Context, cfg Config) (Status, error) {
 
 	if resp.StatusCode != http.StatusOK {
 		return Status{
-			State:  StateUnavailable,
+			State:  StateServerUnavailable,
 			Detail: fmt.Sprintf("instance answered HTTP %d", resp.StatusCode),
 		}, nil
 	}
@@ -109,7 +118,7 @@ func CheckStatus(ctx context.Context, cfg Config) (Status, error) {
 	var body statusBody
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil || body.Status != "ok" {
 		return Status{
-			State:  StateUnavailable,
+			State:  StateServerUnavailable,
 			Detail: "instance returned a malformed status body",
 		}, nil
 	}
@@ -177,6 +186,7 @@ func classifyError(err error) Status {
 	var certInvalid x509.CertificateInvalidError
 	var recordErr tls.RecordHeaderError
 	var dnsErr *net.DNSError
+	var operationErr *net.OpError
 
 	switch {
 	case errors.As(err, &unknownAuthority),
@@ -188,10 +198,24 @@ func classifyError(err error) Status {
 			Detail: "TLS validation failed — treat this as a security error, not as offline mode",
 		}
 	case errors.As(err, &dnsErr):
-		return Status{State: StateUnreachable, Detail: "name resolution failed: " + dnsErr.Err}
+		return Status{
+			State:  StateClientOffline,
+			Detail: "name resolution failed: " + dnsErr.Err,
+		}
+	case errors.As(err, &operationErr) &&
+		(errors.Is(operationErr, syscall.ENETUNREACH) ||
+			errors.Is(operationErr, syscall.EHOSTUNREACH) ||
+			errors.Is(operationErr, syscall.ENETDOWN)):
+		return Status{
+			State:  StateClientOffline,
+			Detail: "local network is unavailable: " + operationErr.Error(),
+		}
 	case errors.Is(err, context.DeadlineExceeded) || os.IsTimeout(err):
-		return Status{State: StateUnreachable, Detail: "connection timed out"}
+		return Status{
+			State:  StateConnectionUnavailable,
+			Detail: "connection timed out",
+		}
 	default:
-		return Status{State: StateUnreachable, Detail: err.Error()}
+		return Status{State: StateConnectionUnavailable, Detail: err.Error()}
 	}
 }

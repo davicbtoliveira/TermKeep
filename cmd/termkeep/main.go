@@ -56,12 +56,14 @@ func run(args []string) int {
 		return runLogin(cfg, fs.Args()[1:])
 	case "logout":
 		return runLogout(fs.Args()[1:])
+	case "sync":
+		return runSync(cfg, fs.Args()[1:])
 	case "__session-agent":
 		return runSessionAgent(fs.Args()[1:])
 	case "":
 		return runTUI(cfg)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n\nusage: termkeep [--server URL] [--ca-cert FILE] [status|bootstrap|register|login|logout]\n", fs.Arg(0))
+		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n\nusage: termkeep [--server URL] [--ca-cert FILE] [status|bootstrap|register|login|logout|sync]\n", fs.Arg(0))
 		return exitUsageFailure
 	}
 }
@@ -251,6 +253,56 @@ func runLogout(args []string) int {
 		return 1
 	}
 	fmt.Fprintln(os.Stdout, "Session: locked")
+	return 0
+}
+
+func runSync(cfg client.Config, args []string) int {
+	fs := flag.NewFlagSet("sync", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "usage: termkeep sync")
+		return exitUsageFailure
+	}
+	scope, err := session.CurrentScope(os.Stdin)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return exitUsageFailure
+	}
+	return runSyncAt(cfg, scope.SocketPath)
+}
+
+func runSyncAt(cfg client.Config, socketPath string) int {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	info, err := session.Status(ctx, socketPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error: read unlocked session:", err)
+		return 1
+	}
+	token, err := session.AccessToken(ctx, socketPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error: read online session:", err)
+		return 1
+	}
+	if len(token) == 0 {
+		fmt.Fprintln(os.Stderr, "error: online authentication required")
+		return 1
+	}
+	defer clearPassword(token)
+	cache, err := client.OpenCache(cfg, info.Email)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error: open encrypted cache:", err)
+		return 1
+	}
+	if err := client.SyncCache(ctx, cfg, string(token), cache); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	snapshot, err := cache.SyncSnapshot()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error: read synchronization state:", err)
+		return 1
+	}
+	fmt.Fprintf(os.Stdout, "Sync: complete (%d pending)\n", len(snapshot.Mutations))
 	return 0
 }
 
