@@ -3,7 +3,9 @@ package server
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
+	"sort"
 )
 
 const maximumItemEnvelopeSize = 1 << 20
@@ -15,10 +17,12 @@ var ErrInvalidSyncCursor = errors.New("invalid synchronization cursor")
 var ErrMutationIDReuse = errors.New("mutation ID reused with different content")
 
 type OpaqueItem struct {
-	ItemID        string `json:"item_id"`
-	SchemaVersion int    `json:"schema_version"`
-	Revision      uint64 `json:"revision"`
-	Envelope      []byte `json:"envelope"`
+	ItemID            string   `json:"item_id"`
+	SchemaVersion     int      `json:"schema_version"`
+	Revision          uint64   `json:"revision"`
+	RevisionID        string   `json:"revision_id"`
+	ParentRevisionIDs []string `json:"parent_revision_ids"`
+	Envelope          []byte   `json:"envelope"`
 }
 
 type VaultMutation struct {
@@ -150,6 +154,7 @@ func (s *ItemService) sync(w http.ResponseWriter, r *http.Request) {
 		s.auditSyncFailure(r, token.AccountID)
 		return
 	}
+	normalizeMutations(request.Mutations)
 	if s.syncStore == nil || len(request.Mutations) > maximumSyncMutations ||
 		!validMutations(request.Mutations) {
 		s.auditSyncFailure(r, token.AccountID)
@@ -172,6 +177,7 @@ func (s *ItemService) sync(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid synchronization cursor", http.StatusBadRequest)
 			return
 		}
+		slog.Error("synchronization failed", "error", err)
 		http.Error(w, "synchronization failed", http.StatusInternalServerError)
 		return
 	}
@@ -199,13 +205,34 @@ func validMutations(mutations []VaultMutation) bool {
 		if !validUUID(mutation.MutationID) || item.ItemID == "" ||
 			item.SchemaVersion < 1 || item.Revision < 1 ||
 			item.Revision > maximumItemRevision ||
+			item.RevisionID != mutation.MutationID ||
 			item.Revision != mutation.BaseRevision+1 ||
 			len(item.Envelope) == 0 ||
 			len(item.Envelope) > maximumItemEnvelopeSize {
 			return false
 		}
+		if (mutation.BaseRevision == 0 && len(item.ParentRevisionIDs) != 0) ||
+			(mutation.BaseRevision > 0 && len(item.ParentRevisionIDs) == 0) {
+			return false
+		}
+		seen := make(map[string]bool, len(item.ParentRevisionIDs))
+		for _, parentID := range item.ParentRevisionIDs {
+			if !validUUID(parentID) || seen[parentID] {
+				return false
+			}
+			seen[parentID] = true
+		}
 	}
 	return true
+}
+
+func normalizeMutations(mutations []VaultMutation) {
+	for index := range mutations {
+		if mutations[index].Item.RevisionID == "" {
+			mutations[index].Item.RevisionID = mutations[index].MutationID
+		}
+		sort.Strings(mutations[index].Item.ParentRevisionIDs)
+	}
 }
 
 func validUUID(value string) bool {

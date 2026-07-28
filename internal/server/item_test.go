@@ -140,6 +140,76 @@ func TestSyncPushesMutationAndReturnsChangeCursor(t *testing.T) {
 	}
 }
 
+func TestSyncPreservesConcurrentRevisions(t *testing.T) {
+	authStore := &memoryBootstrapStore{}
+	auth := newTestAuthService(t, authStore)
+	itemStore := &memoryItemStore{}
+	items := NewItemService(itemStore, auth)
+	handler := NewHandler("test", stubSchema{version: 1}, nil, auth, items)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	password := []byte("TermKeep#2026")
+	mustBootstrap(t, server, "admin@example.com", password)
+	token := mustLogin(t, server, "admin@example.com", password)
+	itemID := "11111111-1111-4111-8111-111111111111"
+	rootID := "22222222-2222-4222-8222-222222222222"
+	root := VaultMutation{
+		MutationID:   rootID,
+		BaseRevision: 0,
+		Item: OpaqueItem{
+			ItemID:        itemID,
+			SchemaVersion: 1,
+			Revision:      1,
+			RevisionID:    rootID,
+			Envelope:      []byte("root"),
+		},
+	}
+	rootResult := syncOpaqueItems(
+		t, server, token, "", []VaultMutation{root})
+
+	firstID := "33333333-3333-4333-8333-333333333333"
+	secondID := "44444444-4444-4444-8444-444444444444"
+	first := VaultMutation{
+		MutationID:   firstID,
+		BaseRevision: 1,
+		Item: OpaqueItem{
+			ItemID:            itemID,
+			SchemaVersion:     1,
+			Revision:          2,
+			RevisionID:        firstID,
+			ParentRevisionIDs: []string{rootID},
+			Envelope:          []byte("first"),
+		},
+	}
+	second := VaultMutation{
+		MutationID:   secondID,
+		BaseRevision: 1,
+		Item: OpaqueItem{
+			ItemID:            itemID,
+			SchemaVersion:     1,
+			Revision:          2,
+			RevisionID:        secondID,
+			ParentRevisionIDs: []string{rootID},
+			Envelope:          []byte("second"),
+		},
+	}
+	syncOpaqueItems(t, server, token, rootResult.Cursor, []VaultMutation{first})
+	syncOpaqueItems(t, server, token, rootResult.Cursor, []VaultMutation{second})
+
+	pulled := syncOpaqueItems(t, server, token, rootResult.Cursor, nil)
+	if len(pulled.Changes) != 2 {
+		t.Fatalf("concurrent revisions: want 2, got %+v", pulled.Changes)
+	}
+	got := map[string]string{}
+	for _, revision := range pulled.Changes {
+		got[revision.RevisionID] = string(revision.Envelope)
+	}
+	if got[firstID] != "first" || got[secondID] != "second" {
+		t.Fatalf("concurrent revisions were not preserved: %+v", got)
+	}
+}
+
 func TestSyncRetryDoesNotDuplicateRevision(t *testing.T) {
 	authStore := &memoryBootstrapStore{}
 	auth := newTestAuthService(t, authStore)
@@ -379,6 +449,7 @@ type memoryItemStore struct {
 	items     map[string]map[string]OpaqueItem
 	mutations map[string]map[string][32]byte
 	changes   map[string][]OpaqueItem
+	revisions map[string]map[string]map[string]OpaqueItem
 }
 
 func (s *memoryItemStore) PutItem(_ context.Context, accountID string, item OpaqueItem) error {
@@ -420,6 +491,14 @@ func (s *memoryItemStore) Sync(
 	if s.changes == nil {
 		s.changes = make(map[string][]OpaqueItem)
 	}
+	if s.revisions == nil {
+		s.revisions = make(
+			map[string]map[string]map[string]OpaqueItem)
+	}
+	if s.revisions[accountID] == nil {
+		s.revisions[accountID] =
+			make(map[string]map[string]OpaqueItem)
+	}
 	result := SyncResult{}
 	for _, mutation := range mutations {
 		digest := vaultMutationDigest(mutation)
@@ -431,7 +510,43 @@ func (s *memoryItemStore) Sync(
 				result.AppliedMutationIDs, mutation.MutationID)
 			continue
 		}
-		if err := s.PutItem(ctx, accountID, mutation.Item); err != nil {
+		itemRevisions := s.revisions[accountID][mutation.Item.ItemID]
+		if itemRevisions == nil {
+			itemRevisions = make(map[string]OpaqueItem)
+			s.revisions[accountID][mutation.Item.ItemID] = itemRevisions
+		}
+		if mutation.BaseRevision == 0 && len(itemRevisions) != 0 {
+			return SyncResult{}, ErrItemRevisionConflict
+		}
+		var maxParentRevision uint64
+		for _, parentID := range mutation.Item.ParentRevisionIDs {
+			parent, exists := itemRevisions[parentID]
+			if !exists {
+				return SyncResult{}, ErrItemRevisionConflict
+			}
+			maxParentRevision = max(maxParentRevision, parent.Revision)
+		}
+		if mutation.BaseRevision > 0 &&
+			(len(mutation.Item.ParentRevisionIDs) == 0 ||
+				maxParentRevision != mutation.BaseRevision) {
+			return SyncResult{}, ErrItemRevisionConflict
+		}
+		if _, exists := itemRevisions[mutation.Item.RevisionID]; exists {
+			return SyncResult{}, ErrMutationIDReuse
+		}
+		itemRevisions[mutation.Item.RevisionID] = mutation.Item
+		if s.items == nil {
+			s.items = make(map[string]map[string]OpaqueItem)
+		}
+		if s.items[accountID] == nil {
+			s.items[accountID] = make(map[string]OpaqueItem)
+		}
+		current, exists := s.items[accountID][mutation.Item.ItemID]
+		if !exists || containsRevisionID(
+			mutation.Item.ParentRevisionIDs, current.RevisionID) {
+			s.items[accountID][mutation.Item.ItemID] = mutation.Item
+		}
+		if err := ctx.Err(); err != nil {
 			return SyncResult{}, err
 		}
 		s.mutations[accountID][mutation.MutationID] = digest
@@ -448,4 +563,13 @@ func (s *memoryItemStore) Sync(
 	result.Changes = append(result.Changes, s.changes[accountID][start:]...)
 	result.Cursor = fmt.Sprintf("%d", len(s.changes[accountID]))
 	return result, nil
+}
+
+func containsRevisionID(ids []string, target string) bool {
+	for _, id := range ids {
+		if id == target {
+			return true
+		}
+	}
+	return false
 }

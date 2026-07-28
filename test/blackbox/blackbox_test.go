@@ -67,6 +67,7 @@ func TestBlackbox(t *testing.T) {
 	t.Run("proxy headers ignored from untrusted sources", s.testTrustedProxyEnforcement)
 	t.Run("bare invocation opens TUI with instance state", s.testTUI)
 	t.Run("bootstrap creates only encrypted administrator vault material", s.testBootstrap)
+	t.Run("sync preserves concurrent opaque revisions", s.testConcurrentRevisionSync)
 	t.Run("login reuses unlocked session in the same terminal", s.testTerminalSessionReuse)
 	t.Run("another terminal requires its own login", s.testTerminalSessionIsolation)
 	t.Run("logout clears the terminal session", s.testTerminalSessionLogout)
@@ -190,8 +191,8 @@ func (s *stack) testMigrationsApplied(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query schema_migrations: %v\n%s", err, out)
 	}
-	if strings.TrimSpace(string(out)) != "7" {
-		t.Errorf("schema version: want 7, got %q", strings.TrimSpace(string(out)))
+	if strings.TrimSpace(string(out)) != "8" {
+		t.Errorf("schema version: want 8, got %q", strings.TrimSpace(string(out)))
 	}
 
 	cmd = s.composeCmd(context.Background(),
@@ -406,6 +407,143 @@ func (s *stack) testBootstrap(t *testing.T) {
 	_, retryCode := s.runBootstrap(t, "another@example.com", password)
 	if retryCode == 0 {
 		t.Fatal("second bootstrap unexpectedly succeeded")
+	}
+}
+
+func (s *stack) testConcurrentRevisionSync(t *testing.T) {
+	const (
+		email    = "admin@example.com"
+		password = "TermKeep#2026"
+		itemID   = "90000000-0000-4000-8000-000000000010"
+		rootID   = "90000000-0000-4000-8000-000000000011"
+		firstID  = "90000000-0000-4000-8000-000000000012"
+		secondID = "90000000-0000-4000-8000-000000000013"
+	)
+	login, err := client.Login(
+		context.Background(),
+		s.clientConfig(),
+		client.LoginInput{
+			Email:          email,
+			MasterPassword: password,
+			Host:           "conflict-test",
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer login.Clear()
+	t.Cleanup(func() {
+		_ = client.RevokeSession(
+			context.Background(),
+			s.clientConfig(),
+			login.AccessToken,
+			"current",
+		)
+	})
+	httpClient := &http.Client{Transport: &http.Transport{
+		TLSClientConfig: tlsConfigWithCA(
+			t, filepath.Join(s.certsDir, "ca.pem")),
+	}}
+	sync := func(cursor string, mutations []server.VaultMutation) server.SyncResult {
+		t.Helper()
+		payload, err := json.Marshal(map[string]any{
+			"cursor":    cursor,
+			"mutations": mutations,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		request, err := http.NewRequest(
+			http.MethodPost,
+			s.serverURL+"/api/v1/sync",
+			bytes.NewReader(payload),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Authorization", "Bearer "+login.AccessToken)
+		request.Header.Set("Content-Type", "application/json")
+		response, err := httpClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(response.Body)
+			logs, _ := s.composeCmd(
+				context.Background(), "logs", "server").CombinedOutput()
+			t.Fatalf("sync status: want 200, got %d: %s\n%s",
+				response.StatusCode, body, logs)
+		}
+		var result server.SyncResult
+		if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	root := server.VaultMutation{
+		MutationID:   rootID,
+		BaseRevision: 0,
+		Item: server.OpaqueItem{
+			ItemID:        itemID,
+			SchemaVersion: 1,
+			Revision:      1,
+			RevisionID:    rootID,
+			Envelope:      []byte("opaque-root"),
+		},
+	}
+	rootResult := sync("", []server.VaultMutation{root})
+	branch := func(id, envelope string) server.VaultMutation {
+		return server.VaultMutation{
+			MutationID:   id,
+			BaseRevision: 1,
+			Item: server.OpaqueItem{
+				ItemID:            itemID,
+				SchemaVersion:     1,
+				Revision:          2,
+				RevisionID:        id,
+				ParentRevisionIDs: []string{rootID},
+				Envelope:          []byte(envelope),
+			},
+		}
+	}
+	sync(rootResult.Cursor, []server.VaultMutation{
+		branch(firstID, "opaque-first"),
+	})
+	sync(rootResult.Cursor, []server.VaultMutation{
+		branch(secondID, "opaque-second"),
+	})
+
+	pulled := sync(rootResult.Cursor, nil)
+	if len(pulled.Changes) != 2 {
+		t.Fatalf("concurrent changes: want 2, got %+v", pulled.Changes)
+	}
+	got := make(map[string]string, len(pulled.Changes))
+	for _, revision := range pulled.Changes {
+		got[revision.RevisionID] = string(revision.Envelope)
+	}
+	if got[firstID] != "opaque-first" ||
+		got[secondID] != "opaque-second" {
+		t.Fatalf("concurrent revisions not preserved: %+v", got)
+	}
+
+	cmd := s.composeCmd(context.Background(),
+		"exec", "-T", "db", "psql", "-U", "termkeep", "-d", "termkeep", "-tAc",
+		fmt.Sprintf(`
+			SELECT
+				(SELECT count(*) FROM vault_revisions
+				 WHERE item_uuid = '%s') || ':' ||
+				(SELECT count(*) FROM vault_item_heads
+				 WHERE item_uuid = '%s')`,
+			itemID, itemID),
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("query preserved revisions: %v\n%s", err, out)
+	}
+	if strings.TrimSpace(string(out)) != "3:2" {
+		t.Fatalf("stored revisions/heads: want 3:2, got %q",
+			strings.TrimSpace(string(out)))
 	}
 }
 

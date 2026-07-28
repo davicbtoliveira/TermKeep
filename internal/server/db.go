@@ -7,7 +7,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib" // PostgreSQL driver for database/sql.
@@ -577,7 +579,8 @@ func (s DBStore) Sync(
 	}
 
 	rows, err := tx.QueryContext(ctx, `
-		SELECT cursor, item_uuid::text, schema_version, revision, envelope
+		SELECT cursor, item_uuid::text, schema_version, revision,
+		       revision_uuid::text, parent_revision_uuids::text, envelope
 		FROM vault_changes
 		WHERE account_uuid = $1 AND cursor > $2
 		ORDER BY cursor
@@ -588,21 +591,30 @@ func (s DBStore) Sync(
 	outputCursor := inputCursor
 	for rows.Next() {
 		var (
-			item     OpaqueItem
-			revision int64
-			change   uint64
+			item          OpaqueItem
+			revision      int64
+			change        uint64
+			parentIDsText string
 		)
 		if err := rows.Scan(
 			&change,
 			&item.ItemID,
 			&item.SchemaVersion,
 			&revision,
+			&item.RevisionID,
+			&parentIDsText,
 			&item.Envelope,
 		); err != nil {
 			rows.Close()
 			return SyncResult{}, fmt.Errorf("scan synchronization change: %w", err)
 		}
 		item.Revision = uint64(revision)
+		item.ParentRevisionIDs, err = parsePostgresUUIDArray(parentIDsText)
+		if err != nil {
+			rows.Close()
+			return SyncResult{}, fmt.Errorf(
+				"parse synchronization change parents: %w", err)
+		}
 		result.Changes = append(result.Changes, item)
 		outputCursor = change
 	}
@@ -627,22 +639,28 @@ func applyVaultMutation(
 ) (bool, error) {
 	digest := vaultMutationDigest(mutation)
 	var (
-		itemID       string
-		baseRevision int64
-		revision     int64
-		storedDigest []byte
+		itemID        string
+		baseRevision  int64
+		revision      int64
+		revisionID    string
+		parentIDsText string
+		storedDigest  []byte
 	)
 	err := tx.QueryRowContext(ctx, `
-		SELECT item_uuid::text, base_revision, revision, envelope_sha256
+		SELECT item_uuid::text, base_revision, revision,
+		       revision_uuid::text, parent_revision_uuids::text,
+		       envelope_sha256
 		FROM vault_mutations
 		WHERE account_uuid = $1 AND mutation_uuid = $2`,
 		accountID, mutation.MutationID).Scan(
-		&itemID, &baseRevision, &revision, &storedDigest)
+		&itemID, &baseRevision, &revision, &revisionID,
+		&parentIDsText, &storedDigest)
 	switch {
 	case err == nil:
 		if itemID != mutation.Item.ItemID ||
 			uint64(baseRevision) != mutation.BaseRevision ||
 			uint64(revision) != mutation.Item.Revision ||
+			revisionID != mutation.Item.RevisionID ||
 			!bytes.Equal(storedDigest, digest[:]) {
 			return false, ErrMutationIDReuse
 		}
@@ -651,35 +669,123 @@ func applyVaultMutation(
 		return false, fmt.Errorf("read mutation ledger: %w", err)
 	}
 
-	result, err := tx.ExecContext(ctx, `
-		INSERT INTO vault_items (
-			account_uuid, item_uuid, schema_version, revision, envelope
+	parentsArray := "{" + strings.Join(
+		mutation.Item.ParentRevisionIDs, ",") + "}"
+	if mutation.BaseRevision == 0 {
+		var exists bool
+		err = tx.QueryRowContext(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM vault_revisions
+				WHERE account_uuid = $1 AND item_uuid = $2
+			) OR EXISTS (
+				SELECT 1 FROM vault_items
+				WHERE account_uuid = $1 AND item_uuid = $2
+			)`, accountID, mutation.Item.ItemID).Scan(&exists)
+		if err != nil {
+			return false, fmt.Errorf("check initial revision: %w", err)
+		}
+		if exists {
+			return false, ErrItemRevisionConflict
+		}
+	} else {
+		var (
+			parentCount int
+			maxRevision int64
 		)
-		SELECT $1::uuid, $2::uuid, $3::integer, $4::bigint, $5::bytea
-		WHERE $6::bigint = 0 AND $4::bigint = 1
-		ON CONFLICT (account_uuid, item_uuid) DO UPDATE
-		SET schema_version = EXCLUDED.schema_version,
-		    revision = EXCLUDED.revision,
-		    envelope = EXCLUDED.envelope,
-		    updated_at = now()
-		WHERE vault_items.revision = $6::bigint
-		  AND EXCLUDED.revision = $6::bigint + 1`,
+		err = tx.QueryRowContext(ctx, `
+			SELECT count(*), COALESCE(max(revision), 0)
+			FROM vault_revisions
+			WHERE account_uuid = $1
+			  AND item_uuid = $2
+			  AND revision_uuid = ANY($3::uuid[])`,
+			accountID, mutation.Item.ItemID, parentsArray,
+		).Scan(&parentCount, &maxRevision)
+		if err != nil {
+			return false, fmt.Errorf("read revision parents: %w", err)
+		}
+		if parentCount != len(mutation.Item.ParentRevisionIDs) ||
+			uint64(maxRevision) != mutation.BaseRevision {
+			return false, ErrItemRevisionConflict
+		}
+	}
+
+	result, err := tx.ExecContext(ctx, `
+		INSERT INTO vault_revisions (
+			account_uuid, revision_uuid, item_uuid, schema_version,
+			revision, parent_revision_uuids, envelope
+		)
+		VALUES (
+			$1, $2, $3, $4, $5,
+			$6::uuid[],
+			$7
+		)
+		ON CONFLICT DO NOTHING`,
 		accountID,
+		mutation.Item.RevisionID,
 		mutation.Item.ItemID,
 		mutation.Item.SchemaVersion,
 		int64(mutation.Item.Revision),
+		parentsArray,
 		mutation.Item.Envelope,
-		int64(mutation.BaseRevision),
 	)
 	if err != nil {
-		return false, fmt.Errorf("apply vault mutation: %w", err)
+		return false, fmt.Errorf("append vault revision: %w", err)
 	}
 	count, err := result.RowsAffected()
 	if err != nil {
-		return false, fmt.Errorf("read vault mutation result: %w", err)
+		return false, fmt.Errorf("read appended vault revision: %w", err)
 	}
 	if count != 1 {
-		return false, ErrItemRevisionConflict
+		return false, ErrMutationIDReuse
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM vault_item_heads
+		WHERE account_uuid = $1
+		  AND item_uuid = $2
+		  AND revision_uuid = ANY($3::uuid[])`,
+		accountID, mutation.Item.ItemID, parentsArray,
+	); err != nil {
+		return false, fmt.Errorf("replace parent revision heads: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO vault_item_heads (
+			account_uuid, item_uuid, revision_uuid
+		)
+		VALUES ($1, $2, $3)`,
+		accountID, mutation.Item.ItemID, mutation.Item.RevisionID,
+	); err != nil {
+		return false, fmt.Errorf("record revision head: %w", err)
+	}
+
+	var headCount int
+	err = tx.QueryRowContext(ctx, `
+		SELECT count(*)
+		FROM vault_item_heads
+		WHERE account_uuid = $1 AND item_uuid = $2`,
+		accountID, mutation.Item.ItemID).Scan(&headCount)
+	if err != nil {
+		return false, fmt.Errorf("count revision heads: %w", err)
+	}
+	if headCount == 1 {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO vault_items (
+				account_uuid, item_uuid, schema_version, revision, envelope
+			)
+			VALUES ($1, $2, $3, $4, $5)
+			ON CONFLICT (account_uuid, item_uuid) DO UPDATE
+			SET schema_version = EXCLUDED.schema_version,
+			    revision = EXCLUDED.revision,
+			    envelope = EXCLUDED.envelope,
+			    updated_at = now()`,
+			accountID,
+			mutation.Item.ItemID,
+			mutation.Item.SchemaVersion,
+			int64(mutation.Item.Revision),
+			mutation.Item.Envelope,
+		); err != nil {
+			return false, fmt.Errorf("project unconflicted revision: %w", err)
+		}
 	}
 
 	var changeCursor int64
@@ -694,14 +800,21 @@ func applyVaultMutation(
 	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO vault_changes (
-			account_uuid, cursor, item_uuid, schema_version, revision, envelope
+			account_uuid, cursor, item_uuid, schema_version, revision,
+			revision_uuid, parent_revision_uuids, envelope
 		)
-		VALUES ($1, $2, $3, $4, $5, $6)`,
+		VALUES (
+			$1, $2, $3, $4, $5, $6,
+			$7::uuid[],
+			$8
+		)`,
 		accountID,
 		changeCursor,
 		mutation.Item.ItemID,
 		mutation.Item.SchemaVersion,
 		int64(mutation.Item.Revision),
+		mutation.Item.RevisionID,
+		parentsArray,
 		mutation.Item.Envelope,
 	); err != nil {
 		return false, fmt.Errorf("record synchronization change: %w", err)
@@ -709,14 +822,21 @@ func applyVaultMutation(
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO vault_mutations (
 			account_uuid, mutation_uuid, item_uuid, base_revision,
-			revision, envelope_sha256, change_cursor
+			revision, revision_uuid, parent_revision_uuids,
+			envelope_sha256, change_cursor
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		VALUES (
+			$1, $2, $3, $4, $5, $6,
+			$7::uuid[],
+			$8, $9
+		)`,
 		accountID,
 		mutation.MutationID,
 		mutation.Item.ItemID,
 		int64(mutation.BaseRevision),
 		int64(mutation.Item.Revision),
+		mutation.Item.RevisionID,
+		parentsArray,
 		digest[:],
 		changeCursor,
 	); err != nil {
@@ -740,15 +860,39 @@ func vaultMutationDigest(mutation VaultMutation) [sha256.Size]byte {
 	hash := sha256.New()
 	_, _ = fmt.Fprintf(
 		hash,
-		"%s\n%d\n%s\n%d\n%d\n",
+		"%s\n%d\n%s\n%d\n%d\n%s\n",
 		mutation.MutationID,
 		mutation.BaseRevision,
 		mutation.Item.ItemID,
 		mutation.Item.SchemaVersion,
 		mutation.Item.Revision,
+		mutation.Item.RevisionID,
 	)
+	parentIDs := append([]string(nil), mutation.Item.ParentRevisionIDs...)
+	sort.Strings(parentIDs)
+	for _, parentID := range parentIDs {
+		_, _ = fmt.Fprintln(hash, parentID)
+	}
 	_, _ = hash.Write(mutation.Item.Envelope)
 	var digest [sha256.Size]byte
 	copy(digest[:], hash.Sum(nil))
 	return digest
+}
+
+func parsePostgresUUIDArray(value string) ([]string, error) {
+	if value == "{}" {
+		return []string{}, nil
+	}
+	if len(value) < 2 || value[0] != '{' || value[len(value)-1] != '}' {
+		return nil, errors.New("invalid UUID array")
+	}
+	values := make([]string, 0)
+	for _, entry := range bytes.Split([]byte(value[1:len(value)-1]), []byte(",")) {
+		id := string(entry)
+		if !validUUID(id) {
+			return nil, errors.New("invalid revision UUID")
+		}
+		values = append(values, id)
+	}
+	return values, nil
 }
