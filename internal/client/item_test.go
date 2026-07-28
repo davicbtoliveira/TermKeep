@@ -4,12 +4,49 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"testing"
+	"time"
 )
+
+func TestLoginPasswordRotationKeepsFiveMostRecentWithTimestamps(t *testing.T) {
+	login := LoginItem{
+		ItemID:   "11111111-1111-4111-8111-111111111111",
+		Name:     "Production database",
+		Password: "Password-0",
+	}
+	start := time.Date(2026, time.July, 28, 12, 0, 0, 0, time.UTC)
+
+	for rotation := 1; rotation <= 7; rotation++ {
+		login = RotateLoginPassword(
+			login,
+			fmt.Sprintf("Password-%d", rotation),
+			start.Add(time.Duration(rotation)*time.Hour),
+		)
+	}
+
+	if login.Password != "Password-7" {
+		t.Fatalf("current password: got %q", login.Password)
+	}
+	want := []PasswordHistoryEntry{
+		{Password: "Password-6", ChangedAt: start.Add(7 * time.Hour)},
+		{Password: "Password-5", ChangedAt: start.Add(6 * time.Hour)},
+		{Password: "Password-4", ChangedAt: start.Add(5 * time.Hour)},
+		{Password: "Password-3", ChangedAt: start.Add(4 * time.Hour)},
+		{Password: "Password-2", ChangedAt: start.Add(3 * time.Hour)},
+	}
+	if !reflect.DeepEqual(login.PasswordHistory, want) {
+		t.Fatalf(
+			"password history:\nwant: %+v\ngot:  %+v",
+			want,
+			login.PasswordHistory,
+		)
+	}
+}
 
 func TestEncryptedLoginRoundTripHidesSemanticFields(t *testing.T) {
 	vaultKey := bytes.Repeat([]byte{0x42}, 32)

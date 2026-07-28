@@ -19,6 +19,7 @@ const secureNoteItemSchemaVersion = 1
 const folderItemSchemaVersion = 1
 const itemEnvelopeVersion = 1
 const itemPlaintextVersion = 1
+const maxPasswordHistoryEntries = 5
 
 var ErrInvalidItemEnvelope = errors.New("invalid item envelope")
 
@@ -27,16 +28,22 @@ type CustomField struct {
 	Value string `json:"value"`
 }
 
+type PasswordHistoryEntry struct {
+	Password  string    `json:"password"`
+	ChangedAt time.Time `json:"changed_at"`
+}
+
 type LoginItem struct {
-	ItemID       string        `json:"item_id"`
-	Name         string        `json:"name"`
-	Username     string        `json:"username"`
-	Password     string        `json:"password"`
-	FolderID     string        `json:"folder_id,omitempty"`
-	Favorite     bool          `json:"favorite,omitempty"`
-	URLs         []string      `json:"urls"`
-	Notes        string        `json:"notes"`
-	CustomFields []CustomField `json:"custom_fields"`
+	ItemID          string                 `json:"item_id"`
+	Name            string                 `json:"name"`
+	Username        string                 `json:"username"`
+	Password        string                 `json:"password"`
+	PasswordHistory []PasswordHistoryEntry `json:"password_history,omitempty"`
+	FolderID        string                 `json:"folder_id,omitempty"`
+	Favorite        bool                   `json:"favorite,omitempty"`
+	URLs            []string               `json:"urls"`
+	Notes           string                 `json:"notes"`
+	CustomFields    []CustomField          `json:"custom_fields"`
 }
 
 type SecureNoteItem struct {
@@ -100,6 +107,33 @@ type folderPlaintext struct {
 	Type    string `json:"type"`
 	Version int    `json:"version"`
 	FolderItem
+}
+
+func RotateLoginPassword(
+	login LoginItem,
+	password string,
+	changedAt time.Time,
+) LoginItem {
+	history := append(
+		[]PasswordHistoryEntry(nil),
+		login.PasswordHistory...,
+	)
+	if password == login.Password {
+		login.PasswordHistory = history
+		return login
+	}
+	if login.Password != "" {
+		history = append([]PasswordHistoryEntry{{
+			Password:  login.Password,
+			ChangedAt: changedAt.UTC(),
+		}}, history...)
+		if len(history) > maxPasswordHistoryEntries {
+			history = history[:maxPasswordHistoryEntries]
+		}
+	}
+	login.Password = password
+	login.PasswordHistory = history
+	return login
 }
 
 func NewItemID() (string, error) {
