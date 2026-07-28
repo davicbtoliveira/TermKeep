@@ -82,6 +82,7 @@ func TestBlackbox(t *testing.T) {
 	t.Run("encrypted Login survives a new unlocked process", s.testEncryptedLoginRoundTrip)
 	t.Run("offline Login edit synchronizes after reconnection", s.testOfflineLoginSynchronization)
 	t.Run("offline Secure Note opens in another Client", s.testSecureNoteOfflineCrossClient)
+	t.Run("offline organization sync stays zero knowledge", s.testOrganizationOfflineCrossClient)
 	t.Run("sync preserves and resolves concurrent revisions", s.testConcurrentRevisionSync)
 	t.Run("trash expires without resurrecting stale content", s.testTrashLifecycle)
 }
@@ -1386,24 +1387,40 @@ func (s *stack) testSecureNoteOfflineCrossClient(t *testing.T) {
 		t.Fatal(err)
 	}
 	noteIndex := -1
-	for index, group := range groups {
+	itemIndex := 0
+	for _, group := range groups {
+		groupIsFolder := false
 		for _, encrypted := range group.Revisions {
+			if encrypted.Purged {
+				continue
+			}
 			opened, err := session.OpenNativeItem(
 				context.Background(), sockets[0], encrypted)
 			if err != nil {
 				t.Fatal(err)
 			}
+			if opened.Folder != nil {
+				groupIsFolder = true
+			}
 			if opened.SecureNote != nil &&
 				opened.SecureNote.Title == noteTitle {
-				noteIndex = index
+				noteIndex = itemIndex
 			}
+		}
+		if !groupIsFolder {
+			itemIndex++
 		}
 	}
 	if noteIndex < 0 {
 		t.Fatal("second Client cache missing synchronized Secure Note")
 	}
+	for range itemIndex + 1 {
+		write(t, second.ptmx, "k")
+		time.Sleep(50 * time.Millisecond)
+	}
 	for range noteIndex {
 		write(t, second.ptmx, "j")
+		time.Sleep(50 * time.Millisecond)
 	}
 	second.clear()
 	write(t, second.ptmx, "\r")
@@ -1458,6 +1475,303 @@ func (s *stack) testSecureNoteOfflineCrossClient(t *testing.T) {
 			if bytes.Contains(body, []byte(forbidden)) {
 				t.Fatalf("%s contains Secure Note field %q",
 					surface, forbidden)
+			}
+		}
+	}
+	write(t, second.ptmx, "q")
+	second.waitFor(10*time.Second, terminalShellPrompt)
+}
+
+func (s *stack) testOrganizationOfflineCrossClient(t *testing.T) {
+	const (
+		email       = "admin@example.com"
+		password    = "TermKeep#2026"
+		folderName  = "Platform-Folder-Name-Sentinel"
+		noteTitle   = "Favorite-Folder-Note-Title-Sentinel"
+		noteContent = "Favorite-Folder-Note-Content-Sentinel"
+	)
+	command := fmt.Sprintf(
+		"%q --server %q --ca-cert %q login --email %q\n",
+		s.binary,
+		s.serverURL,
+		filepath.Join(s.certsDir, "ca.pem"),
+		email,
+	)
+	firstDataDir := filepath.Join(t.TempDir(), "client-data")
+	first := s.startTerminalShellWithDataDir(t, firstDataDir)
+	first.clear()
+	write(t, first.ptmx, command)
+	first.waitFor(30*time.Second, "Master password:")
+	write(t, first.ptmx, password+"\n")
+	first.waitFor(45*time.Second, "Items:")
+
+	sockets, err := filepath.Glob(
+		filepath.Join(first.runtimeDir, "termkeep", "*.sock"))
+	if err != nil || len(sockets) != 1 {
+		t.Fatalf("first organization Client sockets: want 1, got %d (%v)",
+			len(sockets), err)
+	}
+	firstCache, err := client.OpenCache(
+		client.Config{DataDir: firstDataDir}, email)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	serverRunning := true
+	t.Cleanup(func() {
+		if !serverRunning {
+			_ = s.composeCmd(context.Background(), "start", "server").Run()
+			s.waitHealthy(time.Minute)
+		}
+	})
+	if out, err := s.composeCmd(
+		context.Background(), "stop", "server").CombinedOutput(); err != nil {
+		t.Fatalf("stop server: %v\n%s", err, out)
+	}
+	serverRunning = false
+
+	first.clear()
+	write(t, first.ptmx, "o")
+	first.waitFor(10*time.Second, "— Folders")
+	write(t, first.ptmx, "c")
+	first.waitFor(10*time.Second, "New Folder")
+	write(t, first.ptmx, folderName+"\r")
+	first.waitFor(30*time.Second, folderName+" (0 Items)")
+	first.clear()
+	write(t, first.ptmx, "v")
+	first.waitFor(10*time.Second, "Items:")
+
+	first.clear()
+	write(t, first.ptmx, "n")
+	first.waitFor(10*time.Second, "New Secure Note")
+	write(t, first.ptmx, noteTitle+"\r")
+	first.waitFor(10*time.Second, "> Content:")
+	write(t, first.ptmx, noteContent+"\r")
+	first.waitFor(30*time.Second, "[Secure Note] "+noteTitle)
+
+	var (
+		folderID  string
+		noteIndex = -1
+		itemIndex int
+	)
+	groups, err := firstCache.ItemHeads()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, group := range groups {
+		var groupIsFolder bool
+		for _, encrypted := range group.Revisions {
+			if encrypted.Purged {
+				continue
+			}
+			opened, err := session.OpenNativeItem(
+				context.Background(), sockets[0], encrypted)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if opened.Folder != nil {
+				groupIsFolder = true
+				if opened.Folder.Name == folderName {
+					folderID = opened.Folder.ItemID
+				}
+			}
+			if opened.SecureNote != nil &&
+				opened.SecureNote.Title == noteTitle {
+				noteIndex = itemIndex
+			}
+		}
+		if !groupIsFolder {
+			itemIndex++
+		}
+	}
+	if folderID == "" || noteIndex < 0 {
+		t.Fatalf(
+			"offline organization records missing: Folder %q, Note index %d",
+			folderID,
+			noteIndex,
+		)
+	}
+
+	for range itemIndex + 1 {
+		write(t, first.ptmx, "k")
+		time.Sleep(50 * time.Millisecond)
+	}
+	for range noteIndex {
+		write(t, first.ptmx, "j")
+		time.Sleep(50 * time.Millisecond)
+	}
+	first.clear()
+	write(t, first.ptmx, "\r")
+	first.waitFor(10*time.Second, noteContent)
+	first.clear()
+	write(t, first.ptmx, "f")
+	first.waitFor(30*time.Second, "[Secure Note] "+noteTitle)
+	first.clear()
+	write(t, first.ptmx, "\r")
+	first.waitFor(10*time.Second, noteContent)
+	write(t, first.ptmx, "o")
+	first.waitFor(10*time.Second, "Move Item")
+	first.clear()
+	write(t, first.ptmx, "j")
+	time.Sleep(50 * time.Millisecond)
+	write(t, first.ptmx, "\r")
+	first.waitFor(30*time.Second, "[Secure Note] "+noteTitle)
+
+	snapshot, err := firstCache.SyncSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Mutations) != 4 {
+		t.Fatalf(
+			"offline organization queue: want 4, got %+v",
+			snapshot,
+		)
+	}
+
+	if out, err := s.composeCmd(
+		context.Background(), "start", "server").CombinedOutput(); err != nil {
+		t.Fatalf("start server: %v\n%s", err, out)
+	}
+	serverRunning = true
+	s.waitHealthy(time.Minute)
+	write(t, first.ptmx, "y")
+	syncDeadline := time.Now().Add(30 * time.Second)
+	for {
+		snapshot, err = firstCache.SyncSnapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(snapshot.Mutations) == 0 {
+			break
+		}
+		if time.Now().After(syncDeadline) {
+			t.Fatalf(
+				"organization mutations remained queued: %+v",
+				snapshot,
+			)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	write(t, first.ptmx, "q")
+	first.waitFor(10*time.Second, terminalShellPrompt)
+
+	secondDataDir := filepath.Join(t.TempDir(), "client-data")
+	second := s.startTerminalShellWithDataDir(t, secondDataDir)
+	second.clear()
+	write(t, second.ptmx, command)
+	second.waitFor(30*time.Second, "Master password:")
+	write(t, second.ptmx, password+"\n")
+	second.waitFor(45*time.Second, "[Secure Note] "+noteTitle)
+	second.clear()
+	write(t, second.ptmx, "f")
+	_, output := second.waitFor(10*time.Second, "Favorites")
+	if !strings.Contains(output, noteTitle) {
+		t.Fatalf("Favorites view missing synchronized Note:\n%s", output)
+	}
+	second.clear()
+	write(t, second.ptmx, "o")
+	_, output = second.waitFor(10*time.Second, folderName)
+	if !strings.Contains(output, "— Folders") {
+		t.Fatalf("Folder view missing synchronized Folder:\n%s", output)
+	}
+	second.clear()
+	write(t, second.ptmx, "\r")
+	_, output = second.waitFor(
+		10*time.Second, "Folder:   "+folderName)
+	if !strings.Contains(output, noteTitle) {
+		t.Fatalf("Folder view missing assigned Note:\n%s", output)
+	}
+
+	secondCache, err := client.OpenCache(
+		client.Config{DataDir: secondDataDir}, email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondSockets, err := filepath.Glob(
+		filepath.Join(second.runtimeDir, "termkeep", "*.sock"))
+	if err != nil || len(secondSockets) != 1 {
+		t.Fatalf("second organization Client sockets: want 1, got %d (%v)",
+			len(secondSockets), err)
+	}
+	groups, err = secondCache.ItemHeads()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var synchronized bool
+	for _, group := range groups {
+		for _, encrypted := range group.Revisions {
+			if encrypted.Purged {
+				continue
+			}
+			opened, err := session.OpenNativeItem(
+				context.Background(), secondSockets[0], encrypted)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if opened.SecureNote != nil &&
+				opened.SecureNote.Title == noteTitle &&
+				opened.SecureNote.FolderID == folderID &&
+				opened.SecureNote.Favorite {
+				synchronized = true
+			}
+		}
+	}
+	if !synchronized {
+		t.Fatal("second Client cache missing Folder/favorite state")
+	}
+
+	token, err := session.AccessToken(
+		context.Background(), secondSockets[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clear(token)
+	apiItems, err := client.ListItems(
+		context.Background(), s.clientConfig(), string(token))
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiBody, err := json.Marshal(apiItems)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbBody := []byte(s.queryDatabaseScalar(t, `
+		SELECT COALESCE(
+			string_agg(row_to_json(vault_revision)::text, E'\n'),
+			''
+		)
+		FROM vault_revisions AS vault_revision`))
+	auditBody := []byte(s.queryDatabaseScalar(t, `
+		SELECT COALESCE(
+			string_agg(row_to_json(event)::text, E'\n'),
+			''
+		)
+		FROM audit_events AS event`))
+	logBody, err := s.composeCmd(
+		context.Background(), "logs", "server").CombinedOutput()
+	if err != nil {
+		t.Fatalf("read server logs: %v\n%s", err, logBody)
+	}
+	for surface, body := range map[string][]byte{
+		"API":        apiBody,
+		"PostgreSQL": dbBody,
+		"audit":      auditBody,
+		"logs":       logBody,
+	} {
+		for _, forbidden := range []string{
+			folderName,
+			noteTitle,
+			noteContent,
+			`"folder"`,
+			"folder_id",
+			"favorite",
+		} {
+			if bytes.Contains(body, []byte(forbidden)) {
+				t.Fatalf(
+					"%s contains organization field %q",
+					surface,
+					forbidden,
+				)
 			}
 		}
 	}
