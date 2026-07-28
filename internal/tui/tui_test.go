@@ -330,7 +330,11 @@ func TestCachedLoginStoreSavesAndListsOffline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || !reflect.DeepEqual(got[0], want) {
+	if len(got) != 1 ||
+		!reflect.DeepEqual(got[0].Login, want.Login) ||
+		got[0].Revision != want.Revision ||
+		got[0].RevisionID == "" ||
+		len(got[0].ParentRevisionIDs) != 0 {
 		t.Fatalf("offline Login differs: %+v", got)
 	}
 }
@@ -625,6 +629,150 @@ func TestEditLoginPreservesFieldsAndIncrementsRevision(t *testing.T) {
 			{Name: "region", Value: "us-east-1"},
 		}) {
 		t.Fatalf("edited Login lost fields: %+v", got.Login)
+	}
+}
+
+func TestConflictScreenPreservesVersionsAndSelectsOne(t *testing.T) {
+	firstID := "22222222-2222-4222-8222-222222222222"
+	secondID := "33333333-3333-4333-8333-333333333333"
+	first := loginRecord{
+		Login: client.LoginItem{
+			ItemID:   "11111111-1111-4111-8111-111111111111",
+			Name:     "Work account",
+			Username: "work@example.com",
+			Password: "Work-Password",
+			Notes:    "first offline edit",
+		},
+		Revision:   2,
+		RevisionID: firstID,
+	}
+	second := loginRecord{
+		Login: client.LoginItem{
+			ItemID:   first.Login.ItemID,
+			Name:     "Personal account",
+			Username: "personal@example.com",
+			Password: "Personal-Password",
+			Notes:    "second offline edit",
+		},
+		Revision:   2,
+		RevisionID: secondID,
+	}
+	conflict := first
+	conflict.ConflictVersions = []loginRecord{first, second}
+	store := &fakeLoginStore{records: []loginRecord{conflict}}
+	initial := model{
+		loaded:        true,
+		vaultOpen:     true,
+		loginStore:    store,
+		logins:        store.records,
+		showLogin:     true,
+		selectedLogin: 0,
+	}
+	view := initial.View()
+	for _, want := range []string{
+		"Conflict",
+		"Work account",
+		"Personal account",
+		"work@example.com",
+		"personal@example.com",
+		"[enter] keep selected",
+		"[m] manual merge",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("Conflict screen missing %q:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, first.Login.Password) ||
+		strings.Contains(view, second.Login.Password) {
+		t.Fatalf("Conflict screen exposed a password:\n%s", view)
+	}
+
+	updated, command := initial.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if command == nil {
+		t.Fatal("selecting a Conflict version did not save a resolution")
+	}
+	updated, _ = updated.(model).Update(command())
+	if len(store.saved) != 1 {
+		t.Fatalf("saved resolutions: want 1, got %d", len(store.saved))
+	}
+	resolution := store.saved[0]
+	if resolution.Login.Name != first.Login.Name ||
+		resolution.Revision != 3 ||
+		!reflect.DeepEqual(
+			resolution.ParentRevisionIDs,
+			[]string{firstID, secondID},
+		) {
+		t.Fatalf("selected resolution: %+v", resolution)
+	}
+}
+
+func TestConflictScreenSavesManualMerge(t *testing.T) {
+	firstID := "22222222-2222-4222-8222-222222222222"
+	secondID := "33333333-3333-4333-8333-333333333333"
+	first := loginRecord{
+		Login: client.LoginItem{
+			ItemID:   "11111111-1111-4111-8111-111111111111",
+			Name:     "First name",
+			Username: "first@example.com",
+			Password: "First-Password",
+			Notes:    "first notes",
+		},
+		Revision:   2,
+		RevisionID: firstID,
+	}
+	second := loginRecord{
+		Login: client.LoginItem{
+			ItemID:   first.Login.ItemID,
+			Name:     "Second name",
+			Username: "second@example.com",
+			Password: "Second-Password",
+			Notes:    "second notes",
+		},
+		Revision:   2,
+		RevisionID: secondID,
+	}
+	conflict := first
+	conflict.ConflictVersions = []loginRecord{first, second}
+	store := &fakeLoginStore{records: []loginRecord{conflict}}
+	var current tea.Model = model{
+		loaded:     true,
+		vaultOpen:  true,
+		loginStore: store,
+		logins:     store.records,
+		showLogin:  true,
+	}
+	current, _ = current.Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	if !strings.Contains(
+		current.(model).View(), "Manual Conflict Merge") {
+		t.Fatalf("manual merge form not opened:\n%s", current.(model).View())
+	}
+	current, _ = current.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+	current, _ = current.Update(tea.KeyMsg{
+		Type:  tea.KeyRunes,
+		Runes: []rune("Merged name"),
+	})
+	var command tea.Cmd
+	for range loginFormFieldCount {
+		current, command = current.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	}
+	if command == nil {
+		t.Fatal("manual merge did not save")
+	}
+	current, _ = current.Update(command())
+
+	if len(store.saved) != 1 {
+		t.Fatalf("saved merges: want 1, got %d", len(store.saved))
+	}
+	merged := store.saved[0]
+	if merged.Login.Name != "Merged name" ||
+		merged.Login.Username != first.Login.Username ||
+		merged.Revision != 3 ||
+		!reflect.DeepEqual(
+			merged.ParentRevisionIDs,
+			[]string{firstID, secondID},
+		) {
+		t.Fatalf("manual merge: %+v", merged)
 	}
 }
 

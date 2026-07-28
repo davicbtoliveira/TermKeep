@@ -26,8 +26,11 @@ type sessionRevokedMsg struct{}
 type activityMsg client.ActivityPage
 type activityErrMsg error
 type loginRecord struct {
-	Login    client.LoginItem
-	Revision uint64
+	Login             client.LoginItem
+	Revision          uint64
+	RevisionID        string
+	ParentRevisionIDs []string
+	ConflictVersions  []loginRecord
 }
 type loginsMsg []loginRecord
 type loginsErrMsg error
@@ -59,11 +62,13 @@ var loginFormLabels = [loginFormFieldCount]string{
 }
 
 type loginForm struct {
-	itemID   string
-	revision uint64
-	field    int
-	values   [loginFormFieldCount]string
-	editing  bool
+	itemID            string
+	revision          uint64
+	parentRevisionIDs []string
+	field             int
+	values            [loginFormFieldCount]string
+	editing           bool
+	manualMerge       bool
 }
 
 type loginStore interface {
@@ -105,6 +110,7 @@ type model struct {
 	loginsLoading    bool
 	logins           []loginRecord
 	selectedLogin    int
+	selectedConflict int
 	loginsErr        error
 	showLogin        bool
 	revealPassword   bool
@@ -290,20 +296,31 @@ func syncLogins(store loginStore) tea.Cmd {
 }
 
 func (s cachedLoginStore) List(ctx context.Context) ([]loginRecord, error) {
-	encrypted, err := s.cache.Items()
+	groups, err := s.cache.ItemHeads()
 	if err != nil {
 		return nil, err
 	}
-	logins := make([]loginRecord, 0, len(encrypted))
-	for _, item := range encrypted {
-		login, err := session.OpenLogin(ctx, s.socketPath, item)
-		if err != nil {
-			return nil, err
+	logins := make([]loginRecord, 0, len(groups))
+	for _, group := range groups {
+		versions := make([]loginRecord, 0, len(group.Revisions))
+		for _, item := range group.Revisions {
+			login, err := session.OpenLogin(ctx, s.socketPath, item)
+			if err != nil {
+				return nil, err
+			}
+			versions = append(versions, loginRecord{
+				Login:      login,
+				Revision:   item.Revision,
+				RevisionID: item.RevisionID,
+				ParentRevisionIDs: append(
+					[]string(nil), item.ParentRevisionIDs...),
+			})
 		}
-		logins = append(logins, loginRecord{
-			Login:    login,
-			Revision: item.Revision,
-		})
+		record := versions[0]
+		if len(versions) > 1 {
+			record.ConflictVersions = versions
+		}
+		logins = append(logins, record)
 	}
 	return logins, nil
 }
@@ -314,6 +331,13 @@ func (s cachedLoginStore) Save(ctx context.Context, record loginRecord) error {
 	if err != nil {
 		return err
 	}
+	revisionID, err := client.NewItemID()
+	if err != nil {
+		return err
+	}
+	item.RevisionID = revisionID
+	item.ParentRevisionIDs = append(
+		[]string(nil), record.ParentRevisionIDs...)
 	_, err = s.cache.QueueMutation(item, record.Revision-1)
 	return err
 }
@@ -393,7 +417,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "e":
 			if m.vaultOpen && m.loginStore != nil &&
 				!m.showSessions && !m.showActivity &&
-				m.selectedLogin < len(m.logins) {
+				m.selectedLogin < len(m.logins) &&
+				len(m.logins[m.selectedLogin].ConflictVersions) == 0 {
 				m.showLogin = false
 				m.showLoginForm = true
 				m.loginForm = formForLogin(m.logins[m.selectedLogin])
@@ -401,14 +426,42 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.loginSaving = false
 			}
 		case "p":
-			if m.showLogin && m.selectedLogin < len(m.logins) {
+			if m.showLogin && m.selectedLogin < len(m.logins) &&
+				len(m.logins[m.selectedLogin].ConflictVersions) == 0 {
 				m.revealPassword = !m.revealPassword
 			}
+		case "m":
+			if m.showLogin && m.selectedLogin < len(m.logins) {
+				record := m.logins[m.selectedLogin]
+				if len(record.ConflictVersions) > 1 {
+					m.showLogin = false
+					m.showLoginForm = true
+					m.loginForm = formForConflict(
+						record.ConflictVersions,
+						m.selectedConflict,
+					)
+					m.loginFormErr = nil
+					m.loginSaving = false
+				}
+			}
 		case "enter":
-			if m.vaultOpen && !m.showSessions && !m.showActivity &&
+			if m.showLogin && m.selectedLogin < len(m.logins) {
+				record := m.logins[m.selectedLogin]
+				if len(record.ConflictVersions) > 1 {
+					m.loginSaving = true
+					return m, saveLogin(
+						m.loginStore,
+						resolveConflict(
+							record.ConflictVersions,
+							m.selectedConflict,
+						),
+					)
+				}
+			} else if m.vaultOpen && !m.showSessions && !m.showActivity &&
 				m.selectedLogin < len(m.logins) {
 				m.showLogin = true
 				m.revealPassword = false
+				m.selectedConflict = 0
 			}
 		case "g":
 			if m.showActivity && m.activityPage.CanViewAll {
@@ -434,10 +487,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showActivity = false
 			m.showLogin = false
 			m.revealPassword = false
+			m.selectedConflict = 0
 			return m, nil
 		case "j", "down":
 			if m.showSessions && m.selectedSession+1 < len(m.sessions) {
 				m.selectedSession++
+			} else if m.showLogin && m.selectedLogin < len(m.logins) &&
+				m.selectedConflict+1 <
+					len(m.logins[m.selectedLogin].ConflictVersions) {
+				m.selectedConflict++
 			} else if !m.showSessions && !m.showActivity && !m.showLogin &&
 				m.selectedLogin+1 < len(m.logins) {
 				m.selectedLogin++
@@ -445,6 +503,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "k", "up":
 			if m.showSessions && m.selectedSession > 0 {
 				m.selectedSession--
+			} else if m.showLogin && m.selectedConflict > 0 {
+				m.selectedConflict--
 			} else if !m.showSessions && !m.showActivity && !m.showLogin &&
 				m.selectedLogin > 0 {
 				m.selectedLogin--
@@ -513,6 +573,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case loginsMsg:
 		m.loginsLoading = false
 		m.logins = []loginRecord(msg)
+		m.selectedConflict = 0
 		m.showLoginForm = false
 		m.loginFormErr = nil
 		m.loginSaving = false
@@ -527,6 +588,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loginSaving = false
 	case loginSavedMsg:
 		m.logins = msg.logins
+		m.showLogin = false
+		m.selectedConflict = 0
 		m.showLoginForm = false
 		m.loginFormErr = nil
 		m.loginSaving = false
@@ -543,6 +606,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncErr = msg.err
 		m.pendingMutations = msg.pending
 		m.logins = msg.logins
+		m.selectedConflict = 0
 		if m.selectedLogin >= len(m.logins) {
 			m.selectedLogin = 0
 		}
@@ -593,8 +657,18 @@ func (m model) View() string {
 				if index == m.selectedLogin {
 					cursor = ">"
 				}
-				fmt.Fprintf(&b, "%s %s — %s\n",
-					cursor, record.Login.Name, record.Login.Username)
+				if len(record.ConflictVersions) > 1 {
+					fmt.Fprintf(
+						&b,
+						"%s ⚠ Conflict — %s (%d versions)\n",
+						cursor,
+						record.Login.Name,
+						len(record.ConflictVersions),
+					)
+				} else {
+					fmt.Fprintf(&b, "%s %s — %s\n",
+						cursor, record.Login.Name, record.Login.Username)
+				}
 			}
 		}
 		switch {
@@ -703,6 +777,8 @@ func recordFromLoginForm(form loginForm) (loginRecord, error) {
 			CustomFields: customFields,
 		},
 		Revision: form.revision,
+		ParentRevisionIDs: append(
+			[]string(nil), form.parentRevisionIDs...),
 	}, nil
 }
 
@@ -711,10 +787,15 @@ func formForLogin(record loginRecord) loginForm {
 	for _, field := range record.Login.CustomFields {
 		customFields = append(customFields, field.Name+"="+field.Value)
 	}
+	var parentRevisionIDs []string
+	if record.RevisionID != "" {
+		parentRevisionIDs = []string{record.RevisionID}
+	}
 	return loginForm{
-		itemID:   record.Login.ItemID,
-		revision: record.Revision + 1,
-		editing:  true,
+		itemID:            record.Login.ItemID,
+		revision:          record.Revision + 1,
+		parentRevisionIDs: parentRevisionIDs,
+		editing:           true,
 		values: [loginFormFieldCount]string{
 			record.Login.Name,
 			record.Login.Username,
@@ -726,9 +807,41 @@ func formForLogin(record loginRecord) loginForm {
 	}
 }
 
+func formForConflict(versions []loginRecord, selected int) loginForm {
+	resolution := resolveConflict(versions, selected)
+	form := formForLogin(loginRecord{
+		Login:    resolution.Login,
+		Revision: resolution.Revision - 1,
+	})
+	form.parentRevisionIDs = append(
+		[]string(nil), resolution.ParentRevisionIDs...)
+	form.manualMerge = true
+	return form
+}
+
+func resolveConflict(versions []loginRecord, selected int) loginRecord {
+	if selected < 0 || selected >= len(versions) {
+		selected = 0
+	}
+	resolution := versions[selected]
+	resolution.ConflictVersions = nil
+	resolution.RevisionID = ""
+	resolution.ParentRevisionIDs = make([]string, 0, len(versions))
+	var highestRevision uint64
+	for _, version := range versions {
+		resolution.ParentRevisionIDs = append(
+			resolution.ParentRevisionIDs, version.RevisionID)
+		highestRevision = max(highestRevision, version.Revision)
+	}
+	resolution.Revision = highestRevision + 1
+	return resolution
+}
+
 func (m model) loginFormView() string {
 	title := "New Login"
-	if m.loginForm.editing {
+	if m.loginForm.manualMerge {
+		title = "Manual Conflict Merge"
+	} else if m.loginForm.editing {
 		title = "Edit Login"
 	}
 	var b strings.Builder
@@ -759,7 +872,11 @@ func (m model) loginView() string {
 	if m.selectedLogin >= len(m.logins) {
 		return "TermKeep — Login\n\nLogin not found.\n\n[v] vault  [q] quit\n"
 	}
-	login := m.logins[m.selectedLogin].Login
+	record := m.logins[m.selectedLogin]
+	if len(record.ConflictVersions) > 1 {
+		return m.conflictView(record.ConflictVersions)
+	}
+	login := record.Login
 	var b strings.Builder
 	fmt.Fprintf(&b, "TermKeep — Login — %s\n\n", login.Name)
 	fmt.Fprintf(&b, "Username: %s\n", login.Username)
@@ -778,6 +895,36 @@ func (m model) loginView() string {
 		fmt.Fprintf(&b, "  %s: %s\n", field.Name, field.Value)
 	}
 	b.WriteString("\n[p] reveal/hide password  [e] edit  [v] vault  [q] quit\n")
+	return b.String()
+}
+
+func (m model) conflictView(versions []loginRecord) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "TermKeep — Conflict — %d versions\n\n", len(versions))
+	for index, version := range versions {
+		cursor := " "
+		if index == m.selectedConflict {
+			cursor = ">"
+		}
+		fmt.Fprintf(&b, "%s Version %d\n", cursor, index+1)
+		fmt.Fprintf(&b, "  Name: %s\n", version.Login.Name)
+		fmt.Fprintf(&b, "  Username: %s\n", version.Login.Username)
+		b.WriteString("  Password: ••••••••\n")
+		fmt.Fprintf(&b, "  URLs: %s\n",
+			strings.Join(version.Login.URLs, ", "))
+		fmt.Fprintf(&b, "  Notes: %s\n", version.Login.Notes)
+		if len(version.Login.CustomFields) > 0 {
+			b.WriteString("  Custom fields:\n")
+			for _, field := range version.Login.CustomFields {
+				fmt.Fprintf(&b, "    %s: %s\n", field.Name, field.Value)
+			}
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString(
+		"[j/k] select version  [enter] keep selected  " +
+			"[m] manual merge  [v] vault  [q] quit\n",
+	)
 	return b.String()
 }
 
