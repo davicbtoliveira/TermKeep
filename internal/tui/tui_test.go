@@ -688,6 +688,44 @@ func TestOnlineLoginSaveSynchronizesAfterLocalCommit(t *testing.T) {
 	}
 }
 
+func TestLoginSaveRemainsCommittedWhenSyncTimesOut(t *testing.T) {
+	previous := loginOperationTimeout
+	loginOperationTimeout = time.Millisecond
+	t.Cleanup(func() { loginOperationTimeout = previous })
+	store := &fakeSyncLoginStore{waitForContext: true}
+	initial := model{
+		loaded:        true,
+		vaultOpen:     true,
+		accessToken:   "access-token",
+		loginStore:    store,
+		showLoginForm: true,
+		loginForm: loginForm{
+			itemID:   "11111111-1111-4111-8111-111111111111",
+			revision: 1,
+			field:    loginFormFieldCount - 1,
+			values: [loginFormFieldCount]string{
+				"Production database",
+			},
+		},
+	}
+	updated, command := initial.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if command == nil {
+		t.Fatal("Login save returned no command")
+	}
+	updated, _ = updated.(model).Update(command())
+	got := updated.(model)
+	if len(store.saved) != 1 || got.showLoginForm {
+		t.Fatalf(
+			"remote timeout hid local commit: saved=%d form=%v",
+			len(store.saved),
+			got.showLoginForm,
+		)
+	}
+	if got.syncErr == nil {
+		t.Fatal("remote timeout was not surfaced as sync state")
+	}
+}
+
 type fakeLoginStore struct {
 	records []loginRecord
 	saved   []loginRecord
@@ -696,13 +734,18 @@ type fakeLoginStore struct {
 
 type fakeSyncLoginStore struct {
 	fakeLoginStore
-	syncCalls int
-	syncErr   error
-	pending   int
+	syncCalls      int
+	syncErr        error
+	pending        int
+	waitForContext bool
 }
 
-func (s *fakeSyncLoginStore) Sync(context.Context) error {
+func (s *fakeSyncLoginStore) Sync(ctx context.Context) error {
 	s.syncCalls++
+	if s.waitForContext {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	return s.syncErr
 }
 

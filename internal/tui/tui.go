@@ -45,6 +45,7 @@ type syncResultMsg struct {
 type periodicSyncMsg struct{}
 
 var periodicSyncInterval = 30 * time.Second
+var loginOperationTimeout = 10 * time.Second
 
 const loginFormFieldCount = 6
 
@@ -217,7 +218,8 @@ func loadActivity(cfg client.Config, accessToken string, allAccounts bool, curso
 
 func loadLogins(store loginStore) tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(
+			context.Background(), loginOperationTimeout)
 		defer cancel()
 		logins, err := store.List(ctx)
 		if err != nil {
@@ -229,9 +231,11 @@ func loadLogins(store loginStore) tea.Cmd {
 
 func saveLogin(store loginStore, record loginRecord) tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := store.Save(ctx, record); err != nil {
+		saveCtx, cancelSave := context.WithTimeout(
+			context.Background(), loginOperationTimeout)
+		err := store.Save(saveCtx, record)
+		cancelSave()
+		if err != nil {
 			return loginSaveErrMsg(err)
 		}
 		var (
@@ -240,18 +244,20 @@ func saveLogin(store loginStore, record loginRecord) tea.Cmd {
 		)
 		if syncStore, ok := store.(syncLoginStore); ok {
 			if syncStore.CanSync() {
-				syncErr = syncStore.Sync(ctx)
+				syncCtx, cancelSync := context.WithTimeout(
+					context.Background(), loginOperationTimeout)
+				syncErr = syncStore.Sync(syncCtx)
+				cancelSync()
 			}
 			var pendingErr error
 			pending, pendingErr = syncStore.Pending()
-			if syncErr == nil {
-				syncErr = pendingErr
-			}
+			syncErr = errors.Join(syncErr, pendingErr)
 		}
-		logins, err := store.List(ctx)
-		if err != nil {
-			return loginSaveErrMsg(err)
-		}
+		listCtx, cancelList := context.WithTimeout(
+			context.Background(), loginOperationTimeout)
+		logins, listErr := store.List(listCtx)
+		cancelList()
+		syncErr = errors.Join(syncErr, listErr)
 		return loginSavedMsg{
 			logins:  logins,
 			pending: pending,
@@ -266,21 +272,19 @@ func syncLogins(store loginStore) tea.Cmd {
 		if !ok {
 			return syncResultMsg{err: errors.New("synchronization unavailable")}
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		syncErr := syncStore.Sync(ctx)
-		logins, listErr := store.List(ctx)
-		if listErr != nil {
-			return syncResultMsg{err: listErr}
-		}
+		syncCtx, cancelSync := context.WithTimeout(
+			context.Background(), loginOperationTimeout)
+		syncErr := syncStore.Sync(syncCtx)
+		cancelSync()
+		listCtx, cancelList := context.WithTimeout(
+			context.Background(), loginOperationTimeout)
+		logins, listErr := store.List(listCtx)
+		cancelList()
 		pending, pendingErr := syncStore.Pending()
-		if pendingErr != nil {
-			return syncResultMsg{err: pendingErr}
-		}
 		return syncResultMsg{
 			logins:  logins,
 			pending: pending,
-			err:     syncErr,
+			err:     errors.Join(syncErr, listErr, pendingErr),
 		}
 	}
 }
