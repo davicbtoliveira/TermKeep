@@ -637,6 +637,173 @@ func TestStaleOfflineEditConflictsWithPurgedTombstone(t *testing.T) {
 	}
 }
 
+func TestPropertyMultipleClientsConvergeAcrossTombstoneOrders(t *testing.T) {
+	password := []byte("TermKeep#2026")
+	accountID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	vault, err := NewVault(password, accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vault.Clear()
+
+	const (
+		itemID      = "11111111-1111-4111-8111-111111111111"
+		rootID      = "22222222-2222-4222-8222-222222222222"
+		deletionID  = "33333333-3333-4333-8333-333333333333"
+		tombstoneID = "44444444-4444-4444-8444-444444444444"
+		offlineID   = "55555555-5555-4555-8555-555555555555"
+	)
+	root := EncryptedItem{
+		ItemID:        itemID,
+		SchemaVersion: 1,
+		Revision:      1,
+		RevisionID:    rootID,
+		Envelope:      []byte("encrypted-root"),
+	}
+	deletion := EncryptedItem{
+		ItemID:            itemID,
+		SchemaVersion:     1,
+		Revision:          2,
+		RevisionID:        deletionID,
+		ParentRevisionIDs: []string{rootID},
+		Deleted:           true,
+		Envelope:          []byte("encrypted-trash"),
+	}
+	tombstone := EncryptedItem{
+		ItemID:            itemID,
+		SchemaVersion:     1,
+		Revision:          3,
+		RevisionID:        tombstoneID,
+		ParentRevisionIDs: []string{deletionID},
+		Deleted:           true,
+		Purged:            true,
+	}
+	offline := EncryptedItem{
+		ItemID:            itemID,
+		SchemaVersion:     1,
+		Revision:          2,
+		RevisionID:        offlineID,
+		ParentRevisionIDs: []string{rootID},
+		Envelope:          []byte("encrypted-offline-edit"),
+	}
+	property := func(order uint8) bool {
+		open := func(name string) (*Cache, bool) {
+			cfg := Config{
+				DataDir: filepath.Join(t.TempDir(), name),
+			}
+			if err := AuthorizeCache(
+				cfg,
+				"user@example.com",
+				accountID,
+				vault.PasswordEnvelope,
+			); err != nil {
+				return nil, false
+			}
+			cache, err := OpenCache(cfg, "user@example.com")
+			return cache, err == nil
+		}
+		deletingClient, ok := open("deleting")
+		if !ok {
+			return false
+		}
+		staleClient, ok := open("stale")
+		if !ok {
+			return false
+		}
+		for _, cache := range []*Cache{deletingClient, staleClient} {
+			if err := cache.ApplySync(
+				"1", nil, []EncryptedItem{root},
+			); err != nil {
+				return false
+			}
+		}
+		deleteMutation, err := deletingClient.QueueMutation(deletion, 1)
+		if err != nil {
+			return false
+		}
+		if err := deletingClient.ApplySync(
+			"2",
+			[]string{deleteMutation.MutationID},
+			[]EncryptedItem{deletion},
+		); err != nil {
+			return false
+		}
+		purgeMutation, err :=
+			deletingClient.QueueMutation(tombstone, 2)
+		if err != nil {
+			return false
+		}
+		offlineMutation, err := staleClient.QueueMutation(offline, 1)
+		if err != nil {
+			return false
+		}
+
+		changes := []EncryptedItem{tombstone, offline}
+		if order&1 != 0 {
+			changes[0], changes[1] = changes[1], changes[0]
+		}
+		if order&2 != 0 {
+			if err := staleClient.ApplySync(
+				"3", nil, []EncryptedItem{tombstone},
+			); err != nil {
+				return false
+			}
+		}
+		if order&4 != 0 {
+			if err := deletingClient.ApplySync(
+				"4", nil, []EncryptedItem{offline},
+			); err != nil {
+				return false
+			}
+		}
+		results := []struct {
+			cache   *Cache
+			applied string
+		}{
+			{deletingClient, purgeMutation.MutationID},
+			{staleClient, offlineMutation.MutationID},
+		}
+		if order&8 != 0 {
+			results[0], results[1] = results[1], results[0]
+		}
+		for _, target := range results {
+			if err := target.cache.ApplySyncResult(SyncResult{
+				Cursor:             "4",
+				FullSnapshot:       true,
+				AppliedMutationIDs: []string{target.applied},
+				Changes:            changes,
+			}); err != nil {
+				return false
+			}
+		}
+
+		for _, cache := range []*Cache{deletingClient, staleClient} {
+			groups, err := cache.ItemHeads()
+			if err != nil || len(groups) != 1 ||
+				len(groups[0].Revisions) != 2 {
+				return false
+			}
+			got := map[string]EncryptedItem{}
+			for _, head := range groups[0].Revisions {
+				got[head.RevisionID] = head
+			}
+			pending, err := cache.PendingMutations()
+			if err != nil || len(pending) != 0 ||
+				!got[tombstoneID].Purged ||
+				string(got[offlineID].Envelope) !=
+					"encrypted-offline-edit" {
+				return false
+			}
+		}
+		return true
+	}
+	if err := quick.Check(
+		property, &quick.Config{MaxCount: 32},
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPurgedTombstonePreservesSynchronizedLiveConflictHead(t *testing.T) {
 	password := []byte("TermKeep#2026")
 	accountID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
