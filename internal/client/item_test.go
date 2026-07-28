@@ -18,6 +18,8 @@ func TestEncryptedLoginRoundTripHidesSemanticFields(t *testing.T) {
 		Name:     "Production database",
 		Username: "operator@example.com",
 		Password: "Database-Password-Sentinel",
+		FolderID: "22222222-2222-4222-8222-222222222222",
+		Favorite: true,
 		URLs:     []string{"https://db.example.com", "postgres://db.internal"},
 		Notes:    "Primary credentials",
 		CustomFields: []CustomField{
@@ -68,6 +70,8 @@ func TestEncryptedSecureNoteRoundTripHidesSemanticFields(t *testing.T) {
 		Title:  "Production recovery procedure",
 		Content: "Sensitive-Note-Content-Sentinel\n" +
 			"Second confidential line",
+		FolderID: "22222222-2222-4222-8222-222222222222",
+		Favorite: true,
 	}
 
 	encrypted, err := EncryptSecureNote(
@@ -95,6 +99,39 @@ func TestEncryptedSecureNoteRoundTripHidesSemanticFields(t *testing.T) {
 	}
 	if !reflect.DeepEqual(decrypted, note) {
 		t.Fatalf("round trip differs:\nwant: %+v\ngot:  %+v", note, decrypted)
+	}
+}
+
+func TestEncryptedFolderRoundTripHidesName(t *testing.T) {
+	vaultKey := bytes.Repeat([]byte{0x42}, 32)
+	folder := FolderItem{
+		ItemID: "11111111-1111-4111-8111-111111111111",
+		Name:   "Production infrastructure",
+	}
+
+	encrypted, err := EncryptFolder(
+		vaultKey,
+		"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		folder,
+		1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encrypted.Envelope, []byte(folder.Name)) {
+		t.Fatalf("encrypted envelope contains Folder name %q", folder.Name)
+	}
+
+	decrypted, err := DecryptFolder(
+		vaultKey,
+		"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		encrypted,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(decrypted, folder) {
+		t.Fatalf("round trip differs:\nwant: %+v\ngot:  %+v", folder, decrypted)
 	}
 }
 
@@ -152,6 +189,32 @@ func TestDecryptNativeItemReportsEncryptedType(t *testing.T) {
 		opened.Login != nil ||
 		!reflect.DeepEqual(*opened.SecureNote, note) {
 		t.Fatalf("native Item type/content: %+v", opened)
+	}
+}
+
+func TestDecryptNativeItemReportsEncryptedFolderType(t *testing.T) {
+	vaultKey := bytes.Repeat([]byte{0x42}, 32)
+	accountID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	folder := FolderItem{
+		ItemID: "11111111-1111-4111-8111-111111111111",
+		Name:   "Infrastructure",
+	}
+	encrypted, err := EncryptFolder(
+		vaultKey, accountID, folder, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	opened, err := DecryptNativeItem(vaultKey, accountID, encrypted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opened.Type != NativeItemTypeFolder ||
+		opened.Folder == nil ||
+		opened.Login != nil ||
+		opened.SecureNote != nil ||
+		!reflect.DeepEqual(*opened.Folder, folder) {
+		t.Fatalf("native Folder type/content: %+v", opened)
 	}
 }
 

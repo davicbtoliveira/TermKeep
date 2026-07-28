@@ -16,6 +16,7 @@ import (
 
 const loginItemSchemaVersion = 1
 const secureNoteItemSchemaVersion = 1
+const folderItemSchemaVersion = 1
 const itemEnvelopeVersion = 1
 const itemPlaintextVersion = 1
 
@@ -31,15 +32,24 @@ type LoginItem struct {
 	Name         string        `json:"name"`
 	Username     string        `json:"username"`
 	Password     string        `json:"password"`
+	FolderID     string        `json:"folder_id,omitempty"`
+	Favorite     bool          `json:"favorite,omitempty"`
 	URLs         []string      `json:"urls"`
 	Notes        string        `json:"notes"`
 	CustomFields []CustomField `json:"custom_fields"`
 }
 
 type SecureNoteItem struct {
-	ItemID  string `json:"item_id"`
-	Title   string `json:"title"`
-	Content string `json:"content"`
+	ItemID   string `json:"item_id"`
+	Title    string `json:"title"`
+	Content  string `json:"content"`
+	FolderID string `json:"folder_id,omitempty"`
+	Favorite bool   `json:"favorite,omitempty"`
+}
+
+type FolderItem struct {
+	ItemID string `json:"item_id"`
+	Name   string `json:"name"`
 }
 
 type NativeItemType string
@@ -47,12 +57,14 @@ type NativeItemType string
 const (
 	NativeItemTypeLogin      NativeItemType = "login"
 	NativeItemTypeSecureNote NativeItemType = "secure_note"
+	NativeItemTypeFolder     NativeItemType = "folder"
 )
 
 type NativeItem struct {
 	Type       NativeItemType  `json:"type"`
 	Login      *LoginItem      `json:"login,omitempty"`
 	SecureNote *SecureNoteItem `json:"secure_note,omitempty"`
+	Folder     *FolderItem     `json:"folder,omitempty"`
 }
 
 type EncryptedItem struct {
@@ -82,6 +94,12 @@ type secureNotePlaintext struct {
 	Type    string `json:"type"`
 	Version int    `json:"version"`
 	SecureNoteItem
+}
+
+type folderPlaintext struct {
+	Type    string `json:"type"`
+	Version int    `json:"version"`
+	FolderItem
 }
 
 func NewItemID() (string, error) {
@@ -139,6 +157,30 @@ func EncryptSecureNote(
 			Type:           "secure_note",
 			Version:        itemPlaintextVersion,
 			SecureNoteItem: note,
+		},
+	)
+}
+
+func EncryptFolder(
+	vaultKey []byte,
+	accountID string,
+	folder FolderItem,
+	revision uint64,
+) (EncryptedItem, error) {
+	if len(vaultKey) != chacha20poly1305.KeySize ||
+		accountID == "" || folder.ItemID == "" || revision == 0 {
+		return EncryptedItem{}, ErrInvalidItemEnvelope
+	}
+	return encryptItem(
+		vaultKey,
+		accountID,
+		folder.ItemID,
+		folderItemSchemaVersion,
+		revision,
+		folderPlaintext{
+			Type:       "folder",
+			Version:    itemPlaintextVersion,
+			FolderItem: folder,
 		},
 	)
 }
@@ -220,6 +262,21 @@ func DecryptSecureNote(
 	return *opened.SecureNote, nil
 }
 
+func DecryptFolder(
+	vaultKey []byte,
+	accountID string,
+	item EncryptedItem,
+) (FolderItem, error) {
+	opened, err := DecryptNativeItem(vaultKey, accountID, item)
+	if err != nil {
+		return FolderItem{}, err
+	}
+	if opened.Type != NativeItemTypeFolder || opened.Folder == nil {
+		return FolderItem{}, ErrInvalidItemEnvelope
+	}
+	return *opened.Folder, nil
+}
+
 func DecryptNativeItem(
 	vaultKey []byte,
 	accountID string,
@@ -267,6 +324,18 @@ func DecryptNativeItem(
 		return NativeItem{
 			Type:       NativeItemTypeSecureNote,
 			SecureNote: &decoded.SecureNoteItem,
+		}, nil
+	case NativeItemTypeFolder:
+		var decoded folderPlaintext
+		if item.SchemaVersion != folderItemSchemaVersion ||
+			json.Unmarshal(plaintext, &decoded) != nil ||
+			decoded.Version != itemPlaintextVersion ||
+			decoded.ItemID != item.ItemID {
+			return NativeItem{}, ErrInvalidItemEnvelope
+		}
+		return NativeItem{
+			Type:   NativeItemTypeFolder,
+			Folder: &decoded.FolderItem,
 		}, nil
 	default:
 		return NativeItem{}, ErrInvalidItemEnvelope
