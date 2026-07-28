@@ -82,6 +82,7 @@ func TestBlackbox(t *testing.T) {
 	t.Run("encrypted Login survives a new unlocked process", s.testEncryptedLoginRoundTrip)
 	t.Run("offline Login edit synchronizes after reconnection", s.testOfflineLoginSynchronization)
 	t.Run("sync preserves and resolves concurrent revisions", s.testConcurrentRevisionSync)
+	t.Run("trash expires without resurrecting stale content", s.testTrashLifecycle)
 }
 
 // newStack boots the ephemeral deployment once for the whole test run.
@@ -191,8 +192,8 @@ func (s *stack) testMigrationsApplied(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query schema_migrations: %v\n%s", err, out)
 	}
-	if strings.TrimSpace(string(out)) != "8" {
-		t.Errorf("schema version: want 8, got %q", strings.TrimSpace(string(out)))
+	if strings.TrimSpace(string(out)) != "9" {
+		t.Errorf("schema version: want 9, got %q", strings.TrimSpace(string(out)))
 	}
 
 	cmd = s.composeCmd(context.Background(),
@@ -217,7 +218,7 @@ func (s *stack) testStatusHealthy(t *testing.T) {
 	if !strings.Contains(stdout, "Status:   healthy") {
 		t.Errorf("stdout missing healthy state:\n%s", stdout)
 	}
-	if !strings.Contains(stdout, "schema v8") {
+	if !strings.Contains(stdout, "schema v9") {
 		t.Errorf("stdout missing schema version:\n%s", stdout)
 	}
 }
@@ -443,46 +444,9 @@ func (s *stack) testConcurrentRevisionSync(t *testing.T) {
 			"current",
 		)
 	})
-	httpClient := &http.Client{Transport: &http.Transport{
-		TLSClientConfig: tlsConfigWithCA(
-			t, filepath.Join(s.certsDir, "ca.pem")),
-	}}
 	sync := func(cursor string, mutations []server.VaultMutation) server.SyncResult {
 		t.Helper()
-		payload, err := json.Marshal(map[string]any{
-			"cursor":    cursor,
-			"mutations": mutations,
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		request, err := http.NewRequest(
-			http.MethodPost,
-			s.serverURL+"/api/v1/sync",
-			bytes.NewReader(payload),
-		)
-		if err != nil {
-			t.Fatal(err)
-		}
-		request.Header.Set("Authorization", "Bearer "+login.AccessToken)
-		request.Header.Set("Content-Type", "application/json")
-		response, err := httpClient.Do(request)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer response.Body.Close()
-		if response.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(response.Body)
-			logs, _ := s.composeCmd(
-				context.Background(), "logs", "server").CombinedOutput()
-			t.Fatalf("sync status: want 200, got %d: %s\n%s",
-				response.StatusCode, body, logs)
-		}
-		var result server.SyncResult
-		if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
-			t.Fatal(err)
-		}
-		return result
+		return s.syncVault(t, login.AccessToken, cursor, mutations)
 	}
 	root := server.VaultMutation{
 		MutationID:   rootID,
@@ -595,6 +559,379 @@ func (s *stack) testConcurrentRevisionSync(t *testing.T) {
 		t.Fatalf("stored revisions/heads: want 4:1:1:1, got %q",
 			strings.TrimSpace(string(out)))
 	}
+}
+
+func (s *stack) testTrashLifecycle(t *testing.T) {
+	const (
+		email    = "admin@example.com"
+		password = "TermKeep#2026"
+	)
+	login, err := client.Login(
+		context.Background(),
+		s.clientConfig(),
+		client.LoginInput{
+			Email:          email,
+			MasterPassword: password,
+			Host:           "trash-test",
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer login.Clear()
+	t.Cleanup(func() {
+		_ = client.RevokeSession(
+			context.Background(),
+			s.clientConfig(),
+			login.AccessToken,
+			"current",
+		)
+	})
+	sync := func(
+		cursor string,
+		mutations []server.VaultMutation,
+	) server.SyncResult {
+		t.Helper()
+		return s.syncVault(t, login.AccessToken, cursor, mutations)
+	}
+	currentCursor := sync("", nil).Cursor
+
+	const (
+		itemID        = "91000000-0000-4000-8000-000000000010"
+		rootID        = "91000000-0000-4000-8000-000000000011"
+		deletionID    = "91000000-0000-4000-8000-000000000012"
+		restoreID     = "91000000-0000-4000-8000-000000000013"
+		secondDelete  = "91000000-0000-4000-8000-000000000014"
+		tombstoneID   = "91000000-0000-4000-8000-000000000015"
+		staleItemID   = "91000000-0000-4000-8000-000000000020"
+		staleRootID   = "91000000-0000-4000-8000-000000000021"
+		staleDeleteID = "91000000-0000-4000-8000-000000000022"
+		stalePurgeID  = "91000000-0000-4000-8000-000000000023"
+		staleEditID   = "91000000-0000-4000-8000-000000000024"
+		expiredItemID = "91000000-0000-4000-8000-000000000030"
+		expiredRootID = "91000000-0000-4000-8000-000000000031"
+		expiredDelID  = "91000000-0000-4000-8000-000000000032"
+	)
+	root := server.VaultMutation{
+		MutationID:   rootID,
+		BaseRevision: 0,
+		Item: server.OpaqueItem{
+			ItemID:        itemID,
+			SchemaVersion: 1,
+			Revision:      1,
+			RevisionID:    rootID,
+			Envelope:      []byte("trash-root-content"),
+		},
+	}
+	rootResult := sync(currentCursor, []server.VaultMutation{root})
+	deletion := server.VaultMutation{
+		MutationID:   deletionID,
+		BaseRevision: 1,
+		Item: server.OpaqueItem{
+			ItemID:            itemID,
+			SchemaVersion:     1,
+			Revision:          2,
+			RevisionID:        deletionID,
+			ParentRevisionIDs: []string{rootID},
+			Deleted:           true,
+			Envelope:          []byte("encrypted-trash-content"),
+		},
+	}
+	deletedResult := sync(
+		rootResult.Cursor, []server.VaultMutation{deletion})
+	if len(deletedResult.Changes) != 1 ||
+		!deletedResult.Changes[0].Deleted ||
+		deletedResult.Changes[0].Purged {
+		t.Fatalf("encrypted trash change: %+v", deletedResult)
+	}
+	restore := server.VaultMutation{
+		MutationID:   restoreID,
+		BaseRevision: 2,
+		Item: server.OpaqueItem{
+			ItemID:            itemID,
+			SchemaVersion:     1,
+			Revision:          3,
+			RevisionID:        restoreID,
+			ParentRevisionIDs: []string{deletionID},
+			Envelope:          []byte("restored-content"),
+		},
+	}
+	restoredResult := sync(
+		deletedResult.Cursor, []server.VaultMutation{restore})
+	if len(restoredResult.Changes) != 1 ||
+		restoredResult.Changes[0].Deleted {
+		t.Fatalf("restored trash change: %+v", restoredResult)
+	}
+	deletedAgainResult := sync(
+		restoredResult.Cursor,
+		[]server.VaultMutation{{
+			MutationID:   secondDelete,
+			BaseRevision: 3,
+			Item: server.OpaqueItem{
+				ItemID:            itemID,
+				SchemaVersion:     1,
+				Revision:          4,
+				RevisionID:        secondDelete,
+				ParentRevisionIDs: []string{restoreID},
+				Deleted:           true,
+				Envelope:          []byte("second-trash-content"),
+			},
+		}},
+	)
+	tombstone := server.VaultMutation{
+		MutationID:   tombstoneID,
+		BaseRevision: 4,
+		Item: server.OpaqueItem{
+			ItemID:            itemID,
+			SchemaVersion:     1,
+			Revision:          5,
+			RevisionID:        tombstoneID,
+			ParentRevisionIDs: []string{secondDelete},
+			Deleted:           true,
+			Purged:            true,
+		},
+	}
+	purgedResult := sync(
+		deletedAgainResult.Cursor,
+		[]server.VaultMutation{tombstone},
+	)
+	if len(purgedResult.Changes) != 1 ||
+		!purgedResult.Changes[0].Purged ||
+		len(purgedResult.Changes[0].Envelope) != 0 {
+		t.Fatalf("permanent Tombstone: %+v", purgedResult)
+	}
+	retry := sync(
+		purgedResult.Cursor, []server.VaultMutation{tombstone})
+	if len(retry.AppliedMutationIDs) != 1 ||
+		retry.AppliedMutationIDs[0] != tombstoneID ||
+		len(retry.Changes) != 0 {
+		t.Fatalf("idempotent Tombstone retry: %+v", retry)
+	}
+
+	snapshot := sync(rootResult.Cursor, nil)
+	if !snapshot.FullSnapshot {
+		t.Fatalf("pruned cursor did not receive full snapshot: %+v", snapshot)
+	}
+	var itemHeads []server.OpaqueItem
+	for _, item := range snapshot.Changes {
+		if item.ItemID == itemID {
+			itemHeads = append(itemHeads, item)
+		}
+	}
+	if len(itemHeads) != 1 ||
+		!itemHeads[0].Purged ||
+		len(itemHeads[0].Envelope) != 0 {
+		t.Fatalf("purged snapshot resurrected content: %+v", itemHeads)
+	}
+	if got := s.queryDatabaseScalar(t, fmt.Sprintf(`
+		SELECT
+			count(*) FILTER (WHERE envelope IS NOT NULL) || ':' ||
+			count(*) FILTER (WHERE content_purged) || ':' ||
+			(SELECT count(*) FROM vault_item_heads
+			 WHERE item_uuid = '%s')
+		FROM vault_revisions
+		WHERE item_uuid = '%s'`, itemID, itemID)); got != "0:5:1" {
+		t.Fatalf("purged storage: want 0:5:1, got %q", got)
+	}
+
+	staleRoot := server.VaultMutation{
+		MutationID:   staleRootID,
+		BaseRevision: 0,
+		Item: server.OpaqueItem{
+			ItemID:        staleItemID,
+			SchemaVersion: 1,
+			Revision:      1,
+			RevisionID:    staleRootID,
+			Envelope:      []byte("stale-root-content"),
+		},
+	}
+	staleRootResult := sync(
+		purgedResult.Cursor, []server.VaultMutation{staleRoot})
+	staleDeletion := server.VaultMutation{
+		MutationID:   staleDeleteID,
+		BaseRevision: 1,
+		Item: server.OpaqueItem{
+			ItemID:            staleItemID,
+			SchemaVersion:     1,
+			Revision:          2,
+			RevisionID:        staleDeleteID,
+			ParentRevisionIDs: []string{staleRootID},
+			Deleted:           true,
+			Envelope:          []byte("stale-trash-content"),
+		},
+	}
+	staleDeletedResult := sync(
+		staleRootResult.Cursor,
+		[]server.VaultMutation{staleDeletion},
+	)
+	stalePurge := server.VaultMutation{
+		MutationID:   stalePurgeID,
+		BaseRevision: 2,
+		Item: server.OpaqueItem{
+			ItemID:            staleItemID,
+			SchemaVersion:     1,
+			Revision:          3,
+			RevisionID:        stalePurgeID,
+			ParentRevisionIDs: []string{staleDeleteID},
+			Deleted:           true,
+			Purged:            true,
+		},
+	}
+	sync(
+		staleDeletedResult.Cursor,
+		[]server.VaultMutation{stalePurge},
+	)
+	staleEdit := server.VaultMutation{
+		MutationID:   staleEditID,
+		BaseRevision: 1,
+		Item: server.OpaqueItem{
+			ItemID:            staleItemID,
+			SchemaVersion:     1,
+			Revision:          2,
+			RevisionID:        staleEditID,
+			ParentRevisionIDs: []string{staleRootID},
+			Envelope:          []byte("offline-stale-edit"),
+		},
+	}
+	staleResult := sync(
+		staleRootResult.Cursor,
+		[]server.VaultMutation{staleEdit},
+	)
+	if !staleResult.FullSnapshot {
+		t.Fatalf("stale Client did not receive full snapshot: %+v", staleResult)
+	}
+	var (
+		staleHeads int
+		liveHeads  int
+		purgeHeads int
+	)
+	for _, item := range staleResult.Changes {
+		if item.ItemID != staleItemID {
+			continue
+		}
+		staleHeads++
+		if item.Purged {
+			purgeHeads++
+		} else if !item.Deleted {
+			liveHeads++
+		}
+	}
+	if staleHeads != 2 || liveHeads != 1 || purgeHeads != 1 {
+		t.Fatalf("stale edit not surfaced as explicit conflict: %+v",
+			staleResult.Changes)
+	}
+
+	expiredRoot := server.VaultMutation{
+		MutationID:   expiredRootID,
+		BaseRevision: 0,
+		Item: server.OpaqueItem{
+			ItemID:        expiredItemID,
+			SchemaVersion: 1,
+			Revision:      1,
+			RevisionID:    expiredRootID,
+			Envelope:      []byte("expired-root-content"),
+		},
+	}
+	expiredRootResult := sync(
+		staleResult.Cursor, []server.VaultMutation{expiredRoot})
+	expiredDelete := server.VaultMutation{
+		MutationID:   expiredDelID,
+		BaseRevision: 1,
+		Item: server.OpaqueItem{
+			ItemID:            expiredItemID,
+			SchemaVersion:     1,
+			Revision:          2,
+			RevisionID:        expiredDelID,
+			ParentRevisionIDs: []string{expiredRootID},
+			Deleted:           true,
+			Envelope:          []byte("expired-trash-content"),
+		},
+	}
+	expiredDeletedResult := sync(
+		expiredRootResult.Cursor,
+		[]server.VaultMutation{expiredDelete},
+	)
+	s.queryDatabaseScalar(t, fmt.Sprintf(`
+		UPDATE vault_revisions
+		SET tombstoned_at = now() - interval '31 days'
+		WHERE revision_uuid = '%s'
+		RETURNING revision_uuid::text`, expiredDelID))
+	expiredResult := sync(expiredDeletedResult.Cursor, nil)
+	if len(expiredResult.Changes) != 1 ||
+		!expiredResult.Changes[0].Purged ||
+		len(expiredResult.Changes[0].Envelope) != 0 {
+		t.Fatalf("expired trash was not purged: %+v", expiredResult)
+	}
+	if got := s.queryDatabaseScalar(t, fmt.Sprintf(`
+		SELECT count(*) FILTER (WHERE envelope IS NOT NULL)
+		FROM vault_revisions
+		WHERE item_uuid = '%s'`, expiredItemID)); got != "0" {
+		t.Fatalf("expired content remained stored: %q", got)
+	}
+}
+
+func (s *stack) syncVault(
+	t *testing.T,
+	accessToken string,
+	cursor string,
+	mutations []server.VaultMutation,
+) server.SyncResult {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{
+		"cursor":    cursor,
+		"mutations": mutations,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequest(
+		http.MethodPost,
+		s.serverURL+"/api/v1/sync",
+		bytes.NewReader(payload),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+accessToken)
+	request.Header.Set("Content-Type", "application/json")
+	httpClient := &http.Client{Transport: &http.Transport{
+		TLSClientConfig: tlsConfigWithCA(
+			t, filepath.Join(s.certsDir, "ca.pem")),
+	}}
+	response, err := httpClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		logs, _ := s.composeCmd(
+			context.Background(), "logs", "server").CombinedOutput()
+		t.Fatalf("sync status: want 200, got %d: %s\n%s",
+			response.StatusCode, body, logs)
+	}
+	var result server.SyncResult
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func (s *stack) queryDatabaseScalar(
+	t *testing.T,
+	query string,
+) string {
+	t.Helper()
+	cmd := s.composeCmd(
+		context.Background(),
+		"exec", "-T", "db",
+		"psql", "-U", "termkeep", "-d", "termkeep", "-tAc", query,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("query database: %v\n%s", err, out)
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func (s *stack) testTerminalSessionReuse(t *testing.T) {
