@@ -61,6 +61,74 @@ func TestEncryptedLoginRoundTripHidesSemanticFields(t *testing.T) {
 	}
 }
 
+func TestEncryptedSecureNoteRoundTripHidesSemanticFields(t *testing.T) {
+	vaultKey := bytes.Repeat([]byte{0x42}, 32)
+	note := SecureNoteItem{
+		ItemID: "11111111-1111-4111-8111-111111111111",
+		Title:  "Production recovery procedure",
+		Content: "Sensitive-Note-Content-Sentinel\n" +
+			"Second confidential line",
+	}
+
+	encrypted, err := EncryptSecureNote(
+		vaultKey,
+		"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		note,
+		1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, plaintext := range []string{note.Title, note.Content} {
+		if bytes.Contains(encrypted.Envelope, []byte(plaintext)) {
+			t.Fatalf("encrypted envelope contains %q", plaintext)
+		}
+	}
+
+	decrypted, err := DecryptSecureNote(
+		vaultKey,
+		"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		encrypted,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(decrypted, note) {
+		t.Fatalf("round trip differs:\nwant: %+v\ngot:  %+v", note, decrypted)
+	}
+}
+
+func TestEncryptedItemTypeCannotBeOpenedAsAnotherNativeType(t *testing.T) {
+	vaultKey := bytes.Repeat([]byte{0x42}, 32)
+	accountID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	itemID := "11111111-1111-4111-8111-111111111111"
+	login, err := EncryptLogin(vaultKey, accountID, LoginItem{
+		ItemID: itemID,
+		Name:   "Login",
+	}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	note, err := EncryptSecureNote(vaultKey, accountID, SecureNoteItem{
+		ItemID: itemID,
+		Title:  "Secure Note",
+	}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if opened, err := DecryptSecureNote(
+		vaultKey, accountID, login,
+	); err == nil || !reflect.DeepEqual(opened, SecureNoteItem{}) {
+		t.Fatalf("Login opened as Secure Note: %+v, %v", opened, err)
+	}
+	if opened, err := DecryptLogin(
+		vaultKey, accountID, note,
+	); err == nil || !reflect.DeepEqual(opened, LoginItem{}) {
+		t.Fatalf("Secure Note opened as Login: %+v, %v", opened, err)
+	}
+}
+
 func TestEncryptedLoginUsesRandomNonce(t *testing.T) {
 	vaultKey := bytes.Repeat([]byte{0x42}, 32)
 	login := LoginItem{

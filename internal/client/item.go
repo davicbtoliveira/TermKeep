@@ -15,7 +15,9 @@ import (
 )
 
 const loginItemSchemaVersion = 1
+const secureNoteItemSchemaVersion = 1
 const itemEnvelopeVersion = 1
+const itemPlaintextVersion = 1
 
 var ErrInvalidItemEnvelope = errors.New("invalid item envelope")
 
@@ -32,6 +34,12 @@ type LoginItem struct {
 	URLs         []string      `json:"urls"`
 	Notes        string        `json:"notes"`
 	CustomFields []CustomField `json:"custom_fields"`
+}
+
+type SecureNoteItem struct {
+	ItemID  string `json:"item_id"`
+	Title   string `json:"title"`
+	Content string `json:"content"`
 }
 
 type EncryptedItem struct {
@@ -52,8 +60,15 @@ type itemEnvelope struct {
 }
 
 type loginPlaintext struct {
-	Type string `json:"type"`
+	Type    string `json:"type"`
+	Version int    `json:"version"`
 	LoginItem
+}
+
+type secureNotePlaintext struct {
+	Type    string `json:"type"`
+	Version int    `json:"version"`
+	SecureNoteItem
 }
 
 func NewItemID() (string, error) {
@@ -77,16 +92,59 @@ func EncryptLogin(
 		accountID == "" || login.ItemID == "" || revision == 0 {
 		return EncryptedItem{}, ErrInvalidItemEnvelope
 	}
-	plaintext, err := json.Marshal(loginPlaintext{
-		Type:      "login",
-		LoginItem: login,
-	})
+	return encryptItem(
+		vaultKey,
+		accountID,
+		login.ItemID,
+		loginItemSchemaVersion,
+		revision,
+		loginPlaintext{
+			Type:      "login",
+			Version:   itemPlaintextVersion,
+			LoginItem: login,
+		},
+	)
+}
+
+func EncryptSecureNote(
+	vaultKey []byte,
+	accountID string,
+	note SecureNoteItem,
+	revision uint64,
+) (EncryptedItem, error) {
+	if len(vaultKey) != chacha20poly1305.KeySize ||
+		accountID == "" || note.ItemID == "" || revision == 0 {
+		return EncryptedItem{}, ErrInvalidItemEnvelope
+	}
+	return encryptItem(
+		vaultKey,
+		accountID,
+		note.ItemID,
+		secureNoteItemSchemaVersion,
+		revision,
+		secureNotePlaintext{
+			Type:           "secure_note",
+			Version:        itemPlaintextVersion,
+			SecureNoteItem: note,
+		},
+	)
+}
+
+func encryptItem(
+	vaultKey []byte,
+	accountID string,
+	itemID string,
+	schemaVersion int,
+	revision uint64,
+	value any,
+) (EncryptedItem, error) {
+	plaintext, err := json.Marshal(value)
 	if err != nil {
-		return EncryptedItem{}, fmt.Errorf("encode login: %w", err)
+		return EncryptedItem{}, fmt.Errorf("encode item: %w", err)
 	}
 	defer clearBytes(plaintext)
 
-	key := derivePurposeKey(vaultKey, "item/"+login.ItemID)
+	key := derivePurposeKey(vaultKey, "item/"+itemID)
 	defer clearBytes(key)
 	aead, err := chacha20poly1305.NewX(key)
 	if err != nil {
@@ -104,15 +162,15 @@ func EncryptLogin(
 		envelope.Nonce,
 		plaintext,
 		itemAssociatedData(
-			accountID, login.ItemID, loginItemSchemaVersion, revision),
+			accountID, itemID, schemaVersion, revision),
 	)
 	encoded, err := json.Marshal(envelope)
 	if err != nil {
 		return EncryptedItem{}, fmt.Errorf("encode item envelope: %w", err)
 	}
 	return EncryptedItem{
-		ItemID:        login.ItemID,
-		SchemaVersion: loginItemSchemaVersion,
+		ItemID:        itemID,
+		SchemaVersion: schemaVersion,
 		Revision:      revision,
 		Envelope:      encoded,
 	}, nil
@@ -128,16 +186,63 @@ func DecryptLogin(
 		item.SchemaVersion != loginItemSchemaVersion || item.Revision == 0 {
 		return LoginItem{}, ErrInvalidItemEnvelope
 	}
+	plaintext, err := decryptItem(vaultKey, accountID, item)
+	if err != nil {
+		return LoginItem{}, err
+	}
+	defer clearBytes(plaintext)
+	var decoded loginPlaintext
+	if err := json.Unmarshal(plaintext, &decoded); err != nil ||
+		decoded.Type != "login" ||
+		(decoded.Version != 0 &&
+			decoded.Version != itemPlaintextVersion) ||
+		decoded.ItemID != item.ItemID {
+		return LoginItem{}, ErrInvalidItemEnvelope
+	}
+	return decoded.LoginItem, nil
+}
+
+func DecryptSecureNote(
+	vaultKey []byte,
+	accountID string,
+	item EncryptedItem,
+) (SecureNoteItem, error) {
+	if len(vaultKey) != chacha20poly1305.KeySize ||
+		accountID == "" || item.ItemID == "" ||
+		item.SchemaVersion != secureNoteItemSchemaVersion ||
+		item.Revision == 0 {
+		return SecureNoteItem{}, ErrInvalidItemEnvelope
+	}
+	plaintext, err := decryptItem(vaultKey, accountID, item)
+	if err != nil {
+		return SecureNoteItem{}, err
+	}
+	defer clearBytes(plaintext)
+	var decoded secureNotePlaintext
+	if err := json.Unmarshal(plaintext, &decoded); err != nil ||
+		decoded.Type != "secure_note" ||
+		decoded.Version != itemPlaintextVersion ||
+		decoded.ItemID != item.ItemID {
+		return SecureNoteItem{}, ErrInvalidItemEnvelope
+	}
+	return decoded.SecureNoteItem, nil
+}
+
+func decryptItem(
+	vaultKey []byte,
+	accountID string,
+	item EncryptedItem,
+) ([]byte, error) {
 	var envelope itemEnvelope
 	if err := json.Unmarshal(item.Envelope, &envelope); err != nil ||
 		envelope.Version != itemEnvelopeVersion {
-		return LoginItem{}, ErrInvalidItemEnvelope
+		return nil, ErrInvalidItemEnvelope
 	}
 	key := derivePurposeKey(vaultKey, "item/"+item.ItemID)
 	defer clearBytes(key)
 	aead, err := chacha20poly1305.NewX(key)
 	if err != nil || len(envelope.Nonce) != aead.NonceSize() {
-		return LoginItem{}, ErrInvalidItemEnvelope
+		return nil, ErrInvalidItemEnvelope
 	}
 	plaintext, err := aead.Open(
 		nil,
@@ -147,15 +252,9 @@ func DecryptLogin(
 			accountID, item.ItemID, item.SchemaVersion, item.Revision),
 	)
 	if err != nil {
-		return LoginItem{}, ErrInvalidItemEnvelope
+		return nil, ErrInvalidItemEnvelope
 	}
-	defer clearBytes(plaintext)
-	var decoded loginPlaintext
-	if err := json.Unmarshal(plaintext, &decoded); err != nil ||
-		decoded.Type != "login" || decoded.ItemID != item.ItemID {
-		return LoginItem{}, ErrInvalidItemEnvelope
-	}
-	return decoded.LoginItem, nil
+	return plaintext, nil
 }
 
 func itemAssociatedData(
