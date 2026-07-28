@@ -67,7 +67,6 @@ func TestBlackbox(t *testing.T) {
 	t.Run("proxy headers ignored from untrusted sources", s.testTrustedProxyEnforcement)
 	t.Run("bare invocation opens TUI with instance state", s.testTUI)
 	t.Run("bootstrap creates only encrypted administrator vault material", s.testBootstrap)
-	t.Run("sync preserves concurrent opaque revisions", s.testConcurrentRevisionSync)
 	t.Run("login reuses unlocked session in the same terminal", s.testTerminalSessionReuse)
 	t.Run("another terminal requires its own login", s.testTerminalSessionIsolation)
 	t.Run("logout clears the terminal session", s.testTerminalSessionLogout)
@@ -82,6 +81,7 @@ func TestBlackbox(t *testing.T) {
 	t.Run("concurrent invitation consumption registers once", s.testConcurrentInvitationConsumption)
 	t.Run("encrypted Login survives a new unlocked process", s.testEncryptedLoginRoundTrip)
 	t.Run("offline Login edit synchronizes after reconnection", s.testOfflineLoginSynchronization)
+	t.Run("sync preserves and resolves concurrent revisions", s.testConcurrentRevisionSync)
 }
 
 // newStack boots the ephemeral deployment once for the whole test run.
@@ -412,12 +412,15 @@ func (s *stack) testBootstrap(t *testing.T) {
 
 func (s *stack) testConcurrentRevisionSync(t *testing.T) {
 	const (
-		email    = "admin@example.com"
-		password = "TermKeep#2026"
-		itemID   = "90000000-0000-4000-8000-000000000010"
-		rootID   = "90000000-0000-4000-8000-000000000011"
-		firstID  = "90000000-0000-4000-8000-000000000012"
-		secondID = "90000000-0000-4000-8000-000000000013"
+		email        = "admin@example.com"
+		password     = "TermKeep#2026"
+		itemID       = "90000000-0000-4000-8000-000000000010"
+		rootID       = "90000000-0000-4000-8000-000000000011"
+		firstID      = "90000000-0000-4000-8000-000000000012"
+		secondID     = "90000000-0000-4000-8000-000000000013"
+		otherItemID  = "90000000-0000-4000-8000-000000000014"
+		otherID      = "90000000-0000-4000-8000-000000000015"
+		resolutionID = "90000000-0000-4000-8000-000000000016"
 	)
 	login, err := client.Login(
 		context.Background(),
@@ -510,21 +513,64 @@ func (s *stack) testConcurrentRevisionSync(t *testing.T) {
 	sync(rootResult.Cursor, []server.VaultMutation{
 		branch(firstID, "opaque-first"),
 	})
-	sync(rootResult.Cursor, []server.VaultMutation{
+	secondResult := sync(rootResult.Cursor, []server.VaultMutation{
 		branch(secondID, "opaque-second"),
+		{
+			MutationID:   otherID,
+			BaseRevision: 0,
+			Item: server.OpaqueItem{
+				ItemID:        otherItemID,
+				SchemaVersion: 1,
+				Revision:      1,
+				RevisionID:    otherID,
+				Envelope:      []byte("opaque-unrelated"),
+			},
+		},
 	})
+	if len(secondResult.AppliedMutationIDs) != 2 {
+		t.Fatalf("mixed batch acknowledgements: %+v",
+			secondResult.AppliedMutationIDs)
+	}
 
 	pulled := sync(rootResult.Cursor, nil)
-	if len(pulled.Changes) != 2 {
-		t.Fatalf("concurrent changes: want 2, got %+v", pulled.Changes)
+	if len(pulled.Changes) != 3 {
+		t.Fatalf("concurrent/unrelated changes: want 3, got %+v",
+			pulled.Changes)
 	}
 	got := make(map[string]string, len(pulled.Changes))
 	for _, revision := range pulled.Changes {
 		got[revision.RevisionID] = string(revision.Envelope)
 	}
 	if got[firstID] != "opaque-first" ||
-		got[secondID] != "opaque-second" {
+		got[secondID] != "opaque-second" ||
+		got[otherID] != "opaque-unrelated" {
 		t.Fatalf("concurrent revisions not preserved: %+v", got)
+	}
+
+	resolution := server.VaultMutation{
+		MutationID:   resolutionID,
+		BaseRevision: 2,
+		Item: server.OpaqueItem{
+			ItemID:            itemID,
+			SchemaVersion:     1,
+			Revision:          3,
+			RevisionID:        resolutionID,
+			ParentRevisionIDs: []string{firstID, secondID},
+			Envelope:          []byte("opaque-resolution"),
+		},
+	}
+	resolved := sync(
+		pulled.Cursor, []server.VaultMutation{resolution})
+	if len(resolved.Changes) != 1 ||
+		resolved.Changes[0].RevisionID != resolutionID {
+		t.Fatalf("resolution change: %+v", resolved)
+	}
+	retry := sync(
+		resolved.Cursor, []server.VaultMutation{resolution})
+	if len(retry.AppliedMutationIDs) != 1 ||
+		retry.AppliedMutationIDs[0] != resolutionID ||
+		len(retry.Changes) != 0 {
+		t.Fatalf("idempotent resolution retry: %+v", retry)
 	}
 
 	cmd := s.composeCmd(context.Background(),
@@ -534,15 +580,19 @@ func (s *stack) testConcurrentRevisionSync(t *testing.T) {
 				(SELECT count(*) FROM vault_revisions
 				 WHERE item_uuid = '%s') || ':' ||
 				(SELECT count(*) FROM vault_item_heads
+				 WHERE item_uuid = '%s') || ':' ||
+				(SELECT count(*) FROM vault_revisions
+				 WHERE item_uuid = '%s') || ':' ||
+				(SELECT count(*) FROM vault_item_heads
 				 WHERE item_uuid = '%s')`,
-			itemID, itemID),
+			itemID, itemID, otherItemID, otherItemID),
 	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("query preserved revisions: %v\n%s", err, out)
 	}
-	if strings.TrimSpace(string(out)) != "3:2" {
-		t.Fatalf("stored revisions/heads: want 3:2, got %q",
+	if strings.TrimSpace(string(out)) != "4:1:1:1" {
+		t.Fatalf("stored revisions/heads: want 4:1:1:1, got %q",
 			strings.TrimSpace(string(out)))
 	}
 }

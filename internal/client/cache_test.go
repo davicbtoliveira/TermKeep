@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"testing/quick"
 )
 
 func TestAuthorizedCacheUnlocksWithoutServer(t *testing.T) {
@@ -398,6 +399,128 @@ func TestLegacyCacheMigratesPendingMutationToRevisionDAG(t *testing.T) {
 	if len(groups) != 1 || len(groups[0].Revisions) != 1 ||
 		groups[0].Revisions[0].RevisionID != mutationID {
 		t.Fatalf("migrated heads: %+v", groups)
+	}
+}
+
+func TestPropertyPushPullOrdersPreserveConcurrentRevisions(t *testing.T) {
+	password := []byte("TermKeep#2026")
+	accountID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	vault, err := NewVault(password, accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vault.Clear()
+
+	const (
+		itemID   = "11111111-1111-4111-8111-111111111111"
+		rootID   = "22222222-2222-4222-8222-222222222222"
+		firstID  = "33333333-3333-4333-8333-333333333333"
+		secondID = "44444444-4444-4444-8444-444444444444"
+	)
+	root := EncryptedItem{
+		ItemID:        itemID,
+		SchemaVersion: 1,
+		Revision:      1,
+		RevisionID:    rootID,
+		Envelope:      []byte("root"),
+	}
+	first := EncryptedItem{
+		ItemID:            itemID,
+		SchemaVersion:     1,
+		Revision:          2,
+		RevisionID:        firstID,
+		ParentRevisionIDs: []string{rootID},
+		Envelope:          []byte("first"),
+	}
+	second := EncryptedItem{
+		ItemID:            itemID,
+		SchemaVersion:     1,
+		Revision:          2,
+		RevisionID:        secondID,
+		ParentRevisionIDs: []string{rootID},
+		Envelope:          []byte("second"),
+	}
+	property := func(order uint8) bool {
+		cfg := Config{DataDir: filepath.Join(t.TempDir(), "cache")}
+		if err := AuthorizeCache(
+			cfg,
+			"user@example.com",
+			accountID,
+			vault.PasswordEnvelope,
+		); err != nil {
+			return false
+		}
+		cache, err := OpenCache(cfg, "user@example.com")
+		if err != nil {
+			return false
+		}
+		if err := cache.ApplySync(
+			"1", nil, []EncryptedItem{root},
+		); err != nil {
+			return false
+		}
+		mutation, err := cache.QueueMutation(first, 1)
+		if err != nil {
+			return false
+		}
+
+		if order%2 == 0 {
+			if err := cache.ApplySync(
+				"2",
+				[]string{mutation.MutationID},
+				[]EncryptedItem{first},
+			); err != nil {
+				return false
+			}
+			if err := cache.ApplySync(
+				"3", nil, []EncryptedItem{second},
+			); err != nil {
+				return false
+			}
+		} else {
+			if err := cache.ApplySync(
+				"2", nil, []EncryptedItem{second},
+			); err != nil {
+				return false
+			}
+			changes := []EncryptedItem{first, second}
+			if order&2 != 0 {
+				changes[0], changes[1] = changes[1], changes[0]
+			}
+			if err := cache.ApplySync(
+				"3",
+				[]string{mutation.MutationID},
+				changes,
+			); err != nil {
+				return false
+			}
+		}
+		if order&4 != 0 {
+			if err := cache.ApplySync(
+				"3", nil, []EncryptedItem{second, first},
+			); err != nil {
+				return false
+			}
+		}
+
+		groups, err := cache.ItemHeads()
+		if err != nil || len(groups) != 1 ||
+			len(groups[0].Revisions) != 2 {
+			return false
+		}
+		got := map[string]bool{}
+		for _, revision := range groups[0].Revisions {
+			got[revision.RevisionID] = true
+		}
+		snapshot, err := cache.SyncSnapshot()
+		return err == nil &&
+			snapshot.Cursor == "3" &&
+			len(snapshot.Mutations) == 0 &&
+			got[firstID] &&
+			got[secondID]
+	}
+	if err := quick.Check(property, &quick.Config{MaxCount: 32}); err != nil {
+		t.Fatal(err)
 	}
 }
 
