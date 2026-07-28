@@ -843,6 +843,81 @@ func TestEditLoginPreservesFieldsAndIncrementsRevision(t *testing.T) {
 	}
 }
 
+func TestEditLoginRotatesPasswordIntoEncryptedHistory(t *testing.T) {
+	changedAt := time.Date(
+		2026, time.July, 28, 14, 30, 0, 0, time.UTC)
+	revisionID := "22222222-2222-4222-8222-222222222222"
+	record := itemRecord{
+		Login: client.LoginItem{
+			ItemID:   "11111111-1111-4111-8111-111111111111",
+			Name:     "Production database",
+			Password: "Current-Password-Sentinel",
+			PasswordHistory: []client.PasswordHistoryEntry{{
+				Password:  "Older-Password-Sentinel",
+				ChangedAt: changedAt.Add(-24 * time.Hour),
+			}},
+		},
+		Revision:   1,
+		RevisionID: revisionID,
+	}
+	store := &fakeItemStore{records: []itemRecord{record}}
+	var current tea.Model = model{
+		loaded:    true,
+		vaultOpen: true,
+		itemStore: store,
+		items:     store.records,
+		now:       func() time.Time { return changedAt },
+	}
+	current, _ = current.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	current, _ = current.Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	current, _ = current.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	current, _ = current.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	current, _ = current.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+	current, _ = current.Update(tea.KeyMsg{
+		Type: tea.KeyRunes, Runes: []rune("New-Password-Sentinel"),
+	})
+	var command tea.Cmd
+	for range 4 {
+		current, command = current.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	}
+	if command == nil {
+		t.Fatal("password rotation did not save")
+	}
+	current, _ = current.Update(command())
+
+	if len(store.saved) != 1 {
+		t.Fatalf("saved Logins: %+v", store.saved)
+	}
+	saved := store.saved[0]
+	wantHistory := []client.PasswordHistoryEntry{
+		{
+			Password:  record.Login.Password,
+			ChangedAt: changedAt,
+		},
+		record.Login.PasswordHistory[0],
+	}
+	if saved.Login.Password != "New-Password-Sentinel" ||
+		!reflect.DeepEqual(saved.Login.PasswordHistory, wantHistory) ||
+		saved.Revision != 2 ||
+		!reflect.DeepEqual(
+			saved.ParentRevisionIDs,
+			[]string{revisionID},
+		) {
+		t.Fatalf("password rotation differs: %+v", saved)
+	}
+	view := current.(model).View()
+	for _, hidden := range []string{
+		record.Login.Password,
+		record.Login.PasswordHistory[0].Password,
+	} {
+		if strings.Contains(view, hidden) {
+			t.Fatalf("Vault exposed historical password %q:\n%s",
+				hidden, view)
+		}
+	}
+}
+
 func TestDeleteLoginMovesItToTrash(t *testing.T) {
 	rootID := "22222222-2222-4222-8222-222222222222"
 	record := itemRecord{

@@ -75,6 +75,8 @@ type loginForm struct {
 	parentRevisionIDs []string
 	folderID          string
 	favorite          bool
+	previousPassword  string
+	passwordHistory   []client.PasswordHistoryEntry
 	field             int
 	values            [loginFormFieldCount]string
 	editing           bool
@@ -177,6 +179,7 @@ type model struct {
 	syncLoading         bool
 	syncErr             error
 	pendingMutations    int
+	now                 func() time.Time
 }
 
 // Run starts the Bubble Tea program on the controlling terminal.
@@ -1652,7 +1655,10 @@ func (m model) updateLoginForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.itemFormErr = nil
 			return m, nil
 		}
-		record, err := recordFromLoginForm(m.loginForm)
+		record, err := recordFromLoginForm(
+			m.loginForm,
+			m.currentTime(),
+		)
 		if err != nil {
 			m.itemFormErr = err
 			return m, nil
@@ -1668,7 +1674,17 @@ func (m model) updateLoginForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func recordFromLoginForm(form loginForm) (itemRecord, error) {
+func (m model) currentTime() time.Time {
+	if m.now != nil {
+		return m.now()
+	}
+	return time.Now()
+}
+
+func recordFromLoginForm(
+	form loginForm,
+	changedAt time.Time,
+) (itemRecord, error) {
 	name := strings.TrimSpace(form.values[0])
 	if name == "" {
 		return itemRecord{}, fmt.Errorf("name is required")
@@ -1694,18 +1710,23 @@ func recordFromLoginForm(form loginForm) (itemRecord, error) {
 			Value: strings.TrimSpace(fieldValue),
 		})
 	}
+	login := client.RotateLoginPassword(client.LoginItem{
+		ItemID:   form.itemID,
+		Name:     name,
+		Username: strings.TrimSpace(form.values[1]),
+		Password: form.previousPassword,
+		PasswordHistory: append(
+			[]client.PasswordHistoryEntry(nil),
+			form.passwordHistory...,
+		),
+		FolderID:     form.folderID,
+		Favorite:     form.favorite,
+		URLs:         urls,
+		Notes:        form.values[4],
+		CustomFields: customFields,
+	}, form.values[2], changedAt)
 	return itemRecord{
-		Login: client.LoginItem{
-			ItemID:       form.itemID,
-			Name:         name,
-			Username:     strings.TrimSpace(form.values[1]),
-			Password:     form.values[2],
-			FolderID:     form.folderID,
-			Favorite:     form.favorite,
-			URLs:         urls,
-			Notes:        form.values[4],
-			CustomFields: customFields,
-		},
+		Login:    login,
 		Revision: form.revision,
 		ParentRevisionIDs: append(
 			[]string(nil), form.parentRevisionIDs...),
@@ -1727,7 +1748,12 @@ func formForLogin(record itemRecord) loginForm {
 		parentRevisionIDs: parentRevisionIDs,
 		folderID:          record.Login.FolderID,
 		favorite:          record.Login.Favorite,
-		editing:           true,
+		previousPassword:  record.Login.Password,
+		passwordHistory: append(
+			[]client.PasswordHistoryEntry(nil),
+			record.Login.PasswordHistory...,
+		),
+		editing: true,
 		values: [loginFormFieldCount]string{
 			record.Login.Name,
 			record.Login.Username,
