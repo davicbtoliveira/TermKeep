@@ -259,6 +259,19 @@ func TestSyncAcceptsEncryptedTrashRevision(t *testing.T) {
 		string(result.Changes[0].Envelope) != "encrypted-trash" {
 		t.Fatalf("encrypted trash revision: %+v", result.Changes)
 	}
+	response := getJSONWithAuth(
+		t, testServer.URL+"/api/v1/items", token)
+	if response.StatusCode != http.StatusOK {
+		response.Body.Close()
+		t.Fatalf("list after deletion status: %d", response.StatusCode)
+	}
+	var listed struct {
+		Items []OpaqueItem `json:"items"`
+	}
+	decodeJSON(t, response, &listed)
+	if len(listed.Items) != 0 {
+		t.Fatalf("deleted Item remained in normal list: %+v", listed.Items)
+	}
 }
 
 func TestSyncAcceptsPermanentTechnicalTombstone(t *testing.T) {
@@ -617,6 +630,9 @@ func (s *memoryItemStore) PutItem(_ context.Context, accountID string, item Opaq
 func (s *memoryItemStore) ListItems(_ context.Context, accountID string) ([]OpaqueItem, error) {
 	var items []OpaqueItem
 	for _, item := range s.items[accountID] {
+		if item.Deleted {
+			continue
+		}
 		items = append(items, item)
 	}
 	return items, nil

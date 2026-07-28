@@ -525,7 +525,7 @@ func (s DBStore) ListItems(ctx context.Context, accountID string) ([]OpaqueItem,
 		SELECT item_uuid::text, schema_version, revision,
 		       deleted, purged, envelope
 		FROM vault_items
-		WHERE account_uuid = $1
+		WHERE account_uuid = $1 AND NOT deleted
 		ORDER BY item_uuid`, accountID)
 	if err != nil {
 		return nil, fmt.Errorf("list opaque items: %w", err)
