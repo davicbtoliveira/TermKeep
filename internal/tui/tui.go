@@ -99,6 +99,7 @@ type folderForm struct {
 	parentRevisionIDs []string
 	name              string
 	editing           bool
+	manualMerge       bool
 }
 
 type itemStore interface {
@@ -149,6 +150,7 @@ type model struct {
 	folders             []itemRecord
 	selectedFolder      int
 	showFolders         bool
+	showFolderConflict  bool
 	folderFilter        string
 	favoritesOnly       bool
 	folderDeleteConfirm bool
@@ -532,6 +534,20 @@ func splitRecords(records []itemRecord) ([]itemRecord, []itemRecord) {
 
 func (m *model) setRecords(records []itemRecord) {
 	m.items, m.folders = splitRecords(records)
+	if m.folderFilter != "" &&
+		m.folderFilter != unfiledFolderFilter {
+		var found bool
+		for _, folder := range m.folders {
+			if folder.Folder != nil &&
+				folder.Folder.ItemID == m.folderFilter {
+				found = true
+				break
+			}
+		}
+		if !found {
+			m.folderFilter = unfiledFolderFilter
+		}
+	}
 	if m.selectedItem >= len(m.visibleItems()) {
 		m.selectedItem = 0
 	}
@@ -862,7 +878,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				))
 			}
 			if !m.showFolders && !m.showSessions &&
-				!m.showActivity && !m.showTrash {
+				!m.showActivity && !m.showTrash &&
+				!m.showFolderConflict {
 				m.favoritesOnly = !m.favoritesOnly
 				m.selectedItem = 0
 			}
@@ -882,7 +899,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if !m.showSessions && !m.showActivity &&
-				!m.showTrash {
+				!m.showTrash && !m.showFolderConflict {
 				m.showFolders = true
 				m.showItem = false
 				m.folderDeleteConfirm = false
@@ -896,6 +913,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.folderDeleteConfirm = false
 			}
 		case "m":
+			if m.showFolderConflict &&
+				m.selectedFolder < len(m.folders) {
+				record := m.folders[m.selectedFolder]
+				if len(record.ConflictVersions) > 1 {
+					m.showFolderConflict = false
+					m.showFolderForm = true
+					m.folderForm = formForFolderConflict(
+						record.ConflictVersions,
+						m.selectedConflict,
+					)
+					m.itemFormErr = nil
+					m.itemSaving = false
+				}
+				return m, nil
+			}
 			record, selected := m.selectedItemRecord()
 			if m.showItem && selected {
 				if len(record.ConflictVersions) > 1 {
@@ -920,7 +952,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "t":
 			if m.vaultOpen && m.itemStore != nil &&
 				!m.showSessions && !m.showActivity &&
-				!m.showItem && !m.showFolders {
+				!m.showItem && !m.showFolders &&
+				!m.showFolderConflict {
 				m.showTrash = true
 				m.trashLoading = true
 				m.trashErr = nil
@@ -928,10 +961,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, loadTrash(m.itemStore)
 			}
 		case "enter":
+			if m.showFolderConflict &&
+				m.selectedFolder < len(m.folders) {
+				record := m.folders[m.selectedFolder]
+				if len(record.ConflictVersions) > 1 {
+					m.itemSaving = true
+					return m, saveItem(
+						m.itemStore,
+						resolveConflict(
+							record.ConflictVersions,
+							m.selectedConflict,
+						),
+					)
+				}
+				return m, nil
+			}
 			if m.showFolders && m.selectedFolder < len(m.folders) {
 				folder := m.folders[m.selectedFolder]
-				if folder.Folder != nil &&
-					len(folder.ConflictVersions) == 0 {
+				if len(folder.ConflictVersions) > 1 {
+					m.showFolders = false
+					m.showFolderConflict = true
+					m.selectedConflict = 0
+				} else if folder.Folder != nil {
 					m.folderFilter = folder.Folder.ItemID
 					m.selectedItem = 0
 					m.showFolders = false
@@ -971,6 +1022,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showItem = false
 			m.showTrash = false
 			m.showFolders = false
+			m.showFolderConflict = false
 			m.showMoveFolder = false
 			m.showFolderForm = false
 			m.revealPassword = false
@@ -982,6 +1034,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "j", "down":
 			if m.showSessions && m.selectedSession+1 < len(m.sessions) {
 				m.selectedSession++
+			} else if m.showFolderConflict &&
+				m.selectedFolder < len(m.folders) &&
+				m.selectedConflict+1 <
+					len(m.folders[m.selectedFolder].ConflictVersions) {
+				m.selectedConflict++
 			} else if m.showFolders &&
 				m.selectedFolder+1 < len(m.folders) {
 				m.selectedFolder++
@@ -1005,6 +1062,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "k", "up":
 			if m.showSessions && m.selectedSession > 0 {
 				m.selectedSession--
+			} else if m.showFolderConflict && m.selectedConflict > 0 {
+				m.selectedConflict--
 			} else if m.showFolders && m.selectedFolder > 0 {
 				m.selectedFolder--
 				m.folderDeleteConfirm = false
@@ -1129,6 +1188,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.showItem = false
 		m.showTrash = false
 		m.showMoveFolder = false
+		m.showFolderConflict = false
 		m.selectedConflict = 0
 		m.showLoginForm = false
 		m.showNoteForm = false
@@ -1167,6 +1227,13 @@ func (m model) View() string {
 	}
 	if m.showMoveFolder {
 		return m.moveFolderView()
+	}
+	if m.showFolderConflict {
+		if m.selectedFolder >= len(m.folders) {
+			return "TermKeep — Conflict\n\nFolder not found.\n\n[v] vault  [q] quit\n"
+		}
+		return m.conflictView(
+			m.folders[m.selectedFolder].ConflictVersions)
 	}
 	if m.showTrash {
 		return m.trashView()
@@ -1442,9 +1509,36 @@ func formForFolder(record itemRecord) folderForm {
 	}
 }
 
+func formForFolderConflict(
+	versions []itemRecord,
+	selected int,
+) folderForm {
+	if selected < 0 ||
+		selected >= len(versions) ||
+		versions[selected].Folder == nil {
+		for index, version := range versions {
+			if version.Folder != nil {
+				selected = index
+				break
+			}
+		}
+	}
+	resolution := resolveConflict(versions, selected)
+	form := formForFolder(itemRecord{
+		Folder:   resolution.Folder,
+		Revision: resolution.Revision - 1,
+	})
+	form.parentRevisionIDs = append(
+		[]string(nil), resolution.ParentRevisionIDs...)
+	form.manualMerge = true
+	return form
+}
+
 func (m model) folderFormView() string {
 	title := "New Folder"
-	if m.folderForm.editing {
+	if m.folderForm.manualMerge {
+		title = "Manual Folder Conflict Merge"
+	} else if m.folderForm.editing {
 		title = "Rename Folder"
 	}
 	var b strings.Builder
@@ -1470,7 +1564,7 @@ func (m model) folderFormView() string {
 
 func (m model) updateMoveFolder(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "ctrl+c":
+	case "q", "ctrl+c":
 		return m, tea.Quit
 	case "esc", "v":
 		m.showMoveFolder = false

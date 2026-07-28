@@ -1814,6 +1814,133 @@ func TestRemovingFolderRequiresConfirmationAndUnfilesItems(t *testing.T) {
 	}
 }
 
+func TestFolderAndFavoriteChangesRemainExplicitItemConflicts(t *testing.T) {
+	firstFolderID := "44444444-4444-4444-8444-444444444444"
+	secondFolderID := "55555555-5555-4555-8555-555555555555"
+	firstID := "22222222-2222-4222-8222-222222222222"
+	secondID := "33333333-3333-4333-8333-333333333333"
+	first := itemRecord{
+		Login: client.LoginItem{
+			ItemID:   "11111111-1111-4111-8111-111111111111",
+			Name:     "Production database",
+			FolderID: firstFolderID,
+		},
+		Revision:   2,
+		RevisionID: firstID,
+	}
+	second := first
+	second.Login.FolderID = secondFolderID
+	second.Login.Favorite = true
+	second.RevisionID = secondID
+	conflict := first
+	conflict.ConflictVersions = []itemRecord{first, second}
+	folders := []itemRecord{
+		{Folder: &client.FolderItem{
+			ItemID: firstFolderID,
+			Name:   "Infrastructure",
+		}},
+		{Folder: &client.FolderItem{
+			ItemID: secondFolderID,
+			Name:   "Platform",
+		}},
+	}
+	store := &fakeItemStore{records: append(
+		[]itemRecord{conflict}, folders...)}
+	initial := model{
+		loaded:    true,
+		vaultOpen: true,
+		itemStore: store,
+		items:     []itemRecord{conflict},
+		folders:   folders,
+		showItem:  true,
+	}
+	view := initial.View()
+	for _, want := range []string{
+		"Folder: Infrastructure",
+		"Favorite: no",
+		"Folder: Platform",
+		"Favorite: yes",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("organization Conflict missing %q:\n%s", want, view)
+		}
+	}
+
+	updated, command := initial.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if command == nil {
+		t.Fatal("organization Conflict did not save selected version")
+	}
+	updated, _ = updated.(model).Update(command())
+	resolution := store.saved[0]
+	if resolution.Login.FolderID != firstFolderID ||
+		resolution.Login.Favorite ||
+		resolution.Revision != 3 ||
+		!reflect.DeepEqual(
+			resolution.ParentRevisionIDs,
+			[]string{firstID, secondID},
+		) {
+		t.Fatalf("organization Conflict resolution: %+v", resolution)
+	}
+}
+
+func TestFolderRenameConflictRequiresExplicitResolution(t *testing.T) {
+	firstID := "22222222-2222-4222-8222-222222222222"
+	secondID := "33333333-3333-4333-8333-333333333333"
+	first := itemRecord{
+		Folder: &client.FolderItem{
+			ItemID: "11111111-1111-4111-8111-111111111111",
+			Name:   "Infrastructure",
+		},
+		Revision:   2,
+		RevisionID: firstID,
+	}
+	second := first
+	second.Folder = &client.FolderItem{
+		ItemID: first.Folder.ItemID,
+		Name:   "Platform",
+	}
+	second.RevisionID = secondID
+	conflict := first
+	conflict.ConflictVersions = []itemRecord{first, second}
+	store := &fakeItemStore{records: []itemRecord{conflict}}
+	var current tea.Model = model{
+		loaded:      true,
+		vaultOpen:   true,
+		itemStore:   store,
+		folders:     []itemRecord{conflict},
+		showFolders: true,
+	}
+	current, _ = current.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	view := current.(model).View()
+	for _, want := range []string{
+		"Conflict",
+		"Folder name: Infrastructure",
+		"Folder name: Platform",
+		"[enter] keep selected",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("Folder Conflict missing %q:\n%s", want, view)
+		}
+	}
+	current, _ = current.Update(tea.KeyMsg{Type: tea.KeyDown})
+	current, command := current.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if command == nil {
+		t.Fatal("Folder Conflict resolution did not save")
+	}
+	current, _ = current.Update(command())
+
+	if len(store.saved) != 1 ||
+		store.saved[0].Folder == nil ||
+		store.saved[0].Folder.Name != second.Folder.Name ||
+		store.saved[0].Revision != 3 ||
+		!reflect.DeepEqual(
+			store.saved[0].ParentRevisionIDs,
+			[]string{firstID, secondID},
+		) {
+		t.Fatalf("Folder Conflict resolution: %+v", store.saved)
+	}
+}
+
 type fakeItemStore struct {
 	records []itemRecord
 	saved   []itemRecord
