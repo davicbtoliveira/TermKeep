@@ -58,6 +58,7 @@ var itemOperationTimeout = 10 * time.Second
 
 const loginFormFieldCount = 6
 const secureNoteFormFieldCount = 2
+const unfiledFolderFilter = "__termkeep_no_folder__"
 
 var loginFormLabels = [loginFormFieldCount]string{
 	"Name",
@@ -92,6 +93,14 @@ type secureNoteForm struct {
 	manualMerge       bool
 }
 
+type folderForm struct {
+	itemID            string
+	revision          uint64
+	parentRevisionIDs []string
+	name              string
+	editing           bool
+}
+
 type itemStore interface {
 	List(ctx context.Context) ([]itemRecord, error)
 	Save(ctx context.Context, record itemRecord) error
@@ -116,45 +125,56 @@ type cachedItemStore struct {
 
 // model is the single-screen state: the shared status lines plus keys.
 type model struct {
-	cfg              client.Config
-	lines            []string
-	err              error
-	loaded           bool
-	vaultOpen        bool
-	accessToken      string
-	showSessions     bool
-	sessionsLoading  bool
-	sessions         []client.OnlineSession
-	selectedSession  int
-	sessionsErr      error
-	showActivity     bool
-	activityAll      bool
-	activityLoading  bool
-	activityPage     client.ActivityPage
-	activityErr      error
-	itemsLoading     bool
-	items            []itemRecord
-	selectedItem     int
-	selectedConflict int
-	itemsErr         error
-	showTrash        bool
-	trashLoading     bool
-	trash            []itemRecord
-	selectedTrash    int
-	trashErr         error
-	purgeConfirm     bool
-	showItem         bool
-	revealPassword   bool
-	itemStore        itemStore
-	showLoginForm    bool
-	loginForm        loginForm
-	showNoteForm     bool
-	noteForm         secureNoteForm
-	itemFormErr      error
-	itemSaving       bool
-	syncLoading      bool
-	syncErr          error
-	pendingMutations int
+	cfg                 client.Config
+	lines               []string
+	err                 error
+	loaded              bool
+	vaultOpen           bool
+	accessToken         string
+	showSessions        bool
+	sessionsLoading     bool
+	sessions            []client.OnlineSession
+	selectedSession     int
+	sessionsErr         error
+	showActivity        bool
+	activityAll         bool
+	activityLoading     bool
+	activityPage        client.ActivityPage
+	activityErr         error
+	itemsLoading        bool
+	items               []itemRecord
+	selectedItem        int
+	selectedConflict    int
+	itemsErr            error
+	folders             []itemRecord
+	selectedFolder      int
+	showFolders         bool
+	folderFilter        string
+	favoritesOnly       bool
+	folderDeleteConfirm bool
+	folderActionErr     error
+	showFolderForm      bool
+	folderForm          folderForm
+	showMoveFolder      bool
+	selectedMoveFolder  int
+	showTrash           bool
+	trashLoading        bool
+	trash               []itemRecord
+	selectedTrash       int
+	trashErr            error
+	purgeConfirm        bool
+	showItem            bool
+	revealPassword      bool
+	itemStore           itemStore
+	showLoginForm       bool
+	loginForm           loginForm
+	showNoteForm        bool
+	noteForm            secureNoteForm
+	itemFormErr         error
+	itemSaving          bool
+	syncLoading         bool
+	syncErr             error
+	pendingMutations    int
 }
 
 // Run starts the Bubble Tea program on the controlling terminal.
@@ -286,10 +306,19 @@ func loadTrash(store itemStore) tea.Cmd {
 }
 
 func saveItem(store itemStore, record itemRecord) tea.Cmd {
+	return saveItems(store, []itemRecord{record})
+}
+
+func saveItems(store itemStore, records []itemRecord) tea.Cmd {
 	return func() tea.Msg {
 		saveCtx, cancelSave := context.WithTimeout(
 			context.Background(), itemOperationTimeout)
-		err := store.Save(saveCtx, record)
+		var err error
+		for _, record := range records {
+			if err = store.Save(saveCtx, record); err != nil {
+				break
+			}
+		}
 		cancelSave()
 		if err != nil {
 			return itemSaveErrMsg(err)
@@ -488,6 +517,159 @@ func (s cachedItemStore) CanSync() bool {
 	return s.accessToken != ""
 }
 
+func splitRecords(records []itemRecord) ([]itemRecord, []itemRecord) {
+	items := make([]itemRecord, 0, len(records))
+	folders := make([]itemRecord, 0)
+	for _, record := range records {
+		if record.Folder != nil {
+			folders = append(folders, record)
+			continue
+		}
+		items = append(items, record)
+	}
+	return items, folders
+}
+
+func (m *model) setRecords(records []itemRecord) {
+	m.items, m.folders = splitRecords(records)
+	if m.selectedItem >= len(m.visibleItems()) {
+		m.selectedItem = 0
+	}
+	if m.selectedFolder >= len(m.folders) {
+		m.selectedFolder = 0
+	}
+}
+
+func (m model) visibleItems() []itemRecord {
+	visible := make([]itemRecord, 0, len(m.items))
+	for _, record := range m.items {
+		if m.favoritesOnly && !recordIsFavorite(record) {
+			continue
+		}
+		switch m.folderFilter {
+		case "":
+		case unfiledFolderFilter:
+			if recordFolderID(record) != "" {
+				continue
+			}
+		default:
+			if recordFolderID(record) != m.folderFilter {
+				continue
+			}
+		}
+		visible = append(visible, record)
+	}
+	return visible
+}
+
+func (m model) selectedItemRecord() (itemRecord, bool) {
+	items := m.visibleItems()
+	if m.selectedItem < 0 || m.selectedItem >= len(items) {
+		return itemRecord{}, false
+	}
+	return items[m.selectedItem], true
+}
+
+func recordFolderID(record itemRecord) string {
+	if len(record.ConflictVersions) > 1 {
+		for _, version := range record.ConflictVersions {
+			if folderID := recordFolderID(version); folderID != "" {
+				return folderID
+			}
+		}
+		return ""
+	}
+	if record.SecureNote != nil {
+		return record.SecureNote.FolderID
+	}
+	return record.Login.FolderID
+}
+
+func recordIsFavorite(record itemRecord) bool {
+	if len(record.ConflictVersions) > 1 {
+		for _, version := range record.ConflictVersions {
+			if recordIsFavorite(version) {
+				return true
+			}
+		}
+		return false
+	}
+	if record.SecureNote != nil {
+		return record.SecureNote.Favorite
+	}
+	return record.Login.Favorite
+}
+
+func favoriteMarker(record itemRecord) string {
+	if recordIsFavorite(record) {
+		return " ★"
+	}
+	return ""
+}
+
+func updateOrganization(
+	record itemRecord,
+	folderID string,
+	favorite bool,
+) itemRecord {
+	if record.SecureNote != nil {
+		note := *record.SecureNote
+		note.FolderID = folderID
+		note.Favorite = favorite
+		record.SecureNote = &note
+	} else {
+		record.Login.FolderID = folderID
+		record.Login.Favorite = favorite
+	}
+	record.Revision++
+	record.ParentRevisionIDs = []string{record.RevisionID}
+	record.RevisionID = ""
+	record.ConflictVersions = nil
+	return record
+}
+
+func recordsForFolderRemoval(
+	folder itemRecord,
+	items []itemRecord,
+) ([]itemRecord, error) {
+	records := make([]itemRecord, 0, len(items)+1)
+	for _, record := range items {
+		if recordFolderID(record) != folder.Folder.ItemID {
+			continue
+		}
+		if len(record.ConflictVersions) > 1 {
+			return nil, fmt.Errorf(
+				"resolve Item conflicts before removing this Folder")
+		}
+		records = append(records, updateOrganization(
+			record, "", recordIsFavorite(record)))
+	}
+	records = append(records, deleteItem(folder))
+	return records, nil
+}
+
+func (m model) folderName(folderID string) string {
+	if folderID == "" {
+		return "No Folder"
+	}
+	for _, record := range m.folders {
+		if record.Folder != nil && record.Folder.ItemID == folderID {
+			return record.Folder.Name
+		}
+	}
+	return "No Folder"
+}
+
+func (m model) itemsInFolder(folderID string) int {
+	var count int
+	for _, record := range m.items {
+		if recordFolderID(record) == folderID {
+			count++
+		}
+	}
+	return count
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case periodicSyncMsg:
@@ -508,11 +690,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.showNoteForm {
 			return m.updateSecureNoteForm(msg)
 		}
+		if m.showFolderForm {
+			return m.updateFolderForm(msg)
+		}
+		if m.showMoveFolder {
+			return m.updateMoveFolder(msg)
+		}
 		switch msg.String() {
 		case "q", "esc", "ctrl+c":
 			return m, tea.Quit
 		case "s":
-			if m.vaultOpen && m.accessToken != "" {
+			if m.vaultOpen && m.accessToken != "" && !m.showFolders {
 				m.showActivity = false
 				m.showSessions = true
 				m.sessionsLoading = true
@@ -520,6 +708,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, loadSessions(m.cfg, m.accessToken)
 			}
 		case "a":
+			if m.showFolders {
+				m.folderFilter = ""
+				m.selectedItem = 0
+				m.showFolders = false
+				m.folderDeleteConfirm = false
+				return m, nil
+			}
 			if m.vaultOpen && m.accessToken != "" {
 				m.showSessions = false
 				m.showActivity = true
@@ -529,9 +724,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, loadActivity(m.cfg, m.accessToken, false, "")
 			}
 		case "c":
+			if m.showFolders && m.itemStore != nil {
+				itemID, err := client.NewItemID()
+				if err != nil {
+					m.folderActionErr = err
+					return m, nil
+				}
+				m.showFolderForm = true
+				m.folderForm = folderForm{
+					itemID:   itemID,
+					revision: 1,
+				}
+				m.folderActionErr = nil
+				m.itemSaving = false
+				return m, nil
+			}
 			if m.vaultOpen && m.itemStore != nil &&
 				!m.showSessions && !m.showActivity &&
-				!m.showItem && !m.showTrash {
+				!m.showItem && !m.showTrash && !m.showFolders {
 				itemID, err := client.NewItemID()
 				if err != nil {
 					m.itemsErr = err
@@ -558,7 +768,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.vaultOpen && m.itemStore != nil &&
 				!m.showSessions && !m.showActivity &&
-				!m.showItem && !m.showTrash {
+				!m.showItem && !m.showTrash && !m.showFolders {
 				itemID, err := client.NewItemID()
 				if err != nil {
 					m.itemsErr = err
@@ -573,11 +783,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.itemSaving = false
 			}
 		case "e":
+			if m.showFolders && m.selectedFolder < len(m.folders) {
+				record := m.folders[m.selectedFolder]
+				if len(record.ConflictVersions) == 0 {
+					m.showFolderForm = true
+					m.folderForm = formForFolder(record)
+					m.folderActionErr = nil
+					m.itemSaving = false
+				}
+				return m, nil
+			}
+			record, selected := m.selectedItemRecord()
 			if m.vaultOpen && m.itemStore != nil &&
 				!m.showSessions && !m.showActivity &&
-				m.selectedItem < len(m.items) &&
-				len(m.items[m.selectedItem].ConflictVersions) == 0 {
-				record := m.items[m.selectedItem]
+				selected &&
+				len(record.ConflictVersions) == 0 {
 				m.showItem = false
 				if record.SecureNote != nil {
 					m.showNoteForm = true
@@ -590,9 +810,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.itemSaving = false
 			}
 		case "d":
-			if m.showItem && m.itemStore != nil &&
-				m.selectedItem < len(m.items) {
-				record := m.items[m.selectedItem]
+			if m.showFolders && m.itemStore != nil &&
+				m.selectedFolder < len(m.folders) {
+				folder := m.folders[m.selectedFolder]
+				if len(folder.ConflictVersions) > 0 {
+					return m, nil
+				}
+				if !m.folderDeleteConfirm {
+					m.folderDeleteConfirm = true
+					m.folderActionErr = nil
+					return m, nil
+				}
+				records, err := recordsForFolderRemoval(
+					folder, m.items)
+				if err != nil {
+					m.folderActionErr = err
+					m.folderDeleteConfirm = false
+					return m, nil
+				}
+				m.itemSaving = true
+				return m, saveItems(m.itemStore, records)
+			}
+			record, selected := m.selectedItemRecord()
+			if m.showItem && m.itemStore != nil && selected {
 				if len(record.ConflictVersions) == 0 &&
 					!record.Deleted {
 					m.itemSaving = true
@@ -603,13 +843,61 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case "p":
-			if m.showItem && m.selectedItem < len(m.items) &&
-				len(m.items[m.selectedItem].ConflictVersions) == 0 {
+			record, selected := m.selectedItemRecord()
+			if m.showItem && selected &&
+				len(record.ConflictVersions) == 0 &&
+				record.SecureNote == nil {
 				m.revealPassword = !m.revealPassword
 			}
+		case "f":
+			record, selected := m.selectedItemRecord()
+			if m.showItem && selected &&
+				len(record.ConflictVersions) == 0 &&
+				m.itemStore != nil {
+				m.itemSaving = true
+				return m, saveItem(m.itemStore, updateOrganization(
+					record,
+					recordFolderID(record),
+					!recordIsFavorite(record),
+				))
+			}
+			if !m.showFolders && !m.showSessions &&
+				!m.showActivity && !m.showTrash {
+				m.favoritesOnly = !m.favoritesOnly
+				m.selectedItem = 0
+			}
+		case "o":
+			record, selected := m.selectedItemRecord()
+			if m.showItem && selected &&
+				len(record.ConflictVersions) == 0 {
+				m.showMoveFolder = true
+				m.selectedMoveFolder = 0
+				for index, folder := range m.folders {
+					if folder.Folder != nil &&
+						folder.Folder.ItemID == recordFolderID(record) {
+						m.selectedMoveFolder = index + 1
+						break
+					}
+				}
+				return m, nil
+			}
+			if !m.showSessions && !m.showActivity &&
+				!m.showTrash {
+				m.showFolders = true
+				m.showItem = false
+				m.folderDeleteConfirm = false
+				m.folderActionErr = nil
+			}
+		case "u":
+			if m.showFolders {
+				m.folderFilter = unfiledFolderFilter
+				m.selectedItem = 0
+				m.showFolders = false
+				m.folderDeleteConfirm = false
+			}
 		case "m":
-			if m.showItem && m.selectedItem < len(m.items) {
-				record := m.items[m.selectedItem]
+			record, selected := m.selectedItemRecord()
+			if m.showItem && selected {
 				if len(record.ConflictVersions) > 1 {
 					m.showItem = false
 					if record.SecureNote != nil {
@@ -632,7 +920,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "t":
 			if m.vaultOpen && m.itemStore != nil &&
 				!m.showSessions && !m.showActivity &&
-				!m.showItem {
+				!m.showItem && !m.showFolders {
 				m.showTrash = true
 				m.trashLoading = true
 				m.trashErr = nil
@@ -640,8 +928,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, loadTrash(m.itemStore)
 			}
 		case "enter":
-			if m.showItem && m.selectedItem < len(m.items) {
-				record := m.items[m.selectedItem]
+			if m.showFolders && m.selectedFolder < len(m.folders) {
+				folder := m.folders[m.selectedFolder]
+				if folder.Folder != nil &&
+					len(folder.ConflictVersions) == 0 {
+					m.folderFilter = folder.Folder.ItemID
+					m.selectedItem = 0
+					m.showFolders = false
+					m.folderDeleteConfirm = false
+				}
+				return m, nil
+			}
+			record, selected := m.selectedItemRecord()
+			if m.showItem && selected {
 				if len(record.ConflictVersions) > 1 {
 					m.itemSaving = true
 					return m, saveItem(
@@ -653,7 +952,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					)
 				}
 			} else if m.vaultOpen && !m.showSessions && !m.showActivity &&
-				m.selectedItem < len(m.items) {
+				!m.showTrash && selected {
 				m.showItem = true
 				m.revealPassword = false
 				m.selectedConflict = 0
@@ -671,35 +970,52 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showActivity = false
 			m.showItem = false
 			m.showTrash = false
+			m.showFolders = false
+			m.showMoveFolder = false
+			m.showFolderForm = false
 			m.revealPassword = false
 			m.selectedConflict = 0
 			m.purgeConfirm = false
+			m.folderDeleteConfirm = false
 			m.showNoteForm = false
 			return m, nil
 		case "j", "down":
 			if m.showSessions && m.selectedSession+1 < len(m.sessions) {
 				m.selectedSession++
-			} else if m.showItem && m.selectedItem < len(m.items) &&
-				m.selectedConflict+1 <
-					len(m.items[m.selectedItem].ConflictVersions) {
-				m.selectedConflict++
+			} else if m.showFolders &&
+				m.selectedFolder+1 < len(m.folders) {
+				m.selectedFolder++
+				m.folderDeleteConfirm = false
+				m.folderActionErr = nil
+			} else if m.showItem {
+				record, selected := m.selectedItemRecord()
+				if selected && m.selectedConflict+1 <
+					len(record.ConflictVersions) {
+					m.selectedConflict++
+				}
 			} else if m.showTrash &&
 				m.selectedTrash+1 < len(m.trash) {
 				m.selectedTrash++
 				m.purgeConfirm = false
 			} else if !m.showSessions && !m.showActivity && !m.showItem &&
-				m.selectedItem+1 < len(m.items) {
+				!m.showFolders &&
+				m.selectedItem+1 < len(m.visibleItems()) {
 				m.selectedItem++
 			}
 		case "k", "up":
 			if m.showSessions && m.selectedSession > 0 {
 				m.selectedSession--
+			} else if m.showFolders && m.selectedFolder > 0 {
+				m.selectedFolder--
+				m.folderDeleteConfirm = false
+				m.folderActionErr = nil
 			} else if m.showItem && m.selectedConflict > 0 {
 				m.selectedConflict--
 			} else if m.showTrash && m.selectedTrash > 0 {
 				m.selectedTrash--
 				m.purgeConfirm = false
 			} else if !m.showSessions && !m.showActivity && !m.showItem &&
+				!m.showFolders &&
 				m.selectedItem > 0 {
 				m.selectedItem--
 			}
@@ -784,15 +1100,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.activityErr = msg
 	case itemsMsg:
 		m.itemsLoading = false
-		m.items = []itemRecord(msg)
+		m.setRecords([]itemRecord(msg))
 		m.selectedConflict = 0
 		m.showLoginForm = false
 		m.showNoteForm = false
+		m.showFolderForm = false
 		m.itemFormErr = nil
 		m.itemSaving = false
-		if m.selectedItem >= len(m.items) {
-			m.selectedItem = 0
-		}
 	case itemsErrMsg:
 		m.itemsLoading = false
 		m.itemsErr = msg
@@ -811,19 +1125,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.itemFormErr = msg
 		m.itemSaving = false
 	case itemSavedMsg:
-		m.items = msg.items
+		m.setRecords(msg.items)
 		m.showItem = false
 		m.showTrash = false
+		m.showMoveFolder = false
 		m.selectedConflict = 0
 		m.showLoginForm = false
 		m.showNoteForm = false
+		m.showFolderForm = false
 		m.itemFormErr = nil
+		m.folderActionErr = nil
+		m.folderDeleteConfirm = false
 		m.itemSaving = false
 		m.syncErr = msg.syncErr
 		m.pendingMutations = msg.pending
-		if m.selectedItem >= len(m.items) {
-			m.selectedItem = 0
-		}
 		if msg.syncErr != nil {
 			return m, checkStatus(m.cfg)
 		}
@@ -831,11 +1146,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncLoading = false
 		m.syncErr = msg.err
 		m.pendingMutations = msg.pending
-		m.items = msg.items
+		m.setRecords(msg.items)
 		m.selectedConflict = 0
-		if m.selectedItem >= len(m.items) {
-			m.selectedItem = 0
-		}
 		if msg.err != nil {
 			return m, checkStatus(m.cfg)
 		}
@@ -850,11 +1162,20 @@ func (m model) View() string {
 	if m.showNoteForm {
 		return m.secureNoteFormView()
 	}
+	if m.showFolderForm {
+		return m.folderFormView()
+	}
+	if m.showMoveFolder {
+		return m.moveFolderView()
+	}
 	if m.showTrash {
 		return m.trashView()
 	}
 	if m.showItem {
 		return m.itemView()
+	}
+	if m.showFolders {
+		return m.foldersView()
 	}
 	if m.showActivity {
 		return m.activityView()
@@ -872,6 +1193,7 @@ func (m model) View() string {
 		}
 	}
 	if m.vaultOpen {
+		visibleItems := m.visibleItems()
 		switch {
 		case m.itemsLoading:
 			b.WriteString("Vault:    unlocked\n")
@@ -879,12 +1201,29 @@ func (m model) View() string {
 		case m.itemsErr != nil:
 			b.WriteString("Vault:    unlocked\n")
 			b.WriteString("Items:    error — " + m.itemsErr.Error() + "\n")
-		case len(m.items) == 0:
+		case len(m.items) == 0 && len(m.folders) == 0:
 			b.WriteString("Vault:    unlocked (empty)\n")
 		default:
 			b.WriteString("Vault:    unlocked\n")
+			if m.favoritesOnly {
+				b.WriteString("View:     Favorites\n")
+			}
+			if m.folderFilter != "" {
+				folderID := m.folderFilter
+				if folderID == unfiledFolderFilter {
+					folderID = ""
+				}
+				b.WriteString(
+					"Folder:   " +
+						m.folderName(folderID) +
+						"\n",
+				)
+			}
 			b.WriteString("Items:\n")
-			for index, record := range m.items {
+			if len(visibleItems) == 0 {
+				b.WriteString("  No Items in this view.\n")
+			}
+			for index, record := range visibleItems {
 				cursor := " "
 				if index == m.selectedItem {
 					cursor = ">"
@@ -900,13 +1239,15 @@ func (m model) View() string {
 				} else if record.SecureNote != nil {
 					fmt.Fprintf(
 						&b,
-						"%s [Secure Note] %s\n",
+						"%s%s [Secure Note] %s\n",
 						cursor,
+						favoriteMarker(record),
 						record.SecureNote.Title,
 					)
 				} else {
-					fmt.Fprintf(&b, "%s [Login] %s — %s\n",
-						cursor, record.Login.Name, record.Login.Username)
+					fmt.Fprintf(&b, "%s%s [Login] %s — %s\n",
+						cursor, favoriteMarker(record),
+						record.Login.Name, record.Login.Username)
 				}
 			}
 		}
@@ -926,7 +1267,7 @@ func (m model) View() string {
 	if m.vaultOpen && m.itemStore != nil {
 		b.WriteString(
 			"\n[c] new Login  [n] new Secure Note  " +
-				"[enter] open  [t] Trash  ",
+				"[enter] open  [f] Favorites  [o] Folders  [t] Trash  ",
 		)
 		if m.accessToken != "" {
 			b.WriteString("[a] Activity  [s] Active Sessions  ")
@@ -1037,6 +1378,156 @@ func (m model) secureNoteFormView() string {
 				"[esc] cancel  [ctrl+c] quit\n",
 		)
 	}
+	return b.String()
+}
+
+func (m model) updateFolderForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.itemSaving {
+		if msg.String() == "ctrl+c" {
+			return m, tea.Quit
+		}
+		return m, nil
+	}
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "esc":
+		m.showFolderForm = false
+		m.itemFormErr = nil
+	case "ctrl+u":
+		m.folderForm.name = ""
+	case "backspace":
+		value := []rune(m.folderForm.name)
+		if len(value) > 0 {
+			m.folderForm.name = string(value[:len(value)-1])
+		}
+	case "enter":
+		name := strings.TrimSpace(m.folderForm.name)
+		if name == "" {
+			m.itemFormErr = fmt.Errorf("Folder name is required")
+			return m, nil
+		}
+		m.itemSaving = true
+		m.itemFormErr = nil
+		return m, saveItem(m.itemStore, itemRecord{
+			Folder: &client.FolderItem{
+				ItemID: m.folderForm.itemID,
+				Name:   name,
+			},
+			Revision: m.folderForm.revision,
+			ParentRevisionIDs: append(
+				[]string(nil),
+				m.folderForm.parentRevisionIDs...,
+			),
+		})
+	default:
+		if msg.Type == tea.KeyRunes {
+			m.folderForm.name += string(msg.Runes)
+		}
+	}
+	return m, nil
+}
+
+func formForFolder(record itemRecord) folderForm {
+	var parentRevisionIDs []string
+	if record.RevisionID != "" {
+		parentRevisionIDs = []string{record.RevisionID}
+	}
+	return folderForm{
+		itemID:            record.Folder.ItemID,
+		revision:          record.Revision + 1,
+		parentRevisionIDs: parentRevisionIDs,
+		name:              record.Folder.Name,
+		editing:           true,
+	}
+}
+
+func (m model) folderFormView() string {
+	title := "New Folder"
+	if m.folderForm.editing {
+		title = "Rename Folder"
+	}
+	var b strings.Builder
+	fmt.Fprintf(
+		&b,
+		"TermKeep — %s\n\n> Name: %s\n",
+		title,
+		m.folderForm.name,
+	)
+	if m.itemFormErr != nil {
+		fmt.Fprintf(&b, "\nError: %s\n", m.itemFormErr)
+	}
+	if m.itemSaving {
+		b.WriteString("\nSaving…  [ctrl+c] quit\n")
+	} else {
+		b.WriteString(
+			"\n[enter] save  [ctrl+u] clear field  " +
+				"[esc] cancel  [ctrl+c] quit\n",
+		)
+	}
+	return b.String()
+}
+
+func (m model) updateMoveFolder(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "esc", "v":
+		m.showMoveFolder = false
+		return m, nil
+	case "j", "down":
+		if m.selectedMoveFolder < len(m.folders) {
+			m.selectedMoveFolder++
+		}
+	case "k", "up":
+		if m.selectedMoveFolder > 0 {
+			m.selectedMoveFolder--
+		}
+	case "enter":
+		record, ok := m.selectedItemRecord()
+		if !ok {
+			m.showMoveFolder = false
+			return m, nil
+		}
+		folderID := ""
+		if m.selectedMoveFolder > 0 {
+			folder := m.folders[m.selectedMoveFolder-1]
+			if folder.Folder != nil {
+				folderID = folder.Folder.ItemID
+			}
+		}
+		if folderID == recordFolderID(record) {
+			m.showMoveFolder = false
+			return m, nil
+		}
+		m.itemSaving = true
+		return m, saveItem(m.itemStore, updateOrganization(
+			record, folderID, recordIsFavorite(record)))
+	}
+	return m, nil
+}
+
+func (m model) moveFolderView() string {
+	var b strings.Builder
+	b.WriteString("TermKeep — Move Item\n\n")
+	cursor := " "
+	if m.selectedMoveFolder == 0 {
+		cursor = ">"
+	}
+	fmt.Fprintf(&b, "%s No Folder\n", cursor)
+	for index, record := range m.folders {
+		if record.Folder == nil {
+			continue
+		}
+		cursor = " "
+		if m.selectedMoveFolder == index+1 {
+			cursor = ">"
+		}
+		fmt.Fprintf(&b, "%s %s\n", cursor, record.Folder.Name)
+	}
+	b.WriteString(
+		"\n[j/k] select  [enter] move  [esc] cancel  [q] quit\n",
+	)
 	return b.String()
 }
 
@@ -1289,6 +1780,67 @@ func (m model) loginFormView() string {
 	return b.String()
 }
 
+func (m model) foldersView() string {
+	var b strings.Builder
+	b.WriteString("TermKeep — Folders\n\n")
+	if len(m.folders) == 0 {
+		b.WriteString("No Folders.\n")
+	} else {
+		for index, record := range m.folders {
+			cursor := " "
+			if index == m.selectedFolder {
+				cursor = ">"
+			}
+			if len(record.ConflictVersions) > 1 {
+				fmt.Fprintf(
+					&b,
+					"%s ⚠ Conflict — %s (%d versions)\n",
+					cursor,
+					recordTitle(record),
+					len(record.ConflictVersions),
+				)
+				continue
+			}
+			fmt.Fprintf(
+				&b,
+				"%s %s (%d Items)\n",
+				cursor,
+				record.Folder.Name,
+				m.itemsInFolder(record.Folder.ItemID),
+			)
+		}
+	}
+	if m.folderDeleteConfirm &&
+		m.selectedFolder < len(m.folders) {
+		folder := m.folders[m.selectedFolder]
+		count := m.itemsInFolder(folder.Folder.ItemID)
+		fmt.Fprintf(
+			&b,
+			"\nWarning: removing this Folder moves %d %s to No Folder.\n"+
+				"Press [d] again to remove %s.\n",
+			count,
+			itemCountLabel(count),
+			folder.Folder.Name,
+		)
+	}
+	if m.folderActionErr != nil {
+		fmt.Fprintf(&b, "\nError: %s\n", m.folderActionErr)
+	}
+	b.WriteString(
+		"\n[j/k] select  [enter] open  [a] All Items  " +
+			"[u] No Folder  [c] create  [e] rename  [d] remove  " +
+			"[v] vault  [q] quit\n",
+	)
+	return b.String()
+}
+
+func itemCountLabel(count int) string {
+	if count == 1 {
+		return "Item"
+	}
+	return "Items"
+}
+
 func (m model) trashView() string {
 	var b strings.Builder
 	b.WriteString("TermKeep — Trash\n\n")
@@ -1305,7 +1857,12 @@ func (m model) trashView() string {
 			if index == m.selectedTrash {
 				cursor = ">"
 			}
-			if record.SecureNote != nil {
+			if record.Folder != nil {
+				fmt.Fprintf(
+					&b, "%s [Folder] %s\n",
+					cursor, record.Folder.Name,
+				)
+			} else if record.SecureNote != nil {
 				fmt.Fprintf(
 					&b, "%s [Secure Note] %s\n",
 					cursor, record.SecureNote.Title,
@@ -1333,10 +1890,10 @@ func (m model) trashView() string {
 }
 
 func (m model) itemView() string {
-	if m.selectedItem >= len(m.items) {
+	record, ok := m.selectedItemRecord()
+	if !ok {
 		return "TermKeep — Login\n\nLogin not found.\n\n[v] vault  [q] quit\n"
 	}
-	record := m.items[m.selectedItem]
 	if len(record.ConflictVersions) > 1 {
 		return m.conflictView(record.ConflictVersions)
 	}
@@ -1348,8 +1905,15 @@ func (m model) itemView() string {
 			record.SecureNote.Title,
 		)
 		fmt.Fprintf(&b, "Content:\n%s\n", record.SecureNote.Content)
+		fmt.Fprintf(
+			&b,
+			"\nFolder: %s\nFavorite: %s\n",
+			m.folderName(record.SecureNote.FolderID),
+			yesNo(record.SecureNote.Favorite),
+		)
 		b.WriteString(
-			"\n[e] edit  [d] delete  [v] vault  [q] quit\n",
+			"\n[e] edit  [f] favorite/unfavorite  [o] move  " +
+				"[d] delete  [v] vault  [q] quit\n",
 		)
 		return b.String()
 	}
@@ -1367,15 +1931,29 @@ func (m model) itemView() string {
 		fmt.Fprintf(&b, "  - %s\n", value)
 	}
 	fmt.Fprintf(&b, "Notes: %s\n", login.Notes)
+	fmt.Fprintf(
+		&b,
+		"Folder: %s\nFavorite: %s\n",
+		m.folderName(login.FolderID),
+		yesNo(login.Favorite),
+	)
 	b.WriteString("Custom fields:\n")
 	for _, field := range login.CustomFields {
 		fmt.Fprintf(&b, "  %s: %s\n", field.Name, field.Value)
 	}
 	b.WriteString(
-		"\n[p] reveal/hide password  [e] edit  [d] delete  " +
+		"\n[p] reveal/hide password  [e] edit  " +
+			"[f] favorite/unfavorite  [o] move  [d] delete  " +
 			"[v] vault  [q] quit\n",
 	)
 	return b.String()
+}
+
+func yesNo(value bool) string {
+	if value {
+		return "yes"
+	}
+	return "no"
 }
 
 func recordTitle(record itemRecord) string {
@@ -1411,12 +1989,22 @@ func (m model) conflictView(versions []itemRecord) string {
 			b.WriteString("  Permanently deleted\n\n")
 			continue
 		}
+		if version.Folder != nil {
+			fmt.Fprintf(&b, "  Folder name: %s\n\n", version.Folder.Name)
+			continue
+		}
 		if version.SecureNote != nil {
 			fmt.Fprintf(
 				&b, "  Title: %s\n", version.SecureNote.Title)
 			fmt.Fprintf(
 				&b, "  Content: %s\n\n",
 				version.SecureNote.Content,
+			)
+			fmt.Fprintf(
+				&b,
+				"  Folder: %s\n  Favorite: %s\n\n",
+				m.folderName(version.SecureNote.FolderID),
+				yesNo(version.SecureNote.Favorite),
 			)
 			continue
 		}
@@ -1426,6 +2014,12 @@ func (m model) conflictView(versions []itemRecord) string {
 		fmt.Fprintf(&b, "  URLs: %s\n",
 			strings.Join(version.Login.URLs, ", "))
 		fmt.Fprintf(&b, "  Notes: %s\n", version.Login.Notes)
+		fmt.Fprintf(
+			&b,
+			"  Folder: %s\n  Favorite: %s\n",
+			m.folderName(version.Login.FolderID),
+			yesNo(version.Login.Favorite),
+		)
 		if len(version.Login.CustomFields) > 0 {
 			b.WriteString("  Custom fields:\n")
 			for _, field := range version.Login.CustomFields {

@@ -1512,6 +1512,308 @@ func TestLoginSaveRemainsCommittedWhenSyncTimesOut(t *testing.T) {
 	}
 }
 
+func TestVaultNavigatesFoldersAndFavorites(t *testing.T) {
+	folderID := "33333333-3333-4333-8333-333333333333"
+	records := []itemRecord{
+		{
+			Folder: &client.FolderItem{
+				ItemID: folderID,
+				Name:   "Production infrastructure",
+			},
+			Revision: 1,
+		},
+		{
+			Login: client.LoginItem{
+				ItemID:   "11111111-1111-4111-8111-111111111111",
+				Name:     "Production database",
+				FolderID: folderID,
+				Favorite: true,
+			},
+			Revision: 1,
+		},
+		{
+			SecureNote: &client.SecureNoteItem{
+				ItemID: "22222222-2222-4222-8222-222222222222",
+				Title:  "Unfiled recovery procedure",
+			},
+			Revision: 1,
+		},
+	}
+	current, _ := model{
+		loaded:    true,
+		vaultOpen: true,
+		itemStore: &fakeItemStore{records: records},
+	}.Update(itemsMsg(records))
+	got := current.(model)
+	if len(got.items) != 2 || len(got.folders) != 1 {
+		t.Fatalf("Vault records not partitioned: %+v", got)
+	}
+	for _, want := range []string{
+		"Production database",
+		"Unfiled recovery procedure",
+		"[f] Favorites",
+		"[o] Folders",
+	} {
+		if !strings.Contains(got.View(), want) {
+			t.Fatalf("Vault view missing %q:\n%s", want, got.View())
+		}
+	}
+
+	current, _ = got.Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
+	favorites := current.(model).View()
+	if !strings.Contains(favorites, "View:     Favorites") ||
+		!strings.Contains(favorites, "Production database") ||
+		strings.Contains(favorites, "Unfiled recovery procedure") {
+		t.Fatalf("Favorites view differs:\n%s", favorites)
+	}
+
+	current, _ = current.(model).Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
+	current, _ = current.(model).Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}})
+	if !strings.Contains(
+		current.(model).View(), "Folders\n",
+	) || !strings.Contains(
+		current.(model).View(), "Production infrastructure",
+	) {
+		t.Fatalf("Folder navigation missing:\n%s", current.(model).View())
+	}
+	current, _ = current.(model).Update(tea.KeyMsg{Type: tea.KeyEnter})
+	folderView := current.(model).View()
+	if !strings.Contains(
+		folderView, "Folder:   Production infrastructure",
+	) || !strings.Contains(
+		folderView, "Production database",
+	) || strings.Contains(
+		folderView, "Unfiled recovery procedure",
+	) {
+		t.Fatalf("selected Folder view differs:\n%s", folderView)
+	}
+
+	current, _ = current.(model).Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}})
+	current, _ = current.(model).Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'u'}})
+	unfiled := current.(model).View()
+	if !strings.Contains(unfiled, "Folder:   No Folder") ||
+		strings.Contains(unfiled, "Production database") ||
+		!strings.Contains(unfiled, "Unfiled recovery procedure") {
+		t.Fatalf("No Folder view differs:\n%s", unfiled)
+	}
+}
+
+func TestItemCanBeFavoritedFromDetail(t *testing.T) {
+	revisionID := "22222222-2222-4222-8222-222222222222"
+	record := itemRecord{
+		Login: client.LoginItem{
+			ItemID: "11111111-1111-4111-8111-111111111111",
+			Name:   "Production database",
+		},
+		Revision:   1,
+		RevisionID: revisionID,
+	}
+	store := &fakeItemStore{records: []itemRecord{record}}
+	current, command := model{
+		loaded:    true,
+		vaultOpen: true,
+		itemStore: store,
+		items:     store.records,
+		showItem:  true,
+	}.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
+	if command == nil {
+		t.Fatal("favorite key did not save")
+	}
+	current, _ = current.(model).Update(command())
+
+	if len(store.saved) != 1 ||
+		!store.saved[0].Login.Favorite ||
+		store.saved[0].Revision != 2 ||
+		!reflect.DeepEqual(
+			store.saved[0].ParentRevisionIDs,
+			[]string{revisionID},
+		) {
+		t.Fatalf("favorite mutation differs: %+v", store.saved)
+	}
+}
+
+func TestItemCanMoveToOneFolderFromDetail(t *testing.T) {
+	folderID := "33333333-3333-4333-8333-333333333333"
+	revisionID := "22222222-2222-4222-8222-222222222222"
+	record := itemRecord{
+		SecureNote: &client.SecureNoteItem{
+			ItemID: "11111111-1111-4111-8111-111111111111",
+			Title:  "Recovery procedure",
+		},
+		Revision:   1,
+		RevisionID: revisionID,
+	}
+	folder := itemRecord{
+		Folder: &client.FolderItem{
+			ItemID: folderID,
+			Name:   "Production infrastructure",
+		},
+		Revision: 1,
+	}
+	store := &fakeItemStore{records: []itemRecord{record, folder}}
+	var current tea.Model = model{
+		loaded:    true,
+		vaultOpen: true,
+		itemStore: store,
+		items:     []itemRecord{record},
+		folders:   []itemRecord{folder},
+		showItem:  true,
+	}
+	current, _ = current.Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}})
+	if !strings.Contains(
+		current.(model).View(), "Move Item",
+	) || !strings.Contains(
+		current.(model).View(), "Production infrastructure",
+	) {
+		t.Fatalf("move picker missing:\n%s", current.(model).View())
+	}
+	current, _ = current.Update(tea.KeyMsg{Type: tea.KeyDown})
+	current, command := current.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if command == nil {
+		t.Fatal("Folder selection did not save")
+	}
+	current, _ = current.Update(command())
+
+	if len(store.saved) != 1 ||
+		store.saved[0].SecureNote == nil ||
+		store.saved[0].SecureNote.FolderID != folderID ||
+		store.saved[0].Revision != 2 ||
+		!reflect.DeepEqual(
+			store.saved[0].ParentRevisionIDs,
+			[]string{revisionID},
+		) {
+		t.Fatalf("move mutation differs: %+v", store.saved)
+	}
+}
+
+func TestFolderCreateAndRenameUseEncryptedRecords(t *testing.T) {
+	store := &fakeItemStore{}
+	var current tea.Model = model{
+		loaded:      true,
+		vaultOpen:   true,
+		itemStore:   store,
+		showFolders: true,
+	}
+	current, _ = current.Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	current, _ = current.Update(tea.KeyMsg{
+		Type: tea.KeyRunes, Runes: []rune("Production infrastructure"),
+	})
+	current, command := current.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if command == nil {
+		t.Fatal("new Folder did not save")
+	}
+	current, _ = current.Update(command())
+	if len(store.saved) != 1 ||
+		store.saved[0].Folder == nil ||
+		store.saved[0].Folder.Name != "Production infrastructure" ||
+		store.saved[0].Folder.ItemID == "" ||
+		store.saved[0].Revision != 1 {
+		t.Fatalf("created Folder differs: %+v", store.saved)
+	}
+
+	created := store.saved[0]
+	created.RevisionID = "44444444-4444-4444-8444-444444444444"
+	store.records[0] = created
+	current = model{
+		loaded:         true,
+		vaultOpen:      true,
+		itemStore:      store,
+		folders:        []itemRecord{created},
+		showFolders:    true,
+		selectedFolder: 0,
+	}
+	current, _ = current.Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	current, _ = current.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+	current, _ = current.Update(tea.KeyMsg{
+		Type: tea.KeyRunes, Runes: []rune("Platform"),
+	})
+	current, command = current.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if command == nil {
+		t.Fatal("renamed Folder did not save")
+	}
+	current, _ = current.Update(command())
+	renamed := store.saved[1]
+	if renamed.Folder == nil ||
+		renamed.Folder.ItemID != created.Folder.ItemID ||
+		renamed.Folder.Name != "Platform" ||
+		renamed.Revision != 2 ||
+		!reflect.DeepEqual(
+			renamed.ParentRevisionIDs,
+			[]string{created.RevisionID},
+		) {
+		t.Fatalf("renamed Folder differs: %+v", renamed)
+	}
+}
+
+func TestRemovingFolderRequiresConfirmationAndUnfilesItems(t *testing.T) {
+	folderID := "33333333-3333-4333-8333-333333333333"
+	item := itemRecord{
+		Login: client.LoginItem{
+			ItemID:   "11111111-1111-4111-8111-111111111111",
+			Name:     "Production database",
+			FolderID: folderID,
+			Favorite: true,
+		},
+		Revision:   1,
+		RevisionID: "22222222-2222-4222-8222-222222222222",
+	}
+	folder := itemRecord{
+		Folder: &client.FolderItem{
+			ItemID: folderID,
+			Name:   "Production infrastructure",
+		},
+		Revision:   1,
+		RevisionID: "44444444-4444-4444-8444-444444444444",
+	}
+	store := &fakeItemStore{records: []itemRecord{item, folder}}
+	var current tea.Model = model{
+		loaded:      true,
+		vaultOpen:   true,
+		itemStore:   store,
+		items:       []itemRecord{item},
+		folders:     []itemRecord{folder},
+		showFolders: true,
+	}
+	current, command := current.Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	if command != nil ||
+		!strings.Contains(current.(model).View(), "moves 1 Item to No Folder") {
+		t.Fatalf("Folder removal lacked explicit warning:\n%s",
+			current.(model).View())
+	}
+	current, command = current.Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	if command == nil {
+		t.Fatal("confirmed Folder removal did not save")
+	}
+	current, _ = current.Update(command())
+
+	if len(store.saved) != 2 {
+		t.Fatalf("Folder removal mutations: %+v", store.saved)
+	}
+	unfiled := store.saved[0]
+	removed := store.saved[1]
+	if unfiled.Deleted ||
+		unfiled.Login.FolderID != "" ||
+		!unfiled.Login.Favorite ||
+		unfiled.Revision != 2 {
+		t.Fatalf("Item was not safely unfiled: %+v", unfiled)
+	}
+	if removed.Folder == nil ||
+		!removed.Deleted ||
+		removed.Revision != 2 {
+		t.Fatalf("Folder was not moved to Trash: %+v", removed)
+	}
+}
+
 type fakeItemStore struct {
 	records []itemRecord
 	saved   []itemRecord
