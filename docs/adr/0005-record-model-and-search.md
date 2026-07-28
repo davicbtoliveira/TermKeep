@@ -22,6 +22,8 @@ The unlocked TUI provides All Items, No Folder, individual Folder, and Favorites
 
 The Server cannot distinguish Folder records from content records or inspect Folder names, associations, or favorite status. Folders and favorites are supported; tags, cards, identities, passkeys, SSH-key models, attachments, and shared records are deferred.
 
+When a Login password changes, the Client prepends the replaced non-empty value and its UTC change timestamp to encrypted password history, then retains the five newest entries. Saving the same password creates no history entry. History is masked until an explicit Password History reveal action and can be cleared only after confirmation. It is part of the Login payload and selected Conflict version; it is never added to fuzzy search or automatic password checks.
+
 After unlock, the client builds an in-memory fuzzy index over item name, username, domain/URL, folder, and custom-field names. Passwords, TOTP secrets, and hidden values are never indexed. Notes enter search only through an explicit content-search action. No semantic search index is stored by the server.
 
 Bitwarden, 1Password, and generic CSV exports are parsed locally. Import previews never merge items automatically. Semantically identical records are retained and renamed with `(Duplicada)`, then `(Duplicada) - 2`, `(Duplicada) - 3`, and so on. Same-name records with different content are not duplicates.

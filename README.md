@@ -77,11 +77,20 @@ through the fields and saves the final field. A successful edit writes the
 next item revision; concurrent duplicate saves are ignored while the first
 save is running.
 
+Changing a non-empty password stores the replaced value with its UTC change
+timestamp inside the encrypted Login, newest first, keeping at most five.
+Saving the same password does not add an entry. Historical passwords remain
+hidden from the vault list, Login detail, search, and automatic checks. From a
+Login detail, press `h` to open Password History; entries remain masked until
+`p` reveals the selected one. Press `x` twice to clear the complete history;
+the first press shows an irreversible-clear warning.
+
 When offline edits create multiple heads for one Login, the vault marks it as
 `Conflict` instead of choosing a winner. Open it to compare every version,
 use `j`/`k` and `enter` to keep the selected content, or press `m` to edit and
 save a manual merge. Either choice writes a new revision whose parents are all
-conflicting heads.
+conflicting heads. Password history belongs to that encrypted version and
+follows the same offline mutation and explicit Conflict workflow.
 
 Press `d` in a Login detail view to move it to encrypted Trash. From the vault,
 press `t` to open Trash, `j`/`k` to select an item, `r` to restore it, or `v`
@@ -105,7 +114,7 @@ session agent; its local IPC exposes only seal/open operations.
 The server stores and returns the opaque envelope plus account ownership,
 item UUID, schema version, revision number, immutable revision UUID, and
 parent revision UUIDs. It cannot inspect or index Login names, usernames,
-passwords, URLs, notes, or custom fields.
+passwords, password history, URLs, notes, or custom fields.
 
 ## Secure Notes
 
