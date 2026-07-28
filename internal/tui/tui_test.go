@@ -632,6 +632,169 @@ func TestEditLoginPreservesFieldsAndIncrementsRevision(t *testing.T) {
 	}
 }
 
+func TestDeleteLoginMovesItToTrash(t *testing.T) {
+	rootID := "22222222-2222-4222-8222-222222222222"
+	record := loginRecord{
+		Login: client.LoginItem{
+			ItemID:   "11111111-1111-4111-8111-111111111111",
+			Name:     "Obsolete account",
+			Username: "old@example.com",
+			Password: "Password-Sentinel",
+		},
+		Revision:   1,
+		RevisionID: rootID,
+	}
+	store := &fakeLoginStore{records: []loginRecord{record}}
+	initial := model{
+		loaded:     true,
+		vaultOpen:  true,
+		loginStore: store,
+		logins:     store.records,
+		showLogin:  true,
+	}
+	updated, command := initial.Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	if command == nil {
+		t.Fatal("delete key did not move Login to trash")
+	}
+	updated, _ = updated.(model).Update(command())
+	if len(store.saved) != 1 {
+		t.Fatalf("saved deletions: want 1, got %d", len(store.saved))
+	}
+	deleted := store.saved[0]
+	if !deleted.Deleted ||
+		deleted.Purged ||
+		deleted.Revision != 2 ||
+		!reflect.DeepEqual(
+			deleted.ParentRevisionIDs,
+			[]string{rootID},
+		) {
+		t.Fatalf("deleted Login: %+v", deleted)
+	}
+}
+
+func TestTrashScreenRestoresDeletedLogin(t *testing.T) {
+	deletedID := "33333333-3333-4333-8333-333333333333"
+	record := loginRecord{
+		Login: client.LoginItem{
+			ItemID:   "11111111-1111-4111-8111-111111111111",
+			Name:     "Recoverable account",
+			Username: "restore@example.com",
+			Password: "Password-Sentinel",
+		},
+		Revision:   2,
+		RevisionID: deletedID,
+		Deleted:    true,
+	}
+	store := &fakeLoginStore{records: []loginRecord{record}}
+	var current tea.Model = model{
+		loaded:     true,
+		vaultOpen:  true,
+		loginStore: store,
+	}
+	current, command := current.Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	if command == nil {
+		t.Fatal("trash key did not load deleted Logins")
+	}
+	current, _ = current.Update(command())
+	view := current.(model).View()
+	for _, want := range []string{
+		"Trash",
+		record.Login.Name,
+		record.Login.Username,
+		"[r] restore",
+		"[x] permanently delete",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("Trash screen missing %q:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, record.Login.Password) {
+		t.Fatalf("Trash screen exposed password:\n%s", view)
+	}
+
+	current, command = current.Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	if command == nil {
+		t.Fatal("restore key did not save restored Login")
+	}
+	current, _ = current.Update(command())
+	if len(store.saved) != 1 {
+		t.Fatalf("saved restores: want 1, got %d", len(store.saved))
+	}
+	restored := store.saved[0]
+	if restored.Deleted ||
+		restored.Purged ||
+		restored.Revision != 3 ||
+		!reflect.DeepEqual(
+			restored.ParentRevisionIDs,
+			[]string{deletedID},
+		) {
+		t.Fatalf("restored Login: %+v", restored)
+	}
+}
+
+func TestTrashPermanentDeletionRequiresConfirmation(t *testing.T) {
+	deletedID := "33333333-3333-4333-8333-333333333333"
+	record := loginRecord{
+		Login: client.LoginItem{
+			ItemID:   "11111111-1111-4111-8111-111111111111",
+			Name:     "Destroy account",
+			Username: "purge@example.com",
+			Password: "Password-Sentinel",
+		},
+		Revision:   2,
+		RevisionID: deletedID,
+		Deleted:    true,
+	}
+	store := &fakeLoginStore{records: []loginRecord{record}}
+	var current tea.Model = model{
+		loaded:     true,
+		vaultOpen:  true,
+		loginStore: store,
+	}
+	current, command := current.Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	current, _ = current.Update(command())
+
+	current, command = current.Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	if command != nil {
+		t.Fatal("first permanent-delete key skipped confirmation")
+	}
+	if !strings.Contains(
+		current.(model).View(),
+		"Press [x] again to permanently delete",
+	) {
+		t.Fatalf("permanent-delete confirmation missing:\n%s",
+			current.(model).View())
+	}
+	if len(store.saved) != 0 {
+		t.Fatal("first permanent-delete key changed the store")
+	}
+
+	current, command = current.Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	if command == nil {
+		t.Fatal("confirmed permanent deletion did not save Tombstone")
+	}
+	current, _ = current.Update(command())
+	if len(store.saved) != 1 {
+		t.Fatalf("saved purges: want 1, got %d", len(store.saved))
+	}
+	purged := store.saved[0]
+	if !purged.Deleted ||
+		!purged.Purged ||
+		purged.Revision != 3 ||
+		!reflect.DeepEqual(
+			purged.ParentRevisionIDs,
+			[]string{deletedID},
+		) {
+		t.Fatalf("purged Login: %+v", purged)
+	}
+}
+
 func TestConflictScreenPreservesVersionsAndSelectsOne(t *testing.T) {
 	firstID := "22222222-2222-4222-8222-222222222222"
 	secondID := "33333333-3333-4333-8333-333333333333"
@@ -776,6 +939,65 @@ func TestConflictScreenSavesManualMerge(t *testing.T) {
 	}
 }
 
+func TestConflictScreenCanKeepPurgedTombstone(t *testing.T) {
+	liveID := "33333333-3333-4333-8333-333333333333"
+	tombstoneID := "44444444-4444-4444-8444-444444444444"
+	live := loginRecord{
+		Login: client.LoginItem{
+			ItemID:   "11111111-1111-4111-8111-111111111111",
+			Name:     "Offline edit",
+			Username: "stale@example.com",
+			Password: "Password-Sentinel",
+		},
+		Revision:   2,
+		RevisionID: liveID,
+	}
+	tombstone := loginRecord{
+		Login: client.LoginItem{
+			ItemID: live.Login.ItemID,
+		},
+		Revision:   3,
+		RevisionID: tombstoneID,
+		Deleted:    true,
+		Purged:     true,
+	}
+	conflict := live
+	conflict.ConflictVersions = []loginRecord{live, tombstone}
+	store := &fakeLoginStore{records: []loginRecord{conflict}}
+	var current tea.Model = model{
+		loaded:     true,
+		vaultOpen:  true,
+		loginStore: store,
+		logins:     store.records,
+		showLogin:  true,
+	}
+	if !strings.Contains(
+		current.(model).View(), "Permanently deleted") {
+		t.Fatalf("purged Tombstone missing from Conflict:\n%s",
+			current.(model).View())
+	}
+	current, _ = current.Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	current, command := current.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if command == nil {
+		t.Fatal("selecting purged Tombstone did not save resolution")
+	}
+	current, _ = current.Update(command())
+	if len(store.saved) != 1 {
+		t.Fatalf("saved Tombstone resolutions: %d", len(store.saved))
+	}
+	resolution := store.saved[0]
+	if !resolution.Deleted ||
+		!resolution.Purged ||
+		resolution.Revision != 4 ||
+		!reflect.DeepEqual(
+			resolution.ParentRevisionIDs,
+			[]string{liveID, tombstoneID},
+		) {
+		t.Fatalf("Tombstone resolution: %+v", resolution)
+	}
+}
+
 func TestLoginFormIgnoresDuplicateSaveWhileSaving(t *testing.T) {
 	store := &fakeLoginStore{}
 	initial := model{
@@ -906,7 +1128,23 @@ func (s *fakeSyncLoginStore) CanSync() bool {
 }
 
 func (s *fakeLoginStore) List(context.Context) ([]loginRecord, error) {
-	return s.records, s.err
+	var active []loginRecord
+	for _, record := range s.records {
+		if !record.Deleted {
+			active = append(active, record)
+		}
+	}
+	return active, s.err
+}
+
+func (s *fakeLoginStore) Trash(context.Context) ([]loginRecord, error) {
+	var trash []loginRecord
+	for _, record := range s.records {
+		if record.Deleted && !record.Purged {
+			trash = append(trash, record)
+		}
+	}
+	return trash, s.err
 }
 
 func (s *fakeLoginStore) Save(_ context.Context, record loginRecord) error {

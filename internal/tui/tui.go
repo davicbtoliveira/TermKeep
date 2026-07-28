@@ -31,9 +31,13 @@ type loginRecord struct {
 	RevisionID        string
 	ParentRevisionIDs []string
 	ConflictVersions  []loginRecord
+	Deleted           bool
+	Purged            bool
 }
 type loginsMsg []loginRecord
 type loginsErrMsg error
+type trashMsg []loginRecord
+type trashErrMsg error
 type loginSaveErrMsg error
 type loginSavedMsg struct {
 	logins  []loginRecord
@@ -82,6 +86,10 @@ type syncLoginStore interface {
 	CanSync() bool
 }
 
+type trashLoginStore interface {
+	Trash(ctx context.Context) ([]loginRecord, error)
+}
+
 type cachedLoginStore struct {
 	cfg         client.Config
 	accessToken string
@@ -112,6 +120,12 @@ type model struct {
 	selectedLogin    int
 	selectedConflict int
 	loginsErr        error
+	showTrash        bool
+	trashLoading     bool
+	trash            []loginRecord
+	selectedTrash    int
+	trashErr         error
+	purgeConfirm     bool
 	showLogin        bool
 	revealPassword   bool
 	loginStore       loginStore
@@ -235,6 +249,23 @@ func loadLogins(store loginStore) tea.Cmd {
 	}
 }
 
+func loadTrash(store loginStore) tea.Cmd {
+	return func() tea.Msg {
+		trashStore, ok := store.(trashLoginStore)
+		if !ok {
+			return trashErrMsg(errors.New("trash unavailable"))
+		}
+		ctx, cancel := context.WithTimeout(
+			context.Background(), loginOperationTimeout)
+		defer cancel()
+		records, err := trashStore.Trash(ctx)
+		if err != nil {
+			return trashErrMsg(err)
+		}
+		return trashMsg(records)
+	}
+}
+
 func saveLogin(store loginStore, record loginRecord) tea.Cmd {
 	return func() tea.Msg {
 		saveCtx, cancelSave := context.WithTimeout(
@@ -300,10 +331,40 @@ func (s cachedLoginStore) List(ctx context.Context) ([]loginRecord, error) {
 	if err != nil {
 		return nil, err
 	}
+	return s.openLoginGroups(ctx, groups)
+}
+
+func (s cachedLoginStore) Trash(ctx context.Context) ([]loginRecord, error) {
+	groups, err := s.cache.TrashHeads()
+	if err != nil {
+		return nil, err
+	}
+	return s.openLoginGroups(ctx, groups)
+}
+
+func (s cachedLoginStore) openLoginGroups(
+	ctx context.Context,
+	groups []client.ItemHead,
+) ([]loginRecord, error) {
 	logins := make([]loginRecord, 0, len(groups))
 	for _, group := range groups {
 		versions := make([]loginRecord, 0, len(group.Revisions))
 		for _, item := range group.Revisions {
+			if item.Purged {
+				versions = append(versions, loginRecord{
+					Login: client.LoginItem{
+						ItemID: item.ItemID,
+						Name:   "Permanently deleted",
+					},
+					Revision:   item.Revision,
+					RevisionID: item.RevisionID,
+					ParentRevisionIDs: append(
+						[]string(nil), item.ParentRevisionIDs...),
+					Deleted: true,
+					Purged:  true,
+				})
+				continue
+			}
 			login, err := session.OpenLogin(ctx, s.socketPath, item)
 			if err != nil {
 				return nil, err
@@ -314,6 +375,8 @@ func (s cachedLoginStore) List(ctx context.Context) ([]loginRecord, error) {
 				RevisionID: item.RevisionID,
 				ParentRevisionIDs: append(
 					[]string(nil), item.ParentRevisionIDs...),
+				Deleted: item.Deleted,
+				Purged:  item.Purged,
 			})
 		}
 		record := versions[0]
@@ -338,6 +401,11 @@ func (s cachedLoginStore) Save(ctx context.Context, record loginRecord) error {
 	item.RevisionID = revisionID
 	item.ParentRevisionIDs = append(
 		[]string(nil), record.ParentRevisionIDs...)
+	item.Deleted = record.Deleted
+	item.Purged = record.Purged
+	if record.Purged {
+		item.Envelope = nil
+	}
 	_, err = s.cache.QueueMutation(item, record.Revision-1)
 	return err
 }
@@ -400,7 +468,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "c":
 			if m.vaultOpen && m.loginStore != nil &&
-				!m.showSessions && !m.showActivity && !m.showLogin {
+				!m.showSessions && !m.showActivity &&
+				!m.showLogin && !m.showTrash {
 				itemID, err := client.NewItemID()
 				if err != nil {
 					m.loginsErr = err
@@ -425,6 +494,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.loginFormErr = nil
 				m.loginSaving = false
 			}
+		case "d":
+			if m.showLogin && m.loginStore != nil &&
+				m.selectedLogin < len(m.logins) {
+				record := m.logins[m.selectedLogin]
+				if len(record.ConflictVersions) == 0 &&
+					!record.Deleted {
+					m.loginSaving = true
+					return m, saveLogin(
+						m.loginStore,
+						deleteLogin(record),
+					)
+				}
+			}
 		case "p":
 			if m.showLogin && m.selectedLogin < len(m.logins) &&
 				len(m.logins[m.selectedLogin].ConflictVersions) == 0 {
@@ -443,6 +525,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.loginFormErr = nil
 					m.loginSaving = false
 				}
+			}
+		case "t":
+			if m.vaultOpen && m.loginStore != nil &&
+				!m.showSessions && !m.showActivity &&
+				!m.showLogin {
+				m.showTrash = true
+				m.trashLoading = true
+				m.trashErr = nil
+				m.purgeConfirm = false
+				return m, loadTrash(m.loginStore)
 			}
 		case "enter":
 			if m.showLogin && m.selectedLogin < len(m.logins) {
@@ -486,8 +578,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showSessions = false
 			m.showActivity = false
 			m.showLogin = false
+			m.showTrash = false
 			m.revealPassword = false
 			m.selectedConflict = 0
+			m.purgeConfirm = false
 			return m, nil
 		case "j", "down":
 			if m.showSessions && m.selectedSession+1 < len(m.sessions) {
@@ -496,6 +590,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.selectedConflict+1 <
 					len(m.logins[m.selectedLogin].ConflictVersions) {
 				m.selectedConflict++
+			} else if m.showTrash &&
+				m.selectedTrash+1 < len(m.trash) {
+				m.selectedTrash++
+				m.purgeConfirm = false
 			} else if !m.showSessions && !m.showActivity && !m.showLogin &&
 				m.selectedLogin+1 < len(m.logins) {
 				m.selectedLogin++
@@ -505,11 +603,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.selectedSession--
 			} else if m.showLogin && m.selectedConflict > 0 {
 				m.selectedConflict--
+			} else if m.showTrash && m.selectedTrash > 0 {
+				m.selectedTrash--
+				m.purgeConfirm = false
 			} else if !m.showSessions && !m.showActivity && !m.showLogin &&
 				m.selectedLogin > 0 {
 				m.selectedLogin--
 			}
 		case "x":
+			if m.showTrash && m.selectedTrash < len(m.trash) {
+				if !m.purgeConfirm {
+					m.purgeConfirm = true
+					return m, nil
+				}
+				m.loginSaving = true
+				return m, saveLogin(
+					m.loginStore,
+					purgeLogin(m.trash[m.selectedTrash]),
+				)
+			}
 			if m.showSessions && m.selectedSession < len(m.sessions) {
 				selected := m.sessions[m.selectedSession]
 				if selected.Current {
@@ -519,6 +631,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, revokeSession(m.cfg, m.accessToken, selected.SessionID)
 			}
 		case "r":
+			if m.showTrash && m.selectedTrash < len(m.trash) {
+				m.loginSaving = true
+				return m, saveLogin(
+					m.loginStore,
+					restoreLogin(m.trash[m.selectedTrash]),
+				)
+			}
 			if m.showActivity {
 				m.activityLoading = true
 				m.activityErr = nil
@@ -583,12 +702,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case loginsErrMsg:
 		m.loginsLoading = false
 		m.loginsErr = msg
+	case trashMsg:
+		m.trashLoading = false
+		m.trash = []loginRecord(msg)
+		m.trashErr = nil
+		m.purgeConfirm = false
+		if m.selectedTrash >= len(m.trash) {
+			m.selectedTrash = 0
+		}
+	case trashErrMsg:
+		m.trashLoading = false
+		m.trashErr = msg
 	case loginSaveErrMsg:
 		m.loginFormErr = msg
 		m.loginSaving = false
 	case loginSavedMsg:
 		m.logins = msg.logins
 		m.showLogin = false
+		m.showTrash = false
 		m.selectedConflict = 0
 		m.showLoginForm = false
 		m.loginFormErr = nil
@@ -620,6 +751,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) View() string {
 	if m.showLoginForm {
 		return m.loginFormView()
+	}
+	if m.showTrash {
+		return m.trashView()
 	}
 	if m.showLogin {
 		return m.loginView()
@@ -685,7 +819,7 @@ func (m model) View() string {
 		}
 	}
 	if m.vaultOpen && m.loginStore != nil {
-		b.WriteString("\n[c] new Login  [enter] open  ")
+		b.WriteString("\n[c] new Login  [enter] open  [t] Trash  ")
 		if m.accessToken != "" {
 			b.WriteString("[a] Activity  [s] Active Sessions  ")
 			b.WriteString("[y] sync  ")
@@ -807,6 +941,36 @@ func formForLogin(record loginRecord) loginForm {
 	}
 }
 
+func deleteLogin(record loginRecord) loginRecord {
+	record.Revision++
+	record.ParentRevisionIDs = []string{record.RevisionID}
+	record.RevisionID = ""
+	record.ConflictVersions = nil
+	record.Deleted = true
+	record.Purged = false
+	return record
+}
+
+func restoreLogin(record loginRecord) loginRecord {
+	record.Revision++
+	record.ParentRevisionIDs = []string{record.RevisionID}
+	record.RevisionID = ""
+	record.ConflictVersions = nil
+	record.Deleted = false
+	record.Purged = false
+	return record
+}
+
+func purgeLogin(record loginRecord) loginRecord {
+	record.Revision++
+	record.ParentRevisionIDs = []string{record.RevisionID}
+	record.RevisionID = ""
+	record.ConflictVersions = nil
+	record.Deleted = true
+	record.Purged = true
+	return record
+}
+
 func formForConflict(versions []loginRecord, selected int) loginForm {
 	resolution := resolveConflict(versions, selected)
 	form := formForLogin(loginRecord{
@@ -868,6 +1032,40 @@ func (m model) loginFormView() string {
 	return b.String()
 }
 
+func (m model) trashView() string {
+	var b strings.Builder
+	b.WriteString("TermKeep — Trash\n\n")
+	switch {
+	case m.trashLoading:
+		b.WriteString("Loading trash…\n")
+	case m.trashErr != nil:
+		b.WriteString("Error: " + m.trashErr.Error() + "\n")
+	case len(m.trash) == 0:
+		b.WriteString("Trash is empty.\n")
+	default:
+		for index, record := range m.trash {
+			cursor := " "
+			if index == m.selectedTrash {
+				cursor = ">"
+			}
+			fmt.Fprintf(&b, "%s %s — %s\n",
+				cursor, record.Login.Name, record.Login.Username)
+		}
+	}
+	if m.purgeConfirm && m.selectedTrash < len(m.trash) {
+		b.WriteString(
+			"\nWarning: encrypted content cannot be recovered.\n" +
+				"Press [x] again to permanently delete " +
+				m.trash[m.selectedTrash].Login.Name + ".\n",
+		)
+	}
+	b.WriteString(
+		"\n[j/k] select  [r] restore  [x] permanently delete  " +
+			"[v] vault  [q] quit\n",
+	)
+	return b.String()
+}
+
 func (m model) loginView() string {
 	if m.selectedLogin >= len(m.logins) {
 		return "TermKeep — Login\n\nLogin not found.\n\n[v] vault  [q] quit\n"
@@ -894,7 +1092,10 @@ func (m model) loginView() string {
 	for _, field := range login.CustomFields {
 		fmt.Fprintf(&b, "  %s: %s\n", field.Name, field.Value)
 	}
-	b.WriteString("\n[p] reveal/hide password  [e] edit  [v] vault  [q] quit\n")
+	b.WriteString(
+		"\n[p] reveal/hide password  [e] edit  [d] delete  " +
+			"[v] vault  [q] quit\n",
+	)
 	return b.String()
 }
 
@@ -907,6 +1108,10 @@ func (m model) conflictView(versions []loginRecord) string {
 			cursor = ">"
 		}
 		fmt.Fprintf(&b, "%s Version %d\n", cursor, index+1)
+		if version.Purged {
+			b.WriteString("  Permanently deleted\n\n")
+			continue
+		}
 		fmt.Fprintf(&b, "  Name: %s\n", version.Login.Name)
 		fmt.Fprintf(&b, "  Username: %s\n", version.Login.Username)
 		b.WriteString("  Password: ••••••••\n")
