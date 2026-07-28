@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -262,4 +263,81 @@ func TestLoginWithCacheFallsBackWhenServerIsUnavailable(t *testing.T) {
 		!bytes.Equal(result.VaultKey, vault.Key) {
 		t.Fatalf("unexpected cached login: result=%+v status=%+v", result, status)
 	}
+}
+
+func TestMutationSurvivesWriterProcessExit(t *testing.T) {
+	password := []byte("TermKeep#2026")
+	accountID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	vault, err := NewVault(password, accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vault.Clear()
+	dataDir := filepath.Join(t.TempDir(), "cache")
+	cfg := Config{DataDir: dataDir}
+	if err := AuthorizeCache(
+		cfg,
+		"user@example.com",
+		accountID,
+		vault.PasswordEnvelope,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	command := exec.Command(
+		os.Args[0],
+		"-test.run=TestCacheWriterProcess$",
+	)
+	command.Env = append(
+		os.Environ(),
+		"TERMKEEP_TEST_CACHE_WRITER=1",
+		"TERMKEEP_TEST_DATA_DIR="+dataDir,
+	)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("cache writer process: %v\n%s", err, output)
+	}
+
+	cache, err := OpenCache(cfg, "user@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err := cache.Items()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := cache.PendingMutations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || len(pending) != 1 ||
+		items[0].ItemID != pending[0].Item.ItemID {
+		t.Fatalf(
+			"process exit lost cache state: items=%+v pending=%+v",
+			items,
+			pending,
+		)
+	}
+}
+
+func TestCacheWriterProcess(t *testing.T) {
+	if os.Getenv("TERMKEEP_TEST_CACHE_WRITER") != "1" {
+		return
+	}
+	cache, err := OpenCache(
+		Config{DataDir: os.Getenv("TERMKEEP_TEST_DATA_DIR")},
+		"user@example.com",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = cache.QueueMutation(EncryptedItem{
+		ItemID:        "11111111-1111-4111-8111-111111111111",
+		SchemaVersion: 1,
+		Revision:      1,
+		Envelope:      []byte("encrypted"),
+	}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Exit(0)
 }

@@ -46,6 +46,7 @@ type stack struct {
 	httpsPort  string // host port mapped to Traefik 443
 	serverPort string // host port mapped to the server, loopback only
 	serverURL  string
+	dataDir    string
 	env        []string // compose environment
 }
 
@@ -79,6 +80,7 @@ func TestBlackbox(t *testing.T) {
 	t.Run("expired invitation cannot register", s.testExpiredInvitation)
 	t.Run("concurrent invitation consumption registers once", s.testConcurrentInvitationConsumption)
 	t.Run("encrypted Login survives a new unlocked process", s.testEncryptedLoginRoundTrip)
+	t.Run("offline Login edit synchronizes after reconnection", s.testOfflineLoginSynchronization)
 }
 
 // newStack boots the ephemeral deployment once for the whole test run.
@@ -93,6 +95,7 @@ func newStack(t *testing.T) *stack {
 		repoRoot:   repoRoot,
 		httpsPort:  freePort(t),
 		serverPort: freePort(t),
+		dataDir:    filepath.Join(t.TempDir(), "client-data"),
 	}
 	s.serverURL = "https://localhost:" + s.httpsPort
 
@@ -158,6 +161,7 @@ func (s *stack) runClient(args ...string) (stdout, stderr string, code int) {
 		"--ca-cert", filepath.Join(s.certsDir, "ca.pem"),
 	}, args...)
 	cmd := exec.Command(s.binary, full...)
+	cmd.Env = append(os.Environ(), "TERMKEEP_DATA_DIR="+s.dataDir)
 	var outBuf, errBuf bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &outBuf, &errBuf
 	err := cmd.Run()
@@ -186,8 +190,8 @@ func (s *stack) testMigrationsApplied(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query schema_migrations: %v\n%s", err, out)
 	}
-	if strings.TrimSpace(string(out)) != "6" {
-		t.Errorf("schema version: want 6, got %q", strings.TrimSpace(string(out)))
+	if strings.TrimSpace(string(out)) != "7" {
+		t.Errorf("schema version: want 7, got %q", strings.TrimSpace(string(out)))
 	}
 
 	cmd = s.composeCmd(context.Background(),
@@ -212,7 +216,7 @@ func (s *stack) testStatusHealthy(t *testing.T) {
 	if !strings.Contains(stdout, "Status:   healthy") {
 		t.Errorf("stdout missing healthy state:\n%s", stdout)
 	}
-	if !strings.Contains(stdout, "schema v6") {
+	if !strings.Contains(stdout, "schema v7") {
 		t.Errorf("stdout missing schema version:\n%s", stdout)
 	}
 }
@@ -580,6 +584,145 @@ func (s *stack) testEncryptedLoginRoundTrip(t *testing.T) {
 			}
 		}
 	}
+}
+
+func (s *stack) testOfflineLoginSynchronization(t *testing.T) {
+	const (
+		email        = "admin@example.com"
+		password     = "TermKeep#2026"
+		offlineName  = "Offline-Login-Sentinel"
+		offlineUser  = "offline-user-sentinel@example.com"
+		offlinePass  = "Offline-Password-Sentinel"
+		offlineNotes = "Offline-Notes-Sentinel"
+	)
+	command := fmt.Sprintf("%q --server %q --ca-cert %q login --email %q\n",
+		s.binary, s.serverURL, filepath.Join(s.certsDir, "ca.pem"), email)
+	shell := s.startTerminalShell(t)
+	shell.clear()
+	write(t, shell.ptmx, command)
+	if matched, output := shell.waitFor(
+		30*time.Second, "Master password:",
+	); matched != "Master password:" {
+		t.Fatalf("offline test login did not request master password:\n%s", output)
+	}
+	write(t, shell.ptmx, password+"\n")
+	shell.waitFor(45*time.Second, "Login-Name-Sentinel")
+
+	sockets, err := filepath.Glob(
+		filepath.Join(shell.runtimeDir, "termkeep", "*.sock"))
+	if err != nil || len(sockets) != 1 {
+		t.Fatalf("session sockets: want 1, got %d (%v)", len(sockets), err)
+	}
+	token, err := session.AccessToken(context.Background(), sockets[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clear(token)
+
+	serverRunning := true
+	t.Cleanup(func() {
+		if !serverRunning {
+			_ = s.composeCmd(context.Background(), "start", "server").Run()
+			s.waitHealthy(time.Minute)
+		}
+	})
+	if out, err := s.composeCmd(
+		context.Background(), "stop", "server").CombinedOutput(); err != nil {
+		t.Fatalf("stop server: %v\n%s", err, out)
+	}
+	serverRunning = false
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		_, _, code := s.runClient("status")
+		if code == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("proxy did not report Server unavailable")
+		}
+		time.Sleep(time.Second)
+	}
+
+	shell.clear()
+	write(t, shell.ptmx, "c")
+	shell.waitFor(10*time.Second, "New Login")
+	fields := []struct {
+		value string
+		next  string
+	}{
+		{value: offlineName, next: "> Username:"},
+		{value: offlineUser, next: "> Password:"},
+		{value: offlinePass, next: "> URLs (comma-separated):"},
+		{value: "", next: "> Notes:"},
+		{
+			value: offlineNotes,
+			next:  "> Custom fields (name=value, comma-separated):",
+		},
+	}
+	for _, field := range fields {
+		shell.clear()
+		write(t, shell.ptmx, field.value+"\r")
+		shell.waitFor(10*time.Second, field.next)
+	}
+	shell.clear()
+	write(t, shell.ptmx, "\r")
+	_, output := shell.waitFor(30*time.Second, offlineName)
+	if !strings.Contains(output, offlineUser) {
+		t.Fatalf("offline mutation was not immediately visible:\n%s", output)
+	}
+	cache, err := client.OpenCache(client.Config{
+		DataDir: s.dataDir,
+	}, email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := cache.SyncSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Mutations) != 1 {
+		t.Fatalf("offline mutation queue: want 1, got %+v", snapshot)
+	}
+
+	if out, err := s.composeCmd(
+		context.Background(), "start", "server").CombinedOutput(); err != nil {
+		t.Fatalf("start server: %v\n%s", err, out)
+	}
+	serverRunning = true
+	s.waitHealthy(time.Minute)
+	shell.clear()
+	write(t, shell.ptmx, "y")
+	syncDeadline := time.Now().Add(30 * time.Second)
+	for {
+		snapshot, err = cache.SyncSnapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(snapshot.Mutations) == 0 {
+			break
+		}
+		if time.Now().After(syncDeadline) {
+			shell.mu.Lock()
+			output := stripANSI(shell.buf.String())
+			shell.mu.Unlock()
+			t.Fatalf(
+				"reconnection left queued mutation: %+v\n%s",
+				snapshot,
+				output,
+			)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	items, err := client.ListItems(
+		context.Background(), s.clientConfig(), string(token))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("reconnected Server items: want 2, got %d", len(items))
+	}
+	write(t, shell.ptmx, "q")
+	shell.waitFor(10*time.Second, terminalShellPrompt)
 }
 
 func (s *stack) testTerminalSessionIsolation(t *testing.T) {
@@ -1343,7 +1486,11 @@ func (s *stack) runBootstrap(t *testing.T, email, password string) (string, int)
 		"--ca-cert", filepath.Join(s.certsDir, "ca.pem"),
 		"bootstrap", "--email", email)
 	cmd.Env = withoutEnv(os.Environ(), "TERM", "TERMKEEP_SERVER", "TERMKEEP_CA_CERT")
-	cmd.Env = append(cmd.Env, "TERM=dumb")
+	cmd.Env = append(
+		cmd.Env,
+		"TERM=dumb",
+		"TERMKEEP_DATA_DIR="+s.dataDir,
+	)
 
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 24, Cols: 80})
 	if err != nil {
@@ -1406,7 +1553,11 @@ func (s *stack) runRegistration(t *testing.T, email, password, inviteToken strin
 		"--ca-cert", filepath.Join(s.certsDir, "ca.pem"),
 		"register", "--email", email, "--invite-token", inviteToken)
 	cmd.Env = withoutEnv(os.Environ(), "TERM", "TERMKEEP_SERVER", "TERMKEEP_CA_CERT")
-	cmd.Env = append(cmd.Env, "TERM=dumb")
+	cmd.Env = append(
+		cmd.Env,
+		"TERM=dumb",
+		"TERMKEEP_DATA_DIR="+s.dataDir,
+	)
 
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 24, Cols: 80})
 	if err != nil {
@@ -1485,7 +1636,8 @@ func (s *stack) startTerminalShell(t *testing.T) *terminalShell {
 	t.Helper()
 	cmd := exec.Command("sh")
 	cmd.Env = withoutEnv(os.Environ(),
-		"TERM", "PS1", "TERMKEEP_SERVER", "TERMKEEP_CA_CERT", "XDG_RUNTIME_DIR")
+		"TERM", "PS1", "TERMKEEP_SERVER", "TERMKEEP_CA_CERT",
+		"TERMKEEP_DATA_DIR", "XDG_RUNTIME_DIR")
 	runtimeDir, err := os.MkdirTemp("/tmp", "tk-")
 	if err != nil {
 		t.Fatal(err)
@@ -1495,6 +1647,7 @@ func (s *stack) startTerminalShell(t *testing.T) *terminalShell {
 		"TERM=dumb",
 		"PS1="+terminalShellPrompt,
 		"XDG_RUNTIME_DIR="+runtimeDir,
+		"TERMKEEP_DATA_DIR="+s.dataDir,
 	)
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 24, Cols: 80})
 	if err != nil {

@@ -82,3 +82,102 @@ func TestSyncCachePushesPendingMutationAndAppliesResponse(t *testing.T) {
 		t.Fatalf("synchronization response not applied: %+v", snapshot)
 	}
 }
+
+func TestSyncRetryAfterLostResponseDoesNotLoseOrDuplicateMutation(t *testing.T) {
+	password := []byte("TermKeep#2026")
+	accountID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	vault, err := NewVault(password, accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vault.Clear()
+	cfg := Config{DataDir: filepath.Join(t.TempDir(), "cache")}
+	if err := AuthorizeCache(
+		cfg,
+		"user@example.com",
+		accountID,
+		vault.PasswordEnvelope,
+	); err != nil {
+		t.Fatal(err)
+	}
+	cache, err := OpenCache(cfg, "user@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := EncryptedItem{
+		ItemID:        "11111111-1111-4111-8111-111111111111",
+		SchemaVersion: 1,
+		Revision:      1,
+		Envelope:      []byte("encrypted"),
+	}
+	mutation, err := cache.QueueMutation(item, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	requests := 0
+	applied := make(map[string]bool)
+	appliedCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(
+		w http.ResponseWriter,
+		r *http.Request,
+	) {
+		var request syncRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		requests++
+		for _, candidate := range request.Mutations {
+			if !applied[candidate.MutationID] {
+				applied[candidate.MutationID] = true
+				appliedCount++
+			}
+		}
+		if requests == 1 {
+			connection, _, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Fatal(err)
+			}
+			connection.Close()
+			return
+		}
+		_ = json.NewEncoder(w).Encode(syncResponse{
+			Cursor:             "1",
+			AppliedMutationIDs: []string{mutation.MutationID},
+			Changes:            []EncryptedItem{item},
+		})
+	}))
+	defer server.Close()
+	cfg.ServerURL = server.URL
+
+	if err := SyncCache(
+		context.Background(), cfg, "access-token", cache,
+	); err == nil {
+		t.Fatal("lost response returned successful synchronization")
+	}
+	afterFailure, err := cache.SyncSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(afterFailure.Mutations) != 1 ||
+		afterFailure.Mutations[0].MutationID != mutation.MutationID {
+		t.Fatalf("lost response removed durable mutation: %+v", afterFailure)
+	}
+
+	if err := SyncCache(
+		context.Background(), cfg, "access-token", cache,
+	); err != nil {
+		t.Fatal(err)
+	}
+	afterRetry, err := cache.SyncSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if appliedCount != 1 || len(afterRetry.Mutations) != 0 {
+		t.Fatalf(
+			"retry duplicated/lost mutation: applied=%d cache=%+v",
+			appliedCount,
+			afterRetry,
+		)
+	}
+}
