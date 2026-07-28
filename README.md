@@ -77,6 +77,12 @@ through the fields and saves the final field. A successful edit writes the
 next item revision; concurrent duplicate saves are ignored while the first
 save is running.
 
+When offline edits create multiple heads for one Login, the vault marks it as
+`Conflict` instead of choosing a winner. Open it to compare every version,
+use `j`/`k` and `enter` to keep the selected content, or press `m` to edit and
+save a manual merge. Either choice writes a new revision whose parents are all
+conflicting heads.
+
 Login content is serialized and encrypted on the client with
 XChaCha20-Poly1305. Each item UUID gets a derived key and each encryption gets
 a random nonce. Account UUID, item UUID, schema version, and revision are
@@ -84,8 +90,9 @@ authenticated as associated data. The vault key remains in the per-terminal
 session agent; its local IPC exposes only seal/open operations.
 
 The server stores and returns the opaque envelope plus account ownership,
-item UUID, schema version, and revision. It cannot inspect or index Login
-names, usernames, passwords, URLs, notes, or custom fields.
+item UUID, schema version, revision number, immutable revision UUID, and
+parent revision UUIDs. It cannot inspect or index Login names, usernames,
+passwords, URLs, notes, or custom fields.
 
 ## Offline use and synchronization
 
@@ -94,18 +101,20 @@ cache. Later `termkeep login` attempts online authentication first and, when
 the Server is unavailable, unlocks that cache locally. A TLS validation
 failure never permits offline fallback.
 
-The cache stores encrypted item envelopes, the encrypted Vault-key wrapper,
-technical revision metadata, a change cursor, and stable mutation UUIDs. It
-does not persist the master password, plaintext Vault key, plaintext Login
+The cache stores the append-only encrypted revision graph, its derived heads,
+the encrypted Vault-key wrapper, a change cursor, and stable mutation UUIDs.
+It does not persist the master password, plaintext Vault key, plaintext Login
 content, or plaintext search indexes. Cache files use mode `0600`, live under
 `$XDG_DATA_HOME/termkeep` (default `~/.local/share/termkeep`), and are replaced
-atomically after file and directory flushes.
+atomically after file and directory flushes. Version 1 caches migrate locally
+to the revision graph without dropping pending mutations.
 
 Offline creates and edits appear immediately in the TUI and enter the durable
 mutation queue. Batch synchronization pushes those mutations and pulls
 changes by per-Account cursor. The Server records mutation UUIDs in the same
 transaction as revisions, so retrying after a lost response does not create
-another revision.
+another revision. Concurrent descendants remain separate heads regardless of
+push/pull order; unrelated items in the same batch continue synchronizing.
 
 Synchronization runs when an online Vault opens, after an online mutation,
 every 30 seconds while the TUI remains open, with `[y] sync`, or with:

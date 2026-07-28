@@ -13,6 +13,8 @@ The client keeps a complete encrypted cache and an idempotent local mutation que
 
 Concurrent changes are never resolved with silent last-write-wins. Both revisions are preserved and presented in the TUI for explicit selection or manual merge. Deleted items remain in an encrypted trash for 30 days; permanent deletion retains only the technical tombstone needed for stale-client reconciliation.
 
+Each accepted mutation UUID is also its immutable revision UUID. Revisions form an append-only directed acyclic graph through parent revision UUIDs. Active heads are derived from that graph instead of from arrival order. Selecting a version or saving a manual merge creates one new revision with every conflicting head as a parent.
+
 Connection state is classified without third-party probes: local DNS/route/interface failures are shown as Client offline; a reachable proxy with a failing API or 502/503/504 is Server unavailable; invalid TLS is a security error; ambiguous failures are Connection unavailable.
 
 ## Consequences
@@ -21,4 +23,4 @@ Connection state is classified without third-party probes: local DNS/route/inter
 - A client whose cursor is older than retained change history must receive a full encrypted snapshot.
 - An offline edit to a remotely deleted item becomes an explicit conflict instead of silently resurrecting it.
 - Retry safety depends on stable mutation IDs and database transactions.
-
+- Revision history grows append-only; retention and compaction require a later explicit policy.

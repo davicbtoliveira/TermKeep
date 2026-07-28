@@ -93,11 +93,17 @@ docker compose -f deploy/compose.yml down -v          # stop, DELETE data
 
 Stack upgrades run pending migrations automatically at server boot.
 
-Migration 6 adds `vault_items`. Its server-visible columns are limited to the
-owning account UUID, item UUID, schema version, revision, opaque envelope, and
-timestamps. Login fields are never separate columns or indexes. Revision 1
-creates an item; later writes must advance exactly one revision or receive
-HTTP 409.
+Migration 6 adds the legacy current-item projection. Migrations 7 and 8 add
+the idempotent mutation ledger, incremental change cursor, append-only
+revision graph, and active heads. Their server-visible columns are limited to
+the owning account UUID, item UUID, schema version, revision number, revision
+and parent UUIDs, opaque envelope, and timestamps. Login fields are never
+separate columns or indexes.
+
+Synchronization accepts concurrent descendants of a known base as separate
+heads. A resolution references every conflicting head and becomes the sole
+head. Reusing a mutation UUID with different content or referencing an unknown
+base remains a conflict response; retrying identical content is idempotent.
 
 ## Testing
 
