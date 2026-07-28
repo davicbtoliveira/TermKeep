@@ -15,6 +15,9 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib" // PostgreSQL driver for database/sql.
 )
 
+const trashRetention = 30 * 24 * time.Hour
+const syncChangeRetention = 30 * 24 * time.Hour
+
 // OpenDB connects to PostgreSQL and verifies the connection. Callers own
 // the returned handle and must close it.
 func OpenDB(ctx context.Context, databaseURL string) (*sql.DB, error) {
@@ -34,7 +37,15 @@ func OpenDB(ctx context.Context, databaseURL string) (*sql.DB, error) {
 
 // DBStore adapts *sql.DB to the SchemaStore seam used by the status handler.
 type DBStore struct {
-	DB *sql.DB
+	DB  *sql.DB
+	Now func() time.Time
+}
+
+func (s DBStore) now() time.Time {
+	if s.Now != nil {
+		return s.Now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 // SchemaVersion implements SchemaStore.
@@ -507,7 +518,8 @@ func (s DBStore) PutItem(ctx context.Context, accountID string, item OpaqueItem)
 // ListItems returns opaque envelopes for one authenticated account.
 func (s DBStore) ListItems(ctx context.Context, accountID string) ([]OpaqueItem, error) {
 	rows, err := s.DB.QueryContext(ctx, `
-		SELECT item_uuid::text, schema_version, revision, envelope
+		SELECT item_uuid::text, schema_version, revision,
+		       deleted, purged, envelope
 		FROM vault_items
 		WHERE account_uuid = $1
 		ORDER BY item_uuid`, accountID)
@@ -521,7 +533,12 @@ func (s DBStore) ListItems(ctx context.Context, accountID string) ([]OpaqueItem,
 		var item OpaqueItem
 		var revision int64
 		if err := rows.Scan(
-			&item.ItemID, &item.SchemaVersion, &revision, &item.Envelope,
+			&item.ItemID,
+			&item.SchemaVersion,
+			&revision,
+			&item.Deleted,
+			&item.Purged,
+			&item.Envelope,
 		); err != nil {
 			return nil, fmt.Errorf("scan opaque item: %w", err)
 		}
@@ -547,15 +564,30 @@ func (s DBStore) Sync(
 	if err != nil {
 		return SyncResult{}, err
 	}
+	acceptedAt := s.now()
 	tx, err := s.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
 		return SyncResult{}, fmt.Errorf("begin synchronization: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM vault_changes
+		WHERE account_uuid = $1 AND created_at < $2`,
+		accountID, acceptedAt.Add(-syncChangeRetention),
+	); err != nil {
+		return SyncResult{}, fmt.Errorf("prune synchronization changes: %w", err)
+	}
+	if err := purgeExpiredVaultItems(
+		ctx, tx, accountID, acceptedAt,
+	); err != nil {
+		return SyncResult{}, err
+	}
+
 	result := SyncResult{}
 	for _, mutation := range mutations {
-		applied, err := applyVaultMutation(ctx, tx, accountID, mutation)
+		applied, err := applyVaultMutation(
+			ctx, tx, accountID, mutation, acceptedAt)
 		if err != nil {
 			return SyncResult{}, err
 		}
@@ -578,9 +610,38 @@ func (s DBStore) Sync(
 		return SyncResult{}, ErrInvalidSyncCursor
 	}
 
+	var retainedChanges uint64
+	err = tx.QueryRowContext(ctx, `
+		SELECT count(*)
+		FROM vault_changes
+		WHERE account_uuid = $1
+		  AND cursor > $2
+		  AND cursor <= $3`,
+		accountID, inputCursor, currentCursor,
+	).Scan(&retainedChanges)
+	if err != nil {
+		return SyncResult{}, fmt.Errorf(
+			"count retained synchronization changes: %w", err)
+	}
+	if retainedChanges != currentCursor-inputCursor {
+		result.FullSnapshot = true
+		if err := appendVaultSnapshot(
+			ctx, tx, accountID, &result,
+		); err != nil {
+			return SyncResult{}, err
+		}
+		result.Cursor = strconv.FormatUint(currentCursor, 10)
+		if err := tx.Commit(); err != nil {
+			return SyncResult{}, fmt.Errorf(
+				"commit synchronization: %w", err)
+		}
+		return result, nil
+	}
+
 	rows, err := tx.QueryContext(ctx, `
 		SELECT cursor, item_uuid::text, schema_version, revision,
-		       revision_uuid::text, parent_revision_uuids::text, envelope
+		       revision_uuid::text, parent_revision_uuids::text,
+		       deleted, purged, envelope
 		FROM vault_changes
 		WHERE account_uuid = $1 AND cursor > $2
 		ORDER BY cursor
@@ -603,6 +664,8 @@ func (s DBStore) Sync(
 			&revision,
 			&item.RevisionID,
 			&parentIDsText,
+			&item.Deleted,
+			&item.Purged,
 			&item.Envelope,
 		); err != nil {
 			rows.Close()
@@ -631,11 +694,175 @@ func (s DBStore) Sync(
 	return result, nil
 }
 
+func purgeExpiredVaultItems(
+	ctx context.Context,
+	tx *sql.Tx,
+	accountID string,
+	acceptedAt time.Time,
+) error {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT revision.item_uuid::text,
+		       revision.schema_version,
+		       revision.revision,
+		       revision.revision_uuid::text
+		FROM vault_item_heads AS head
+		JOIN vault_revisions AS revision
+		  ON revision.account_uuid = head.account_uuid
+		 AND revision.item_uuid = head.item_uuid
+		 AND revision.revision_uuid = head.revision_uuid
+		WHERE head.account_uuid = $1
+		  AND revision.deleted
+		  AND NOT revision.purged
+		  AND revision.tombstoned_at <= $2
+		  AND NOT EXISTS (
+		      SELECT 1
+		      FROM vault_item_heads AS other
+		      WHERE other.account_uuid = head.account_uuid
+		        AND other.item_uuid = head.item_uuid
+		        AND other.revision_uuid <> head.revision_uuid
+		  )
+		ORDER BY revision.item_uuid
+		FOR UPDATE OF revision`,
+		accountID, acceptedAt.Add(-trashRetention),
+	)
+	if err != nil {
+		return fmt.Errorf("list expired trash: %w", err)
+	}
+	type expiredItem struct {
+		itemID        string
+		schemaVersion int
+		revision      int64
+		revisionID    string
+	}
+	var expired []expiredItem
+	for rows.Next() {
+		var item expiredItem
+		if err := rows.Scan(
+			&item.itemID,
+			&item.schemaVersion,
+			&item.revision,
+			&item.revisionID,
+		); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan expired trash: %w", err)
+		}
+		expired = append(expired, item)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close expired trash: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate expired trash: %w", err)
+	}
+
+	for _, item := range expired {
+		if item.revision >= int64(maximumItemRevision) {
+			return fmt.Errorf(
+				"purge expired trash: %w", ErrItemRevisionConflict)
+		}
+		var tombstoneID string
+		if err := tx.QueryRowContext(
+			ctx, "SELECT gen_random_uuid()::text",
+		).Scan(&tombstoneID); err != nil {
+			return fmt.Errorf("create Tombstone ID: %w", err)
+		}
+		_, err := applyVaultMutation(
+			ctx,
+			tx,
+			accountID,
+			VaultMutation{
+				MutationID:   tombstoneID,
+				BaseRevision: uint64(item.revision),
+				Item: OpaqueItem{
+					ItemID:            item.itemID,
+					SchemaVersion:     item.schemaVersion,
+					Revision:          uint64(item.revision + 1),
+					RevisionID:        tombstoneID,
+					ParentRevisionIDs: []string{item.revisionID},
+					Deleted:           true,
+					Purged:            true,
+				},
+			},
+			acceptedAt,
+		)
+		if err != nil {
+			return fmt.Errorf("purge expired trash: %w", err)
+		}
+	}
+	return nil
+}
+
+func appendVaultSnapshot(
+	ctx context.Context,
+	tx *sql.Tx,
+	accountID string,
+	result *SyncResult,
+) error {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT revision.item_uuid::text,
+		       revision.schema_version,
+		       revision.revision,
+		       revision.revision_uuid::text,
+		       revision.parent_revision_uuids::text,
+		       revision.deleted,
+		       revision.purged,
+		       revision.envelope
+		FROM vault_item_heads AS head
+		JOIN vault_revisions AS revision
+		  ON revision.account_uuid = head.account_uuid
+		 AND revision.item_uuid = head.item_uuid
+		 AND revision.revision_uuid = head.revision_uuid
+		WHERE head.account_uuid = $1
+		ORDER BY revision.item_uuid, revision.revision_uuid`,
+		accountID,
+	)
+	if err != nil {
+		return fmt.Errorf("list full vault snapshot: %w", err)
+	}
+	for rows.Next() {
+		var (
+			item          OpaqueItem
+			revision      int64
+			parentIDsText string
+		)
+		if err := rows.Scan(
+			&item.ItemID,
+			&item.SchemaVersion,
+			&revision,
+			&item.RevisionID,
+			&parentIDsText,
+			&item.Deleted,
+			&item.Purged,
+			&item.Envelope,
+		); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan full vault snapshot: %w", err)
+		}
+		item.Revision = uint64(revision)
+		item.ParentRevisionIDs, err =
+			parsePostgresUUIDArray(parentIDsText)
+		if err != nil {
+			rows.Close()
+			return fmt.Errorf(
+				"parse full vault snapshot parents: %w", err)
+		}
+		result.Changes = append(result.Changes, item)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close full vault snapshot: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate full vault snapshot: %w", err)
+	}
+	return nil
+}
+
 func applyVaultMutation(
 	ctx context.Context,
 	tx *sql.Tx,
 	accountID string,
 	mutation VaultMutation,
+	acceptedAt time.Time,
 ) (bool, error) {
 	digest := vaultMutationDigest(mutation)
 	var (
@@ -707,17 +934,54 @@ func applyVaultMutation(
 			uint64(maxRevision) != mutation.BaseRevision {
 			return false, ErrItemRevisionConflict
 		}
+		var (
+			headCount         int
+			parentHeadCount   int
+			purgedParentHeads int
+		)
+		err = tx.QueryRowContext(ctx, `
+			SELECT
+				count(*),
+				count(*) FILTER (
+					WHERE head.revision_uuid = ANY($3::uuid[])
+				),
+				count(*) FILTER (
+					WHERE head.revision_uuid = ANY($3::uuid[])
+					  AND revision.purged
+				)
+			FROM vault_item_heads AS head
+			JOIN vault_revisions AS revision
+			  ON revision.account_uuid = head.account_uuid
+			 AND revision.revision_uuid = head.revision_uuid
+			WHERE head.account_uuid = $1
+			  AND head.item_uuid = $2`,
+			accountID, mutation.Item.ItemID, parentsArray,
+		).Scan(&headCount, &parentHeadCount, &purgedParentHeads)
+		if err != nil {
+			return false, fmt.Errorf("read revision heads: %w", err)
+		}
+		if mutation.Item.Purged && parentHeadCount != headCount {
+			return false, ErrItemRevisionConflict
+		}
+		if !mutation.Item.Deleted &&
+			len(mutation.Item.ParentRevisionIDs) == 1 &&
+			purgedParentHeads == 1 {
+			return false, ErrItemRevisionConflict
+		}
 	}
 
 	result, err := tx.ExecContext(ctx, `
 		INSERT INTO vault_revisions (
 			account_uuid, revision_uuid, item_uuid, schema_version,
-			revision, parent_revision_uuids, envelope
+			revision, parent_revision_uuids, envelope, deleted, purged,
+			content_purged, created_at, tombstoned_at
 		)
 		VALUES (
 			$1, $2, $3, $4, $5,
 			$6::uuid[],
-			$7
+			$7, $8, $9, $9,
+			$10::timestamptz,
+			CASE WHEN $8 THEN $10::timestamptz ELSE NULL END
 		)
 		ON CONFLICT DO NOTHING`,
 		accountID,
@@ -727,6 +991,9 @@ func applyVaultMutation(
 		int64(mutation.Item.Revision),
 		parentsArray,
 		mutation.Item.Envelope,
+		mutation.Item.Deleted,
+		mutation.Item.Purged,
+		acceptedAt,
 	)
 	if err != nil {
 		return false, fmt.Errorf("append vault revision: %w", err)
@@ -757,6 +1024,28 @@ func applyVaultMutation(
 	); err != nil {
 		return false, fmt.Errorf("record revision head: %w", err)
 	}
+	if mutation.Item.Purged {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE vault_revisions
+			SET envelope = NULL,
+			    content_purged = true
+			WHERE account_uuid = $1
+			  AND item_uuid = $2
+			  AND revision_uuid <> $3`,
+			accountID,
+			mutation.Item.ItemID,
+			mutation.Item.RevisionID,
+		); err != nil {
+			return false, fmt.Errorf("purge revision content: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM vault_changes
+			WHERE account_uuid = $1 AND item_uuid = $2`,
+			accountID, mutation.Item.ItemID,
+		); err != nil {
+			return false, fmt.Errorf("remove purged change content: %w", err)
+		}
+	}
 
 	var headCount int
 	err = tx.QueryRowContext(ctx, `
@@ -770,19 +1059,25 @@ func applyVaultMutation(
 	if headCount == 1 {
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO vault_items (
-				account_uuid, item_uuid, schema_version, revision, envelope
+				account_uuid, item_uuid, schema_version, revision,
+				deleted, purged, envelope
 			)
-			VALUES ($1, $2, $3, $4, $5)
+			VALUES ($1, $2, $3, $4, $5, $6, $7)
 			ON CONFLICT (account_uuid, item_uuid) DO UPDATE
 			SET schema_version = EXCLUDED.schema_version,
 			    revision = EXCLUDED.revision,
+			    deleted = EXCLUDED.deleted,
+			    purged = EXCLUDED.purged,
 			    envelope = EXCLUDED.envelope,
-			    updated_at = now()`,
+			    updated_at = $8`,
 			accountID,
 			mutation.Item.ItemID,
 			mutation.Item.SchemaVersion,
 			int64(mutation.Item.Revision),
+			mutation.Item.Deleted,
+			mutation.Item.Purged,
 			mutation.Item.Envelope,
+			acceptedAt,
 		); err != nil {
 			return false, fmt.Errorf("project unconflicted revision: %w", err)
 		}
@@ -801,12 +1096,13 @@ func applyVaultMutation(
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO vault_changes (
 			account_uuid, cursor, item_uuid, schema_version, revision,
-			revision_uuid, parent_revision_uuids, envelope
+			revision_uuid, parent_revision_uuids, deleted, purged, envelope,
+			created_at
 		)
 		VALUES (
 			$1, $2, $3, $4, $5, $6,
 			$7::uuid[],
-			$8
+			$8, $9, $10, $11
 		)`,
 		accountID,
 		changeCursor,
@@ -815,7 +1111,10 @@ func applyVaultMutation(
 		int64(mutation.Item.Revision),
 		mutation.Item.RevisionID,
 		parentsArray,
+		mutation.Item.Deleted,
+		mutation.Item.Purged,
 		mutation.Item.Envelope,
+		acceptedAt,
 	); err != nil {
 		return false, fmt.Errorf("record synchronization change: %w", err)
 	}
@@ -823,12 +1122,12 @@ func applyVaultMutation(
 		INSERT INTO vault_mutations (
 			account_uuid, mutation_uuid, item_uuid, base_revision,
 			revision, revision_uuid, parent_revision_uuids,
-			envelope_sha256, change_cursor
+			envelope_sha256, change_cursor, created_at
 		)
 		VALUES (
 			$1, $2, $3, $4, $5, $6,
 			$7::uuid[],
-			$8, $9
+			$8, $9, $10
 		)`,
 		accountID,
 		mutation.MutationID,
@@ -839,6 +1138,7 @@ func applyVaultMutation(
 		parentsArray,
 		digest[:],
 		changeCursor,
+		acceptedAt,
 	); err != nil {
 		return false, fmt.Errorf("record mutation ledger: %w", err)
 	}
@@ -860,13 +1160,15 @@ func vaultMutationDigest(mutation VaultMutation) [sha256.Size]byte {
 	hash := sha256.New()
 	_, _ = fmt.Fprintf(
 		hash,
-		"%s\n%d\n%s\n%d\n%d\n%s\n",
+		"%s\n%d\n%s\n%d\n%d\n%s\n%t\n%t\n",
 		mutation.MutationID,
 		mutation.BaseRevision,
 		mutation.Item.ItemID,
 		mutation.Item.SchemaVersion,
 		mutation.Item.Revision,
 		mutation.Item.RevisionID,
+		mutation.Item.Deleted,
+		mutation.Item.Purged,
 	)
 	parentIDs := append([]string(nil), mutation.Item.ParentRevisionIDs...)
 	sort.Strings(parentIDs)

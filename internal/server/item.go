@@ -22,6 +22,8 @@ type OpaqueItem struct {
 	Revision          uint64   `json:"revision"`
 	RevisionID        string   `json:"revision_id"`
 	ParentRevisionIDs []string `json:"parent_revision_ids"`
+	Deleted           bool     `json:"deleted"`
+	Purged            bool     `json:"purged"`
 	Envelope          []byte   `json:"envelope"`
 }
 
@@ -33,6 +35,7 @@ type VaultMutation struct {
 
 type SyncResult struct {
 	Cursor             string       `json:"cursor"`
+	FullSnapshot       bool         `json:"full_snapshot"`
 	AppliedMutationIDs []string     `json:"applied_mutation_ids"`
 	Changes            []OpaqueItem `json:"changes"`
 }
@@ -207,7 +210,7 @@ func validMutations(mutations []VaultMutation) bool {
 			item.Revision > maximumItemRevision ||
 			item.RevisionID != mutation.MutationID ||
 			item.Revision != mutation.BaseRevision+1 ||
-			len(item.Envelope) == 0 ||
+			!validOpaqueItemContent(item) ||
 			len(item.Envelope) > maximumItemEnvelopeSize {
 			return false
 		}
@@ -224,6 +227,13 @@ func validMutations(mutations []VaultMutation) bool {
 		}
 	}
 	return true
+}
+
+func validOpaqueItemContent(item OpaqueItem) bool {
+	if item.Purged {
+		return item.Deleted && len(item.Envelope) == 0
+	}
+	return len(item.Envelope) > 0
 }
 
 func normalizeMutations(mutations []VaultMutation) {

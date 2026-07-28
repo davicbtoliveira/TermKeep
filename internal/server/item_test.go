@@ -210,6 +210,140 @@ func TestSyncPreservesConcurrentRevisions(t *testing.T) {
 	}
 }
 
+func TestSyncAcceptsEncryptedTrashRevision(t *testing.T) {
+	authStore := &memoryBootstrapStore{}
+	auth := newTestAuthService(t, authStore)
+	itemStore := &memoryItemStore{}
+	items := NewItemService(itemStore, auth)
+	handler := NewHandler("test", stubSchema{version: 1}, nil, auth, items)
+	testServer := httptest.NewServer(handler)
+	defer testServer.Close()
+
+	password := []byte("TermKeep#2026")
+	mustBootstrap(t, testServer, "admin@example.com", password)
+	token := mustLogin(t, testServer, "admin@example.com", password)
+	itemID := "11111111-1111-4111-8111-111111111111"
+	rootID := "22222222-2222-4222-8222-222222222222"
+	root := VaultMutation{
+		MutationID:   rootID,
+		BaseRevision: 0,
+		Item: OpaqueItem{
+			ItemID:        itemID,
+			SchemaVersion: 1,
+			Revision:      1,
+			RevisionID:    rootID,
+			Envelope:      []byte("encrypted-root"),
+		},
+	}
+	rootResult := syncOpaqueItems(
+		t, testServer, token, "", []VaultMutation{root})
+	deletionID := "33333333-3333-4333-8333-333333333333"
+	deletion := VaultMutation{
+		MutationID:   deletionID,
+		BaseRevision: 1,
+		Item: OpaqueItem{
+			ItemID:            itemID,
+			SchemaVersion:     1,
+			Revision:          2,
+			RevisionID:        deletionID,
+			ParentRevisionIDs: []string{rootID},
+			Deleted:           true,
+			Envelope:          []byte("encrypted-trash"),
+		},
+	}
+	result := syncOpaqueItems(
+		t, testServer, token, rootResult.Cursor, []VaultMutation{deletion})
+	if len(result.Changes) != 1 ||
+		!result.Changes[0].Deleted ||
+		string(result.Changes[0].Envelope) != "encrypted-trash" {
+		t.Fatalf("encrypted trash revision: %+v", result.Changes)
+	}
+}
+
+func TestSyncAcceptsPermanentTechnicalTombstone(t *testing.T) {
+	authStore := &memoryBootstrapStore{}
+	auth := newTestAuthService(t, authStore)
+	itemStore := &memoryItemStore{}
+	items := NewItemService(itemStore, auth)
+	handler := NewHandler("test", stubSchema{version: 1}, nil, auth, items)
+	testServer := httptest.NewServer(handler)
+	defer testServer.Close()
+
+	password := []byte("TermKeep#2026")
+	mustBootstrap(t, testServer, "admin@example.com", password)
+	token := mustLogin(t, testServer, "admin@example.com", password)
+	itemID := "11111111-1111-4111-8111-111111111111"
+	rootID := "22222222-2222-4222-8222-222222222222"
+	deletionID := "33333333-3333-4333-8333-333333333333"
+	root := VaultMutation{
+		MutationID:   rootID,
+		BaseRevision: 0,
+		Item: OpaqueItem{
+			ItemID:        itemID,
+			SchemaVersion: 1,
+			Revision:      1,
+			RevisionID:    rootID,
+			Envelope:      []byte("encrypted-root"),
+		},
+	}
+	rootResult := syncOpaqueItems(
+		t, testServer, token, "", []VaultMutation{root})
+	deletion := VaultMutation{
+		MutationID:   deletionID,
+		BaseRevision: 1,
+		Item: OpaqueItem{
+			ItemID:            itemID,
+			SchemaVersion:     1,
+			Revision:          2,
+			RevisionID:        deletionID,
+			ParentRevisionIDs: []string{rootID},
+			Deleted:           true,
+			Envelope:          []byte("encrypted-trash"),
+		},
+	}
+	deletedResult := syncOpaqueItems(
+		t, testServer, token, rootResult.Cursor, []VaultMutation{deletion})
+	tombstoneID := "44444444-4444-4444-8444-444444444444"
+	tombstone := VaultMutation{
+		MutationID:   tombstoneID,
+		BaseRevision: 2,
+		Item: OpaqueItem{
+			ItemID:            itemID,
+			SchemaVersion:     1,
+			Revision:          3,
+			RevisionID:        tombstoneID,
+			ParentRevisionIDs: []string{deletionID},
+			Deleted:           true,
+			Purged:            true,
+		},
+	}
+	result := syncOpaqueItems(
+		t, testServer, token, deletedResult.Cursor, []VaultMutation{tombstone})
+	if len(result.Changes) != 1 ||
+		!result.Changes[0].Deleted ||
+		!result.Changes[0].Purged ||
+		len(result.Changes[0].Envelope) != 0 {
+		t.Fatalf("technical Tombstone: %+v", result.Changes)
+	}
+	retry := syncOpaqueItems(
+		t, testServer, token, result.Cursor, []VaultMutation{tombstone})
+	if len(retry.AppliedMutationIDs) != 1 ||
+		retry.AppliedMutationIDs[0] != tombstoneID ||
+		len(retry.Changes) != 0 {
+		t.Fatalf("Tombstone retry: %+v", retry)
+	}
+}
+
+func TestSyncResultSerializesFullSnapshot(t *testing.T) {
+	encoded, err := json.Marshal(SyncResult{FullSnapshot: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(encoded, []byte(`"full_snapshot":true`)) {
+		t.Fatalf("full snapshot marker missing: %s", encoded)
+	}
+}
+
 func TestSyncRetryDoesNotDuplicateRevision(t *testing.T) {
 	authStore := &memoryBootstrapStore{}
 	auth := newTestAuthService(t, authStore)
