@@ -63,7 +63,7 @@ func TestSyncCachePushesPendingMutationAndAppliesResponse(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"cursor":               "1",
 			"applied_mutation_ids": []string{mutation.MutationID},
-			"changes":              []EncryptedItem{item},
+			"changes":              []EncryptedItem{mutation.Item},
 		})
 	}))
 	defer server.Close()
@@ -144,7 +144,7 @@ func TestSyncRetryAfterLostResponseDoesNotLoseOrDuplicateMutation(t *testing.T) 
 		_ = json.NewEncoder(w).Encode(syncResponse{
 			Cursor:             "1",
 			AppliedMutationIDs: []string{mutation.MutationID},
-			Changes:            []EncryptedItem{item},
+			Changes:            []EncryptedItem{mutation.Item},
 		})
 	}))
 	defer server.Close()

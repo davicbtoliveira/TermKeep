@@ -35,10 +35,12 @@ type LoginItem struct {
 }
 
 type EncryptedItem struct {
-	ItemID        string `json:"item_id"`
-	SchemaVersion int    `json:"schema_version"`
-	Revision      uint64 `json:"revision"`
-	Envelope      []byte `json:"envelope"`
+	ItemID            string   `json:"item_id"`
+	SchemaVersion     int      `json:"schema_version"`
+	Revision          uint64   `json:"revision"`
+	RevisionID        string   `json:"revision_id"`
+	ParentRevisionIDs []string `json:"parent_revision_ids"`
+	Envelope          []byte   `json:"envelope"`
 }
 
 type itemEnvelope struct {

@@ -51,7 +51,7 @@ func TestManualSyncUsesActiveSessionAndCache(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"cursor":               "1",
 			"applied_mutation_ids": []string{mutation.MutationID},
-			"changes":              []client.EncryptedItem{item},
+			"changes":              []client.EncryptedItem{mutation.Item},
 		})
 	}))
 	defer server.Close()
