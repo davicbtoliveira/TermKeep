@@ -58,6 +58,7 @@ type Config struct {
 	ServerURL  string        // base URL; HTTPS required outside localhost
 	CACertFile string        // optional PEM trust anchor (self-hosted deployments)
 	Timeout    time.Duration // overall request budget
+	DataDir    string        // optional encrypted-cache directory
 }
 
 // statusBody mirrors the server's public status payload.
