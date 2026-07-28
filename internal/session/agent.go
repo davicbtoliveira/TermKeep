@@ -57,6 +57,7 @@ type request struct {
 	Action   string                 `json:"action"`
 	Login    *client.LoginItem      `json:"login,omitempty"`
 	Note     *client.SecureNoteItem `json:"note,omitempty"`
+	Folder   *client.FolderItem     `json:"folder,omitempty"`
 	Item     *client.EncryptedItem  `json:"item,omitempty"`
 	Revision uint64                 `json:"revision,omitempty"`
 }
@@ -254,6 +255,18 @@ func (a *Agent) handle(conn *net.UnixConn) {
 			return
 		}
 		_ = json.NewEncoder(conn).Encode(response{Note: &note})
+	case "seal-folder":
+		if req.Folder == nil {
+			_ = json.NewEncoder(conn).Encode(response{Error: "Folder is required"})
+			return
+		}
+		item, err := client.EncryptFolder(
+			a.vaultKey, a.accountID, *req.Folder, req.Revision)
+		if err != nil {
+			_ = json.NewEncoder(conn).Encode(response{Error: err.Error()})
+			return
+		}
+		_ = json.NewEncoder(conn).Encode(response{Item: &item})
 	case "open-native-item":
 		if req.Item == nil {
 			_ = json.NewEncoder(conn).Encode(response{Error: "item is required"})
@@ -461,6 +474,27 @@ func OpenSecureNote(
 			"session agent returned no Secure Note")
 	}
 	return *res.Note, nil
+}
+
+func SealFolder(
+	ctx context.Context,
+	socketPath string,
+	folder client.FolderItem,
+	revision uint64,
+) (client.EncryptedItem, error) {
+	res, err := requestAgent(ctx, socketPath, request{
+		Action:   "seal-folder",
+		Folder:   &folder,
+		Revision: revision,
+	})
+	if err != nil {
+		return client.EncryptedItem{}, err
+	}
+	if res.Item == nil {
+		return client.EncryptedItem{}, errors.New(
+			"session agent returned no encrypted Folder")
+	}
+	return *res.Item, nil
 }
 
 func OpenNativeItem(
