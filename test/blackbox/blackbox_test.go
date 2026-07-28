@@ -217,7 +217,7 @@ func (s *stack) testStatusHealthy(t *testing.T) {
 	if !strings.Contains(stdout, "Status:   healthy") {
 		t.Errorf("stdout missing healthy state:\n%s", stdout)
 	}
-	if !strings.Contains(stdout, "schema v7") {
+	if !strings.Contains(stdout, "schema v8") {
 		t.Errorf("stdout missing schema version:\n%s", stdout)
 	}
 }
