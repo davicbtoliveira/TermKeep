@@ -443,7 +443,16 @@ func (s *stack) testEncryptedLoginRoundTrip(t *testing.T) {
 	command := fmt.Sprintf("%q --server %q --ca-cert %q login --email %q\n",
 		s.binary, s.serverURL, filepath.Join(s.certsDir, "ca.pem"), email)
 	shell := s.startTerminalShell(t)
-	shell.login(command, password)
+	shell.clear()
+	write(t, shell.ptmx, command)
+	if matched, output := shell.waitFor(
+		30*time.Second, "Master password:", "unlocked (empty)",
+	); matched != "Master password:" {
+		t.Fatalf("first Login client did not request master password:\n%s", output)
+	}
+	write(t, shell.ptmx, password+"\n")
+	shell.waitFor(45*time.Second, "unlocked (empty)")
+
 	sockets, err := filepath.Glob(
 		filepath.Join(shell.runtimeDir, "termkeep", "*.sock"))
 	if err != nil || len(sockets) != 1 {
@@ -454,27 +463,40 @@ func (s *stack) testEncryptedLoginRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer clear(token)
-	login := client.LoginItem{
-		ItemID:   "11111111-1111-4111-8111-111111111111",
-		Name:     loginName,
-		Username: loginUser,
-		Password: loginPass,
-		URLs:     []string{loginURL, loginURLTwo},
-		Notes:    loginNotes,
-		CustomFields: []client.CustomField{
-			{Name: "region", Value: loginCustom},
+
+	shell.clear()
+	write(t, shell.ptmx, "c")
+	shell.waitFor(10*time.Second, "New Login")
+	fields := []struct {
+		value string
+		next  string
+	}{
+		{value: loginName, next: "> Username:"},
+		{value: loginUser, next: "> Password:"},
+		{value: loginPass, next: "> URLs (comma-separated):"},
+		{
+			value: loginURL + ", " + loginURLTwo,
+			next:  "> Notes:",
+		},
+		{
+			value: loginNotes,
+			next:  "> Custom fields (name=value, comma-separated):",
 		},
 	}
-	item, err := session.SealLogin(
-		context.Background(), sockets[0], login, 1)
-	if err != nil {
-		t.Fatal(err)
+	for _, field := range fields {
+		shell.clear()
+		write(t, shell.ptmx, field.value+"\r")
+		shell.waitFor(10*time.Second, field.next)
 	}
-	if err := client.PutItem(
-		context.Background(), s.clientConfig(), string(token), item,
-	); err != nil {
-		t.Fatal(err)
+	shell.clear()
+	write(t, shell.ptmx, "region="+loginCustom+"\r")
+	if _, output := shell.waitFor(30*time.Second, "Logins:"); !strings.Contains(output, loginName) ||
+		!strings.Contains(output, loginUser) {
+		t.Fatalf("first Login client did not save through the TUI:\n%s", output)
 	}
+	write(t, shell.ptmx, "q")
+	shell.waitFor(10*time.Second, terminalShellPrompt)
+
 	shell.clear()
 	write(t, shell.ptmx, command)
 	matched, output := shell.waitFor(30*time.Second, "Master password:", loginName)
