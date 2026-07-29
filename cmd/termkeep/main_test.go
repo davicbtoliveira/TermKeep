@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -89,5 +90,28 @@ func TestManualSyncUsesActiveSessionAndCache(t *testing.T) {
 	}
 	if len(snapshot.Mutations) != 0 {
 		t.Fatalf("manual sync left pending mutations: %+v", snapshot)
+	}
+}
+
+func TestSecretRequestRequiresExplicitStdoutFlag(t *testing.T) {
+	_, err := parseSecretRequest([]string{
+		"--item", "11111111-1111-4111-8111-111111111111",
+		"--field", "password",
+	})
+	if !errors.Is(err, errSecretUsage) {
+		t.Fatalf("missing --stdout error: got %v", err)
+	}
+
+	request, err := parseSecretRequest([]string{
+		"--item", "11111111-1111-4111-8111-111111111111",
+		"--field", "password",
+		"--stdout",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.itemID != "11111111-1111-4111-8111-111111111111" ||
+		request.field != "password" {
+		t.Fatalf("secret request: %+v", request)
 	}
 }
