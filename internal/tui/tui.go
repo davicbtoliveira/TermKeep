@@ -172,74 +172,74 @@ type cachedItemStore struct {
 
 // model is the single-screen state: the shared status lines plus keys.
 type model struct {
-	cfg                   client.Config
-	lines                 []string
-	err                   error
-	loaded                bool
-	vaultOpen             bool
-	accessToken           string
-	showSessions          bool
-	sessionsLoading       bool
-	sessions              []client.OnlineSession
-	selectedSession       int
-	sessionsErr           error
-	showActivity          bool
-	activityAll           bool
-	activityLoading       bool
-	activityPage          client.ActivityPage
-	activityErr           error
-	itemsLoading          bool
-	items                 []itemRecord
-	selectedItem          int
-	searchIndex           client.SearchIndex
-	searching             bool
-	searchQuery           string
-	searchMode            client.SearchMode
-	selectedConflict      int
-	itemsErr              error
-	folders               []itemRecord
-	selectedFolder        int
-	showFolders           bool
-	showFolderConflict    bool
-	folderFilter          string
-	favoritesOnly         bool
-	folderDeleteConfirm   bool
-	folderActionErr       error
-	showFolderForm        bool
-	folderForm            folderForm
-	showMoveFolder        bool
-	selectedMoveFolder    int
-	showTrash             bool
-	trashLoading          bool
-	trash                 []itemRecord
-	selectedTrash         int
-	trashErr              error
-	purgeConfirm          bool
-	showItem              bool
-	revealPassword        bool
-	clipboard             clipboard.Backend
-	copiedField           string
-	clipboardErr          error
-	showPasswordHistory   bool
-	selectedHistory       int
-	revealHistory         bool
-	historyClearConfirm   bool
-	itemStore             itemStore
-	showLoginForm         bool
-	loginForm             loginForm
-	showTOTPForm          bool
-	totpForm              totpForm
-	showPasswordGenerator bool
-	passwordGenerator     passwordGeneratorForm
-	passwordGeneratorErr  error
-	showNoteForm          bool
-	noteForm              secureNoteForm
-	itemFormErr           error
-	itemSaving            bool
-	syncLoading           bool
-	syncErr               error
-	pendingMutations      int
-	now                   func() time.Time
+	cfg                 client.Config
+	lines               []string
+	err                 error
+	loaded              bool
+	vaultOpen           bool
+	accessToken         string
+	showSessions        bool
+	sessionsLoading     bool
+	sessions            []client.OnlineSession
+	selectedSession     int
+	sessionsErr         error
+	showActivity        bool
+	activityAll         bool
+	activityLoading     bool
+	activityPage        client.ActivityPage
+	activityErr         error
+	itemsLoading        bool
+	items               []itemRecord
+	selectedItem        int
+	searchIndex         client.SearchIndex
+	searching           bool
+	searchQuery         string
+	searchMode          client.SearchMode
+	selectedConflict    int
+	itemsErr            error
+	folders             []itemRecord
+	selectedFolder      int
+	showFolders         bool
+	showFolderConflict  bool
+	folderFilter        string
+	favoritesOnly       bool
+	folderDeleteConfirm bool
+	folderActionErr     error
+	showFolderForm      bool
+	folderForm          folderForm
+	showMoveFolder      bool
+	selectedMoveFolder  int
+	showTrash           bool
+	trashLoading        bool
+	trash               []itemRecord
+	selectedTrash       int
+	trashErr            error
+	purgeConfirm        bool
+	showItem            bool
+	revealPassword      bool
+	clipboard           clipboard.Backend
+	copiedField         string
+	clipboardErr        error
+	showPasswordHistory bool
+	selectedHistory     int
+	revealHistory       bool
+	historyClearConfirm bool
+	itemStore           itemStore
+	showLoginForm       bool
+	loginForm           loginForm
+	showTOTPForm        bool
+	totpForm            totpForm
+	showGenerator       bool
+	passwordGenerator   passwordGeneratorForm
+	generatorErr        error
+	showNoteForm        bool
+	noteForm            secureNoteForm
+	itemFormErr         error
+	itemSaving          bool
+	syncLoading         bool
+	syncErr             error
+	pendingMutations    int
+	now                 func() time.Time
 }
 
 // Run starts the Bubble Tea program on the controlling terminal.
@@ -826,7 +826,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.KeyMsg:
-		if m.showPasswordGenerator {
+		if m.showGenerator {
 			return m.updatePasswordGenerator(msg)
 		}
 		if m.showTOTPForm {
@@ -1213,10 +1213,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				!m.showSessions && !m.showActivity &&
 				!m.showItem && !m.showTrash &&
 				!m.showFolders && !m.showFolderConflict {
-				m.showPasswordGenerator = true
+				m.showGenerator = true
 				m.passwordGenerator =
 					defaultPasswordGeneratorForm()
-				m.passwordGeneratorErr = nil
+				m.generatorErr = nil
 				m.copiedField = ""
 				m.clipboardErr = nil
 				return m, nil
@@ -1231,7 +1231,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showMoveFolder = false
 			m.showFolderForm = false
 			m.showTOTPForm = false
-			m.showPasswordGenerator = false
+			m.showGenerator = false
 			m.showPasswordHistory = false
 			m.historyClearConfirm = false
 			m.revealPassword = false
@@ -1446,7 +1446,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() string {
-	if m.showPasswordGenerator {
+	if m.showGenerator {
 		return m.passwordGeneratorView()
 	}
 	if m.showTOTPForm {
@@ -1692,9 +1692,9 @@ func (m model) updatePasswordGenerator(
 		case "ctrl+c", "q":
 			return m, tea.Quit
 		case "esc":
-			m.showPasswordGenerator = false
+			m.showGenerator = false
 			m.passwordGenerator = passwordGeneratorForm{}
-			m.passwordGeneratorErr = nil
+			m.generatorErr = nil
 			m.copiedField = ""
 			m.clipboardErr = nil
 		case "p":
@@ -1711,12 +1711,12 @@ func (m model) updatePasswordGenerator(
 				m.passwordGenerator,
 			)
 			if err != nil {
-				m.passwordGeneratorErr = err
+				m.generatorErr = err
 				return m, nil
 			}
 			m.passwordGenerator.generated = password
 			m.passwordGenerator.reveal = false
-			m.passwordGeneratorErr = nil
+			m.generatorErr = nil
 			m.copiedField = ""
 			m.clipboardErr = nil
 		}
@@ -1727,9 +1727,9 @@ func (m model) updatePasswordGenerator(
 	case "ctrl+c":
 		return m, tea.Quit
 	case "esc":
-		m.showPasswordGenerator = false
+		m.showGenerator = false
 		m.passwordGenerator = passwordGeneratorForm{}
-		m.passwordGeneratorErr = nil
+		m.generatorErr = nil
 		return m, nil
 	case "ctrl+u":
 		m.passwordGenerator.values[m.passwordGenerator.field] = ""
@@ -1745,19 +1745,19 @@ func (m model) updatePasswordGenerator(
 		if m.passwordGenerator.field+1 <
 			passwordGeneratorFieldCount {
 			m.passwordGenerator.field++
-			m.passwordGeneratorErr = nil
+			m.generatorErr = nil
 			return m, nil
 		}
 		password, err := generatePasswordFromForm(
 			m.passwordGenerator,
 		)
 		if err != nil {
-			m.passwordGeneratorErr = err
+			m.generatorErr = err
 			return m, nil
 		}
 		m.passwordGenerator.generated = password
 		m.passwordGenerator.reveal = false
-		m.passwordGeneratorErr = nil
+		m.generatorErr = nil
 	default:
 		if msg.Type == tea.KeyRunes {
 			m.passwordGenerator.values[m.passwordGenerator.field] +=
@@ -1842,11 +1842,11 @@ func (m model) passwordGeneratorView() string {
 			password = m.passwordGenerator.generated
 		}
 		fmt.Fprintf(&b, "Generated password: %s\n", password)
-		if m.passwordGeneratorErr != nil {
+		if m.generatorErr != nil {
 			fmt.Fprintf(
 				&b,
 				"\nError: %s\n",
-				m.passwordGeneratorErr,
+				m.generatorErr,
 			)
 		}
 		b.WriteString(m.clipboardFeedback())
@@ -1870,8 +1870,8 @@ func (m model) passwordGeneratorView() string {
 			m.passwordGenerator.values[index],
 		)
 	}
-	if m.passwordGeneratorErr != nil {
-		fmt.Fprintf(&b, "\nError: %s\n", m.passwordGeneratorErr)
+	if m.generatorErr != nil {
+		fmt.Fprintf(&b, "\nError: %s\n", m.generatorErr)
 	}
 	b.WriteString(
 		"\n[enter] next/generate  [ctrl+u] clear field  " +
