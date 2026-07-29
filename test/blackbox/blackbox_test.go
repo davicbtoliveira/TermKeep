@@ -2680,7 +2680,7 @@ func (s *stack) runBootstrap(t *testing.T, email, password string) (string, int)
 	cmd := exec.Command(s.binary,
 		"--server", s.serverURL,
 		"--ca-cert", filepath.Join(s.certsDir, "ca.pem"),
-		"bootstrap", "--email", email)
+		"bootstrap", "--email", email, "--stdout-recovery-key")
 	cmd.Env = withoutEnv(os.Environ(), "TERM", "TERMKEEP_SERVER", "TERMKEEP_CA_CERT")
 	cmd.Env = append(
 		cmd.Env,
@@ -2747,7 +2747,8 @@ func (s *stack) runRegistration(t *testing.T, email, password, inviteToken strin
 	cmd := exec.Command(s.binary,
 		"--server", s.serverURL,
 		"--ca-cert", filepath.Join(s.certsDir, "ca.pem"),
-		"register", "--email", email, "--invite-token", inviteToken)
+		"register", "--email", email, "--invite-token", inviteToken,
+		"--stdout-recovery-key")
 	cmd.Env = withoutEnv(os.Environ(), "TERM", "TERMKEEP_SERVER", "TERMKEEP_CA_CERT")
 	cmd.Env = append(
 		cmd.Env,
