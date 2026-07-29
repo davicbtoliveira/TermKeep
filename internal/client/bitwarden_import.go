@@ -13,12 +13,16 @@ import (
 )
 
 const maxBitwardenExportSize = 16 << 20
+const maxBitwardenImportRecords = 10_000
 
 var ErrInvalidBitwardenExport = errors.New(
 	"invalid Bitwarden export",
 )
 var ErrBitwardenExportTooLarge = errors.New(
 	"Bitwarden export exceeds 16 MiB",
+)
+var ErrBitwardenExportTooManyRecords = errors.New(
+	"Bitwarden export exceeds 10000 records",
 )
 
 type BitwardenImportCounts struct {
@@ -120,6 +124,12 @@ func PreviewBitwardenImport(
 				"%w: encrypted exports are unsupported",
 				ErrInvalidBitwardenExport,
 			)
+	}
+	if len(source.Folders) > maxBitwardenImportRecords ||
+		len(source.Items) >
+			maxBitwardenImportRecords-len(source.Folders) {
+		return BitwardenImportPreview{},
+			ErrBitwardenExportTooManyRecords
 	}
 
 	preview := BitwardenImportPreview{}
