@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"time"
 )
 
 const maxBitwardenExportSize = 16 << 20
@@ -57,14 +58,15 @@ type bitwardenFolder struct {
 }
 
 type bitwardenItem struct {
-	FolderID string           `json:"folderId"`
-	Type     int              `json:"type"`
-	Name     string           `json:"name"`
-	Notes    string           `json:"notes"`
-	Favorite bool             `json:"favorite"`
-	Reprompt int              `json:"reprompt"`
-	Fields   []bitwardenField `json:"fields"`
-	Login    bitwardenLogin   `json:"login"`
+	FolderID        string                     `json:"folderId"`
+	Type            int                        `json:"type"`
+	Name            string                     `json:"name"`
+	Notes           string                     `json:"notes"`
+	Favorite        bool                       `json:"favorite"`
+	Reprompt        int                        `json:"reprompt"`
+	Fields          []bitwardenField           `json:"fields"`
+	Login           bitwardenLogin             `json:"login"`
+	PasswordHistory []bitwardenPasswordHistory `json:"passwordHistory"`
 }
 
 type bitwardenLogin struct {
@@ -85,6 +87,11 @@ type bitwardenField struct {
 	Value    string `json:"value"`
 	Type     int    `json:"type"`
 	LinkedID *int   `json:"linkedId"`
+}
+
+type bitwardenPasswordHistory struct {
+	LastUsedDate string `json:"lastUsedDate"`
+	Password     string `json:"password"`
 }
 
 func PreviewBitwardenImport(
@@ -295,6 +302,22 @@ func PreviewBitwardenImport(
 				})
 			}
 		}
+		passwordHistory, invalidHistoryIndex, err :=
+			bitwardenPasswordHistoryEntries(item.PasswordHistory)
+		if err != nil {
+			preview.Errors = append(
+				preview.Errors,
+				BitwardenImportIssue{
+					Item: index + 1,
+					Field: fmt.Sprintf(
+						"passwordHistory[%d].lastUsedDate",
+						invalidHistoryIndex,
+					),
+					Message: "invalid password history timestamp",
+				},
+			)
+			continue
+		}
 		var totp *TOTPConfig
 		if strings.TrimSpace(item.Login.TOTP) != "" {
 			config, err := bitwardenTOTP(
@@ -315,16 +338,17 @@ func PreviewBitwardenImport(
 			totp = &config
 		}
 		login := LoginItem{
-			ItemID:       itemID,
-			Name:         item.Name,
-			Username:     strings.TrimSpace(item.Login.Username),
-			Password:     item.Login.Password,
-			FolderID:     folderID,
-			Favorite:     item.Favorite,
-			URLs:         urls,
-			Notes:        item.Notes,
-			CustomFields: customFields,
-			TOTP:         totp,
+			ItemID:          itemID,
+			Name:            item.Name,
+			Username:        strings.TrimSpace(item.Login.Username),
+			Password:        item.Login.Password,
+			PasswordHistory: passwordHistory,
+			FolderID:        folderID,
+			Favorite:        item.Favorite,
+			URLs:            urls,
+			Notes:           item.Notes,
+			CustomFields:    customFields,
+			TOTP:            totp,
 		}
 		normalizedItem := NativeItem{
 			Type:  NativeItemTypeLogin,
@@ -335,6 +359,27 @@ func PreviewBitwardenImport(
 		preview.Counts.Logins++
 	}
 	return preview, nil
+}
+
+func bitwardenPasswordHistoryEntries(
+	source []bitwardenPasswordHistory,
+) ([]PasswordHistoryEntry, int, error) {
+	count := min(len(source), maxPasswordHistoryEntries)
+	history := make([]PasswordHistoryEntry, 0, count)
+	for index := 0; index < count; index++ {
+		changedAt, err := time.Parse(
+			time.RFC3339,
+			strings.TrimSpace(source[index].LastUsedDate),
+		)
+		if err != nil {
+			return nil, index, err
+		}
+		history = append(history, PasswordHistoryEntry{
+			Password:  source[index].Password,
+			ChangedAt: changedAt.UTC(),
+		})
+	}
+	return history, 0, nil
 }
 
 func bitwardenTOTP(raw string, username string) (TOTPConfig, error) {
@@ -372,6 +417,9 @@ func bitwardenUnmappedLoginFields(
 	}
 	if item.Reprompt != 0 {
 		add("reprompt")
+	}
+	for index := maxPasswordHistoryEntries; index < len(item.PasswordHistory); index++ {
+		add(fmt.Sprintf("passwordHistory[%d]", index))
 	}
 	for index, field := range item.Fields {
 		if field.Type != 0 {
@@ -460,24 +508,33 @@ func bitwardenSemanticKey(
 			normalized.Account = strings.TrimSpace(normalized.Account)
 			totp = &normalized
 		}
+		history := append(
+			[]PasswordHistoryEntry(nil),
+			item.Login.PasswordHistory...,
+		)
+		for index := range history {
+			history[index].ChangedAt = history[index].ChangedAt.UTC()
+		}
 		semantic = struct {
-			Type         NativeItemType
-			Username     string
-			Password     string
-			URLs         []string
-			Notes        string
-			CustomFields []CustomField
-			TOTP         *TOTPConfig
+			Type            NativeItemType
+			Username        string
+			Password        string
+			PasswordHistory []PasswordHistoryEntry
+			URLs            []string
+			Notes           string
+			CustomFields    []CustomField
+			TOTP            *TOTPConfig
 		}{
 			Type: NativeItemTypeLogin,
 			Username: strings.ToLower(strings.TrimSpace(
 				item.Login.Username,
 			)),
-			Password:     item.Login.Password,
-			URLs:         urls,
-			Notes:        normalizeBitwardenText(item.Login.Notes),
-			CustomFields: fields,
-			TOTP:         totp,
+			Password:        item.Login.Password,
+			PasswordHistory: history,
+			URLs:            urls,
+			Notes:           normalizeBitwardenText(item.Login.Notes),
+			CustomFields:    fields,
+			TOTP:            totp,
 		}
 	case NativeItemTypeSecureNote:
 		if item.SecureNote == nil {
