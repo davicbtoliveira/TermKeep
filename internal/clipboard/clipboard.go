@@ -30,7 +30,11 @@ func Copy(
 		case <-ctx.Done():
 			cleanup <- ctx.Err()
 		case <-timer.C:
-			cleanup <- backend.Clear(context.Background())
+			current, err := backend.Read(context.Background())
+			if err == nil && current == value {
+				err = backend.Clear(context.Background())
+			}
+			cleanup <- err
 		}
 		close(cleanup)
 	}()
