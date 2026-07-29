@@ -256,3 +256,89 @@ func TestPreviewBitwardenImportReportsUnmappedNativeFields(
 			want, fields)
 	}
 }
+
+func TestPreviewBitwardenImportRenamesOnlySemanticDuplicates(
+	t *testing.T,
+) {
+	existing := []NativeItem{{
+		Type: NativeItemTypeLogin,
+		Login: &LoginItem{
+			ItemID:   "11111111-1111-4111-8111-111111111111",
+			Name:     "Existing database",
+			Username: "operator@example.com",
+			Password: "Password-Sentinel",
+			URLs:     []string{"https://db.example.com/"},
+			Notes:    "Primary credentials",
+			CustomFields: []CustomField{{
+				Name:  "region",
+				Value: "us-east-1",
+			}},
+		},
+	}}
+	export := `{
+		"encrypted": false,
+		"folders": [],
+		"items": [{
+			"type": 1,
+			"name": "Production database",
+			"notes": " Primary credentials ",
+			"fields": [{
+				"name": "region",
+				"value": "us-east-1",
+				"type": 0
+			}],
+			"login": {
+				"username": " OPERATOR@example.com ",
+				"password": "Password-Sentinel",
+				"uris": [{"uri": "https://DB.example.com"}]
+			}
+		}, {
+			"type": 1,
+			"name": "Production database",
+			"notes": "Primary credentials",
+			"fields": [{
+				"name": "region",
+				"value": "us-east-1",
+				"type": 0
+			}],
+			"login": {
+				"username": "operator@example.com",
+				"password": "Password-Sentinel",
+				"uris": [{"uri": "https://db.example.com/"}]
+			}
+		}, {
+			"type": 1,
+			"name": "Production database",
+			"notes": "Primary credentials",
+			"login": {
+				"username": "different@example.com",
+				"password": "Different-Password-Sentinel",
+				"uris": [{"uri": "https://db.example.com/"}]
+			}
+		}]
+	}`
+
+	preview, err := PreviewBitwardenImport(
+		strings.NewReader(export),
+		existing,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(preview.Items) != 3 || len(preview.Errors) != 0 {
+		t.Fatalf("preview summary: %+v", preview)
+	}
+	var names []string
+	for _, item := range preview.Items {
+		names = append(names, item.Login.Name)
+	}
+	want := []string{
+		"Production database (Duplicada)",
+		"Production database (Duplicada) - 2",
+		"Production database",
+	}
+	if !reflect.DeepEqual(names, want) {
+		t.Fatalf("duplicate names:\nwant: %v\ngot:  %v",
+			want, names)
+	}
+}
