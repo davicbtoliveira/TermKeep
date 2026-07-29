@@ -3,6 +3,10 @@ package clipboard
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"strings"
 	"time"
 )
 
@@ -16,8 +20,87 @@ type Backend interface {
 	Clear(ctx context.Context) error
 }
 
+type command struct {
+	path string
+	args []string
+}
+
+type commandBackend struct {
+	write command
+	read  command
+}
+
 func Open() (Backend, error) {
+	if os.Getenv("WAYLAND_DISPLAY") != "" {
+		write, writeErr := exec.LookPath("wl-copy")
+		read, readErr := exec.LookPath("wl-paste")
+		if writeErr == nil && readErr == nil {
+			return commandBackend{
+				write: command{
+					path: write,
+					args: []string{"--type", "text/plain"},
+				},
+				read: command{
+					path: read,
+					args: []string{"--no-newline"},
+				},
+			}, nil
+		}
+	}
+	if os.Getenv("DISPLAY") != "" {
+		if path, err := exec.LookPath("xclip"); err == nil {
+			return commandBackend{
+				write: command{
+					path: path,
+					args: []string{"-selection", "clipboard", "-in"},
+				},
+				read: command{
+					path: path,
+					args: []string{"-selection", "clipboard", "-out"},
+				},
+			}, nil
+		}
+		if path, err := exec.LookPath("xsel"); err == nil {
+			return commandBackend{
+				write: command{
+					path: path,
+					args: []string{"--clipboard", "--input"},
+				},
+				read: command{
+					path: path,
+					args: []string{"--clipboard", "--output"},
+				},
+			}, nil
+		}
+	}
 	return nil, ErrUnavailable
+}
+
+func (backend commandBackend) Write(
+	ctx context.Context,
+	value string,
+) error {
+	cmd := exec.CommandContext(
+		ctx, backend.write.path, backend.write.args...)
+	cmd.Stdin = strings.NewReader(value)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("clipboard write failed: %w", err)
+	}
+	return nil
+}
+
+func (backend commandBackend) Read(ctx context.Context) (string, error) {
+	cmd := exec.CommandContext(
+		ctx, backend.read.path, backend.read.args...)
+	value, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("clipboard read failed: %w", err)
+	}
+	return string(value), nil
+}
+
+func (backend commandBackend) Clear(ctx context.Context) error {
+	return backend.Write(ctx, "")
 }
 
 func Copy(
