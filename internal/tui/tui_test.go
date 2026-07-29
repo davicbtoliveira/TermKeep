@@ -1119,6 +1119,58 @@ func TestLoginPasswordChecksPwnedOnlyAfterExplicitKey(t *testing.T) {
 	}
 }
 
+func TestLoginTypingAndSavingDoNotCheckPwned(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(
+		w http.ResponseWriter,
+		_ *http.Request,
+	) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	store := &fakeItemStore{}
+	initial := model{
+		cfg: client.Config{
+			PwnedPasswordsURL: server.URL + "/range",
+		},
+		itemStore:     store,
+		showLoginForm: true,
+		loginForm: loginForm{
+			itemID: "11111111-1111-4111-8111-111111111111",
+			field:  loginFormFieldCount - 1,
+			values: [loginFormFieldCount]string{
+				"Production database",
+				"operator@example.com",
+				"Password-Sentinel",
+				"https://db.example.com",
+				"Primary credentials",
+			},
+			revision: 1,
+		},
+	}
+	updated, _ := initial.Update(tea.KeyMsg{
+		Type:  tea.KeyRunes,
+		Runes: []rune("owner=platform"),
+	})
+	if requests.Load() != 0 {
+		t.Fatal("typing Login fields triggered Pwned check")
+	}
+	updated, command := updated.(model).Update(
+		tea.KeyMsg{Type: tea.KeyEnter},
+	)
+	if command == nil {
+		t.Fatal("saving Login returned no command")
+	}
+	updated, _ = updated.(model).Update(command())
+	if requests.Load() != 0 {
+		t.Fatal("saving Login triggered Pwned check")
+	}
+	if len(store.saved) != 1 {
+		t.Fatalf("saved Logins: want 1, got %d", len(store.saved))
+	}
+}
+
 func TestLoginAcceptsTOTPURIWithoutExposingSecret(t *testing.T) {
 	record := itemRecord{
 		Login: client.LoginItem{
