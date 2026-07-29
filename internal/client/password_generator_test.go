@@ -1,6 +1,7 @@
 package client
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -54,6 +55,65 @@ func TestPasswordGeneratorRejectsLengthOutsideSupportedRange(t *testing.T) {
 		if _, err := GeneratePassword(config); err == nil {
 			t.Fatalf("length %d unexpectedly generated", length)
 		}
+	}
+}
+
+func TestPasswordGeneratorRejectsImpossibleComposition(t *testing.T) {
+	tests := []struct {
+		name   string
+		config PasswordGeneratorConfig
+	}{
+		{
+			name:   "no character set",
+			config: PasswordGeneratorConfig{Length: 20},
+		},
+		{
+			name: "digit minimum without digits",
+			config: PasswordGeneratorConfig{
+				Length:        20,
+				Lowercase:     true,
+				MinimumDigits: 1,
+			},
+		},
+		{
+			name: "special minimum without special characters",
+			config: PasswordGeneratorConfig{
+				Length:         20,
+				Lowercase:      true,
+				MinimumSpecial: 1,
+			},
+		},
+		{
+			name: "minimums exceed length",
+			config: PasswordGeneratorConfig{
+				Length:         5,
+				Digits:         true,
+				Special:        true,
+				MinimumDigits:  3,
+				MinimumSpecial: 3,
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := ValidatePasswordGeneratorConfig(test.config)
+			if !errors.Is(err, ErrInvalidPasswordGeneratorConfig) {
+				t.Fatalf(
+					"want ErrInvalidPasswordGeneratorConfig, got %v",
+					err,
+				)
+			}
+			if _, err := GeneratePassword(test.config); !errors.Is(
+				err,
+				ErrInvalidPasswordGeneratorConfig,
+			) {
+				t.Fatalf(
+					"generation error: want invalid config, got %v",
+					err,
+				)
+			}
+		})
 	}
 }
 
