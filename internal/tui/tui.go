@@ -443,6 +443,44 @@ func nativeItemsForImport(records []itemRecord) []client.NativeItem {
 	return items
 }
 
+func recordsForBitwardenImport(
+	items []client.NativeItem,
+) ([]itemRecord, error) {
+	records := make([]itemRecord, 0, len(items))
+	for _, item := range items {
+		record := itemRecord{Revision: 1}
+		switch item.Type {
+		case client.NativeItemTypeLogin:
+			if item.Login == nil {
+				return nil, client.ErrInvalidItemEnvelope
+			}
+			record.Login = *item.Login
+		case client.NativeItemTypeSecureNote:
+			if item.SecureNote == nil {
+				return nil, client.ErrInvalidItemEnvelope
+			}
+			note := *item.SecureNote
+			record.SecureNote = &note
+		case client.NativeItemTypeFolder:
+			if item.Folder == nil {
+				return nil, client.ErrInvalidItemEnvelope
+			}
+			folder := *item.Folder
+			record.Folder = &folder
+		case client.NativeItemTypeGeneric:
+			if item.Generic == nil {
+				return nil, client.ErrInvalidItemEnvelope
+			}
+			generic := *item.Generic
+			record.Generic = &generic
+		default:
+			return nil, client.ErrInvalidItemEnvelope
+		}
+		records = append(records, record)
+	}
+	return records, nil
+}
+
 func saveItem(store itemStore, record itemRecord) tea.Cmd {
 	return saveItems(store, []itemRecord{record})
 }
@@ -1543,7 +1581,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.trashLoading = false
 		m.trashErr = msg
 	case itemSaveErrMsg:
-		m.itemFormErr = msg
+		if m.showBitwardenImport {
+			m.bitwardenImportErr = msg
+		} else {
+			m.itemFormErr = msg
+		}
 		m.itemSaving = false
 	case secretCopiedMsg:
 		m.copiedField = ""
@@ -1578,6 +1620,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.showLoginForm = false
 		m.showNoteForm = false
 		m.showFolderForm = false
+		m.showBitwardenImport = false
+		m.bitwardenImportPath = ""
+		m.bitwardenPreview = nil
+		m.bitwardenImportErr = nil
+		m.bitwardenImportLoading = false
 		m.itemFormErr = nil
 		m.folderActionErr = nil
 		m.folderDeleteConfirm = false
@@ -1896,8 +1943,29 @@ func (m model) updateBitwardenImport(
 		m.bitwardenImportLoading = false
 		return m, nil
 	}
-	if m.bitwardenImportLoading || m.bitwardenPreview != nil {
+	if m.itemSaving || m.bitwardenImportLoading {
 		return m, nil
+	}
+	if m.bitwardenPreview != nil {
+		if msg.String() != "y" {
+			return m, nil
+		}
+		if len(m.bitwardenPreview.Errors) != 0 {
+			m.bitwardenImportErr = errors.New(
+				"resolve preview errors before import",
+			)
+			return m, nil
+		}
+		records, err := recordsForBitwardenImport(
+			m.bitwardenPreview.Items,
+		)
+		if err != nil {
+			m.bitwardenImportErr = err
+			return m, nil
+		}
+		m.itemSaving = true
+		m.bitwardenImportErr = nil
+		return m, saveItems(m.itemStore, records)
 	}
 	switch msg.String() {
 	case "ctrl+u":
@@ -1941,6 +2009,8 @@ func (m model) bitwardenImportView() string {
 			"delete the original file after import.\n\n",
 	)
 	switch {
+	case m.itemSaving:
+		b.WriteString("Importing into encrypted cache…\n")
 	case m.bitwardenImportLoading:
 		b.WriteString("Reading and validating locally…\n")
 	case m.bitwardenPreview != nil:
@@ -1974,6 +2044,9 @@ func (m model) bitwardenImportView() string {
 				issue.Message,
 			)
 		}
+		if m.bitwardenImportErr != nil {
+			fmt.Fprintf(&b, "\nError: %s\n", m.bitwardenImportErr)
+		}
 	default:
 		fmt.Fprintf(
 			&b,
@@ -1984,7 +2057,12 @@ func (m model) bitwardenImportView() string {
 			fmt.Fprintf(&b, "\nError: %s\n", m.bitwardenImportErr)
 		}
 	}
-	b.WriteString("\n[esc] cancel  [ctrl+c] quit\n")
+	if m.bitwardenPreview != nil &&
+		len(m.bitwardenPreview.Errors) == 0 &&
+		!m.itemSaving {
+		b.WriteString("\n[y] confirm import  ")
+	}
+	b.WriteString("[esc] cancel  [ctrl+c] quit\n")
 	return b.String()
 }
 
