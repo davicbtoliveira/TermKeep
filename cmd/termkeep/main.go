@@ -111,12 +111,14 @@ func run(args []string) int {
 		return runTOTP(cfg, commandArgs[1:])
 	case "generate-password":
 		return runGeneratePassword(commandArgs[1:])
+	case "import":
+		return runImport(cfg, commandArgs[1:])
 	case "__session-agent":
 		return runSessionAgent(commandArgs[1:])
 	case "":
 		return runTUI(cfg)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n\nusage: termkeep [--server URL] [--ca-cert FILE] [--pwned-passwords-url URL|off] [status|bootstrap|register|login|logout|sync|secret|totp|generate-password]\n", command)
+		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n\nusage: termkeep [--server URL] [--ca-cert FILE] [--pwned-passwords-url URL|off] [status|bootstrap|register|login|logout|sync|secret|totp|generate-password|import]\n", command)
 		return exitUsageFailure
 	}
 }
@@ -504,6 +506,40 @@ func parseBitwardenImportRequest(
 	}, nil
 }
 
+func runImport(cfg client.Config, args []string) int {
+	request, err := parseBitwardenImportRequest(args)
+	if err != nil {
+		fmt.Fprintln(
+			os.Stderr,
+			"usage: termkeep import bitwarden "+
+				"--file FILE [--confirm]",
+		)
+		return exitUsageFailure
+	}
+	scope, err := session.CurrentScope(os.Stdin)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error: read terminal session failed")
+		return 1
+	}
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		30*time.Second,
+	)
+	defer cancel()
+	if err := runBitwardenImportAt(
+		ctx,
+		cfg,
+		scope.SocketPath,
+		request,
+		os.Stdout,
+		os.Stderr,
+	); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	return 0
+}
+
 func runBitwardenImportAt(
 	ctx context.Context,
 	cfg client.Config,
@@ -557,6 +593,22 @@ func runBitwardenImportAt(
 		return err
 	}
 	fmt.Fprintf(stdout, "Imported locally: %d\n", len(preview.Items))
+	token, tokenErr := session.AccessToken(ctx, socketPath)
+	if tokenErr == nil && len(token) > 0 {
+		defer clearPassword(token)
+		if err := client.SyncCache(
+			ctx,
+			cfg,
+			string(token),
+			cache,
+		); err != nil {
+			fmt.Fprintln(
+				stderr,
+				"Warning: synchronization failed; "+
+					"import remains queued locally.",
+			)
+		}
+	}
 	return nil
 }
 
