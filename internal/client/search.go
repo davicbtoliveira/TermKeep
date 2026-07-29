@@ -20,31 +20,65 @@ type SearchIndex struct {
 type searchEntry struct {
 	itemID string
 	title  string
+	fields []searchField
 }
 
-func NewSearchIndex(items []NativeItem, _ []FolderItem) SearchIndex {
+type searchField struct {
+	value  string
+	weight int
+}
+
+func NewSearchIndex(items []NativeItem, folders []FolderItem) SearchIndex {
 	index := SearchIndex{
 		entries: make([]searchEntry, 0, len(items)),
+	}
+	folderNames := make(map[string]string, len(folders))
+	for _, folder := range folders {
+		folderNames[folder.ItemID] = folder.Name
 	}
 	for _, item := range items {
 		switch item.Type {
 		case NativeItemTypeLogin:
 			if item.Login != nil {
-				index.entries = append(index.entries, searchEntry{
+				entry := searchEntry{
 					itemID: item.Login.ItemID,
 					title:  item.Login.Name,
-				})
+				}
+				entry.addField(item.Login.Name, 5000)
+				entry.addField(item.Login.Username, 4000)
+				for _, itemURL := range item.Login.URLs {
+					entry.addField(itemURL, 3000)
+				}
+				entry.addField(folderNames[item.Login.FolderID], 2000)
+				for _, field := range item.Login.CustomFields {
+					entry.addField(field.Name, 1000)
+				}
+				index.entries = append(index.entries, entry)
 			}
 		case NativeItemTypeSecureNote:
 			if item.SecureNote != nil {
-				index.entries = append(index.entries, searchEntry{
+				entry := searchEntry{
 					itemID: item.SecureNote.ItemID,
 					title:  item.SecureNote.Title,
-				})
+				}
+				entry.addField(item.SecureNote.Title, 5000)
+				entry.addField(
+					folderNames[item.SecureNote.FolderID], 2000)
+				index.entries = append(index.entries, entry)
 			}
 		}
 	}
 	return index
+}
+
+func (entry *searchEntry) addField(value string, weight int) {
+	if value == "" {
+		return
+	}
+	entry.fields = append(entry.fields, searchField{
+		value:  value,
+		weight: weight,
+	})
 }
 
 func (index SearchIndex) Search(
@@ -62,7 +96,18 @@ func (index SearchIndex) Search(
 	}
 	scored := make([]scoredResult, 0)
 	for _, entry := range index.entries {
-		score, matched := fuzzyScore(query, entry.title)
+		var (
+			score   int
+			matched bool
+		)
+		for _, field := range entry.fields {
+			fieldScore, fieldMatched := fuzzyScore(query, field.value)
+			if fieldMatched &&
+				(!matched || fieldScore+field.weight > score) {
+				score = fieldScore + field.weight
+				matched = true
+			}
+		}
 		if !matched {
 			continue
 		}
