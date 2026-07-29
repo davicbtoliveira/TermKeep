@@ -70,6 +70,14 @@ func TestEncryptedLoginRoundTripHidesSemanticFields(t *testing.T) {
 			{Name: "region", Value: "us-east-1"},
 			{Name: "owner", Value: "platform"},
 		},
+		TOTP: &TOTPConfig{
+			Secret:    "JBSWY3DPEHPK3PXP",
+			Issuer:    "Example Co",
+			Account:   "operator@example.com",
+			Algorithm: TOTPAlgorithmSHA256,
+			Digits:    8,
+			Period:    45,
+		},
 	}
 
 	encrypted, err := EncryptLogin(
@@ -90,6 +98,9 @@ func TestEncryptedLoginRoundTripHidesSemanticFields(t *testing.T) {
 		login.URLs[0],
 		login.Notes,
 		login.CustomFields[0].Value,
+		login.TOTP.Secret,
+		login.TOTP.Issuer,
+		login.TOTP.Account,
 	} {
 		if bytes.Contains(encrypted.Envelope, []byte(plaintext)) {
 			t.Fatalf("encrypted envelope contains %q", plaintext)
@@ -436,6 +447,14 @@ func TestEncryptedLoginTransportContainsNoPlaintext(t *testing.T) {
 		CustomFields: []CustomField{
 			{Name: "region-sentinel", Value: "value-sentinel"},
 		},
+		TOTP: &TOTPConfig{
+			Secret:    "JBSWY3DPEHPK3PXP",
+			Issuer:    "TOTP-Issuer-Sentinel",
+			Account:   "totp-account-sentinel@example.com",
+			Algorithm: TOTPAlgorithmSHA512,
+			Digits:    8,
+			Period:    60,
+		},
 	}
 	item, err := EncryptLogin(
 		bytes.Repeat([]byte{0x42}, 32),
@@ -473,6 +492,9 @@ func TestEncryptedLoginTransportContainsNoPlaintext(t *testing.T) {
 		login.Notes,
 		login.CustomFields[0].Name,
 		login.CustomFields[0].Value,
+		login.TOTP.Secret,
+		login.TOTP.Issuer,
+		login.TOTP.Account,
 	} {
 		if bytes.Contains(requestBody, []byte(plaintext)) {
 			t.Fatalf("item request contains %q", plaintext)

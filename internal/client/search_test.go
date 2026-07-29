@@ -117,6 +117,14 @@ func TestSearchIndexRequiresExplicitModeForNoteContents(t *testing.T) {
 					Name:  "Recovery contact",
 					Value: "custom-value-sentinel",
 				}},
+				TOTP: &TOTPConfig{
+					Secret:    "totp-secret-sentinel",
+					Issuer:    "totp-issuer-sentinel",
+					Account:   "totp-account-sentinel",
+					Algorithm: TOTPAlgorithmSHA1,
+					Digits:    6,
+					Period:    30,
+				},
 			},
 		},
 		{
@@ -135,6 +143,9 @@ func TestSearchIndexRequiresExplicitModeForNoteContents(t *testing.T) {
 		"current-password",
 		"historic-password",
 		"custom-value",
+		"totp-secret",
+		"totp-issuer",
+		"totp-account",
 	} {
 		if results := index.Search(query, SearchModeMetadata); len(results) != 0 {
 			t.Fatalf("metadata search exposed %q: %+v", query, results)
