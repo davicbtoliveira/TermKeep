@@ -299,6 +299,56 @@ func TestUnlockedVaultListsAndOpensSecureNotes(t *testing.T) {
 	}
 }
 
+func TestVaultMetadataSearchFiltersItemsAndMarksFavorite(t *testing.T) {
+	initial := model{
+		loaded:    true,
+		vaultOpen: true,
+		itemStore: &fakeItemStore{},
+	}
+	updated, _ := initial.Update(itemsMsg{
+		{
+			Login: client.LoginItem{
+				ItemID:   "11111111-1111-4111-8111-111111111111",
+				Name:     "Production database",
+				Username: "operator@example.com",
+				Password: "Password-Sentinel",
+				Favorite: true,
+			},
+			Revision: 1,
+		},
+		{
+			Login: client.LoginItem{
+				ItemID:   "22222222-2222-4222-8222-222222222222",
+				Name:     "Personal email",
+				Username: "owner@example.net",
+			},
+			Revision: 1,
+		},
+	})
+	updated, _ = updated.(model).Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	updated, _ = updated.(model).Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("operat")})
+	view := updated.(model).View()
+
+	for _, want := range []string{
+		"Search:   metadata — operat",
+		"> ★ [Login] Production database — operator@example.com",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("search view missing %q:\n%s", want, view)
+		}
+	}
+	for _, forbidden := range []string{
+		"Personal email",
+		"Password-Sentinel",
+	} {
+		if strings.Contains(view, forbidden) {
+			t.Fatalf("search view exposed %q:\n%s", forbidden, view)
+		}
+	}
+}
+
 func TestOfflineVaultAdvertisesLoginEditing(t *testing.T) {
 	view := model{
 		loaded:    true,
