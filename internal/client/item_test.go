@@ -192,6 +192,70 @@ func TestEncryptedFolderRoundTripHidesName(t *testing.T) {
 	}
 }
 
+func TestEncryptedGenericItemRoundTripHidesImportedFields(t *testing.T) {
+	vaultKey := bytes.Repeat([]byte{0x42}, 32)
+	generic := GenericItem{
+		ItemID:     "11111111-1111-4111-8111-111111111111",
+		Title:      "Corporate card",
+		Source:     "bitwarden",
+		SourceType: "card",
+		FolderID:   "22222222-2222-4222-8222-222222222222",
+		Favorite:   true,
+		Data: json.RawMessage(`{
+			"type": 3,
+			"name": "Corporate card",
+			"card": {
+				"number": "4111111111111111",
+				"code": "Security-Code-Sentinel"
+			}
+		}`),
+	}
+
+	encrypted, err := EncryptGenericItem(
+		vaultKey,
+		"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		generic,
+		1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, plaintext := range []string{
+		generic.Title,
+		generic.Source,
+		generic.SourceType,
+		"4111111111111111",
+		"Security-Code-Sentinel",
+	} {
+		if bytes.Contains(encrypted.Envelope, []byte(plaintext)) {
+			t.Fatalf("encrypted envelope contains %q", plaintext)
+		}
+	}
+
+	decrypted, err := DecryptGenericItem(
+		vaultKey,
+		"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		encrypted,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(decrypted, generic) {
+		t.Fatalf("round trip differs:\nwant: %+v\ngot:  %+v",
+			generic, decrypted)
+	}
+	opened, err := DecryptNativeItem(
+		vaultKey,
+		"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		encrypted,
+	)
+	if err != nil ||
+		opened.Type != NativeItemTypeGeneric ||
+		!reflect.DeepEqual(opened.Generic, &generic) {
+		t.Fatalf("native Generic Item: %+v, %v", opened, err)
+	}
+}
+
 func TestEncryptedItemTypeCannotBeOpenedAsAnotherNativeType(t *testing.T) {
 	vaultKey := bytes.Repeat([]byte{0x42}, 32)
 	accountID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
