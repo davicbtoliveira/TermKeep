@@ -96,3 +96,68 @@ func TestSearchIndexFindsItemsByNonSecretMetadata(t *testing.T) {
 		})
 	}
 }
+
+func TestSearchIndexRequiresExplicitModeForNoteContents(t *testing.T) {
+	loginID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	noteID := "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	index := NewSearchIndex([]NativeItem{
+		{
+			Type: NativeItemTypeLogin,
+			Login: &LoginItem{
+				ItemID:   loginID,
+				Name:     "Database",
+				Password: "current-password-sentinel",
+				PasswordHistory: []PasswordHistoryEntry{{
+					Password: "historic-password-sentinel",
+				}},
+				Notes: "maintenance-window-sentinel",
+				CustomFields: []CustomField{{
+					Name:  "Recovery contact",
+					Value: "custom-value-sentinel",
+				}},
+			},
+		},
+		{
+			Type: NativeItemTypeSecureNote,
+			SecureNote: &SecureNoteItem{
+				ItemID:  noteID,
+				Title:   "Runbook",
+				Content: "recovery-coordinates-sentinel",
+			},
+		},
+	}, nil)
+
+	for _, query := range []string{
+		"maintenance-window",
+		"recovery-coordinates",
+		"current-password",
+		"historic-password",
+		"custom-value",
+	} {
+		if results := index.Search(query, SearchModeMetadata); len(results) != 0 {
+			t.Fatalf("metadata search exposed %q: %+v", query, results)
+		}
+	}
+
+	for query, wantItemID := range map[string]string{
+		"maintenance-window":   loginID,
+		"recovery-coordinates": noteID,
+	} {
+		results := index.Search(query, SearchModeNoteContents)
+		if len(results) != 1 || results[0].ItemID != wantItemID {
+			t.Fatalf("Note-content results for %q: %+v", query, results)
+		}
+	}
+	for _, query := range []string{
+		"current-password",
+		"historic-password",
+		"custom-value",
+	} {
+		if results := index.Search(
+			query,
+			SearchModeNoteContents,
+		); len(results) != 0 {
+			t.Fatalf("Note-content search exposed %q: %+v", query, results)
+		}
+	}
+}
