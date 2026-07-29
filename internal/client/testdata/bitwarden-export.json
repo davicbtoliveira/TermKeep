@@ -1,0 +1,61 @@
+{
+  "encrypted": false,
+  "folders": [
+    {
+      "id": "942e2984-1b9a-453b-b039-b107012713b9",
+      "name": "Infrastructure"
+    }
+  ],
+  "items": [
+    {
+      "id": "25c8c414-b446-48e9-a1bd-b10700bbd740",
+      "folderId": "942e2984-1b9a-453b-b039-b107012713b9",
+      "type": 1,
+      "name": "Production database",
+      "notes": "Primary credentials",
+      "favorite": true,
+      "fields": [
+        {
+          "name": "region",
+          "value": "us-east-1",
+          "type": 0
+        }
+      ],
+      "login": {
+        "uris": [
+          {
+            "uri": "https://db.example.com"
+          }
+        ],
+        "username": "operator@example.com",
+        "password": "Password-Sentinel",
+        "totp": "otpauth://totp/Example:operator@example.com?secret=JBSWY3DPEHPK3PXP&issuer=Example"
+      }
+    },
+    {
+      "id": "23f0f877-42b1-4820-a850-b10700bc41eb",
+      "folderId": "942e2984-1b9a-453b-b039-b107012713b9",
+      "type": 2,
+      "name": "Recovery procedure",
+      "notes": "Sensitive recovery steps",
+      "favorite": false,
+      "secureNote": {
+        "type": 0
+      }
+    },
+    {
+      "id": "3ed8de45-48ee-4e26-a2dc-b10701276c53",
+      "type": 3,
+      "name": "Corporate card",
+      "notes": "Travel only",
+      "favorite": true,
+      "card": {
+        "cardholderName": "Operator",
+        "number": "4111111111111111",
+        "code": "Security-Code-Sentinel",
+        "expMonth": "12",
+        "expYear": "2030"
+      }
+    }
+  ]
+}

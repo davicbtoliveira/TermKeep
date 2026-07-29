@@ -1,9 +1,11 @@
 package client
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -457,4 +459,64 @@ func (reader repeatedByteReader) Read(buffer []byte) (int, error) {
 		buffer[index] = reader.value
 	}
 	return len(buffer), nil
+}
+
+func TestPreviewBitwardenImportFixture(t *testing.T) {
+	file, err := os.Open("testdata/bitwarden-export.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	preview, err := PreviewBitwardenImport(file, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Counts != (BitwardenImportCounts{
+		Logins:      1,
+		SecureNotes: 1,
+		Folders:     1,
+		Generic:     1,
+	}) || len(preview.Items) != 4 || len(preview.Errors) != 0 {
+		t.Fatalf("fixture preview: %+v", preview)
+	}
+}
+
+func FuzzPreviewBitwardenImport(f *testing.F) {
+	fixture, err := os.ReadFile("testdata/bitwarden-export.json")
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(fixture)
+	f.Add([]byte(`{"encrypted":false,"folders":[],"items":[]}`))
+	f.Add([]byte(`{"encrypted":true,"items":[]}`))
+	f.Add([]byte(`{"encrypted":false,"items":[{"type":99,"name":"x"}]}`))
+	f.Add([]byte(`{"encrypted":false`))
+
+	f.Fuzz(func(t *testing.T, input []byte) {
+		preview, err := PreviewBitwardenImport(
+			bytes.NewReader(input),
+			nil,
+		)
+		if err != nil {
+			return
+		}
+		for _, item := range preview.Items {
+			valid := 0
+			if item.Login != nil {
+				valid++
+			}
+			if item.SecureNote != nil {
+				valid++
+			}
+			if item.Folder != nil {
+				valid++
+			}
+			if item.Generic != nil {
+				valid++
+			}
+			if valid != 1 {
+				t.Fatalf("invalid normalized Item: %+v", item)
+			}
+		}
+	})
 }
