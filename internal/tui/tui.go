@@ -524,6 +524,12 @@ func (s cachedItemStore) openItemGroups(
 				}
 				folder := *opened.Folder
 				record.Folder = &folder
+			case client.NativeItemTypeGeneric:
+				if opened.Generic == nil {
+					return nil, client.ErrInvalidItemEnvelope
+				}
+				generic := *opened.Generic
+				record.Generic = &generic
 			default:
 				return nil, client.ErrInvalidItemEnvelope
 			}
@@ -555,6 +561,9 @@ func (s cachedItemStore) Save(ctx context.Context, record itemRecord) error {
 	} else if record.SecureNote != nil {
 		item, err = session.SealSecureNote(
 			ctx, s.socketPath, *record.SecureNote, record.Revision)
+	} else if record.Generic != nil {
+		item, err = session.SealGenericItem(
+			ctx, s.socketPath, *record.Generic, record.Revision)
 	} else {
 		item, err = session.SealLogin(
 			ctx, s.socketPath, record.Login, record.Revision)
