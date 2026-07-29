@@ -1218,6 +1218,14 @@ func TestEditSecureNotePreservesItemAndIncrementsRevision(t *testing.T) {
 }
 
 func TestEditLoginPreservesFieldsAndIncrementsRevision(t *testing.T) {
+	wantTOTP := &client.TOTPConfig{
+		Secret:    "JBSWY3DPEHPK3PXP",
+		Issuer:    "Example Co",
+		Account:   "operator@example.com",
+		Algorithm: client.TOTPAlgorithmSHA256,
+		Digits:    8,
+		Period:    45,
+	}
 	store := &fakeItemStore{records: []itemRecord{{
 		Login: client.LoginItem{
 			ItemID:   "11111111-1111-4111-8111-111111111111",
@@ -1231,6 +1239,7 @@ func TestEditLoginPreservesFieldsAndIncrementsRevision(t *testing.T) {
 			CustomFields: []client.CustomField{
 				{Name: "region", Value: "us-east-1"},
 			},
+			TOTP: wantTOTP,
 		},
 		Revision: 1,
 	}}}
@@ -1275,7 +1284,11 @@ func TestEditLoginPreservesFieldsAndIncrementsRevision(t *testing.T) {
 		got.Login.Notes != "Primary credentials" ||
 		!reflect.DeepEqual(got.Login.CustomFields, []client.CustomField{
 			{Name: "region", Value: "us-east-1"},
-		}) {
+		}) ||
+		!reflect.DeepEqual(
+			got.Login.TOTP,
+			wantTOTP,
+		) {
 		t.Fatalf("edited Login lost fields: %+v", got.Login)
 	}
 }
