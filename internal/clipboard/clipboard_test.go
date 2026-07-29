@@ -2,6 +2,7 @@ package clipboard_test
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -60,6 +61,17 @@ func TestCopyPreservesClipboardReplacedBeforeDelay(t *testing.T) {
 	if value, clears := board.snapshot(); value != "user replacement" ||
 		clears != 0 {
 		t.Fatalf("replacement after cleanup: value %q, clears %d", value, clears)
+	}
+}
+
+func TestOpenReportsUnavailableWithoutClipboardCommands(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv("WAYLAND_DISPLAY", "")
+	t.Setenv("DISPLAY", "")
+
+	_, err := clipboard.Open()
+	if !errors.Is(err, clipboard.ErrUnavailable) {
+		t.Fatalf("Open error: got %v, want ErrUnavailable", err)
 	}
 }
 
