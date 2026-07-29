@@ -42,6 +42,21 @@ func TestGeneratePasswordSatisfiesSelectedConstraints(t *testing.T) {
 	}
 }
 
+func TestPasswordGeneratorRejectsLengthOutsideSupportedRange(t *testing.T) {
+	for _, length := range []int{4, 129} {
+		config := PasswordGeneratorConfig{
+			Length:    length,
+			Lowercase: true,
+		}
+		if err := ValidatePasswordGeneratorConfig(config); err == nil {
+			t.Fatalf("length %d unexpectedly validated", length)
+		}
+		if _, err := GeneratePassword(config); err == nil {
+			t.Fatalf("length %d unexpectedly generated", length)
+		}
+	}
+}
+
 func countPasswordCharacters(value string, characters string) int {
 	var count int
 	for _, character := range value {
