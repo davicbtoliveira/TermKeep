@@ -1,9 +1,12 @@
 package client
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
+	"sort"
 	"strings"
 )
 
@@ -71,7 +74,7 @@ type bitwardenField struct {
 
 func PreviewBitwardenImport(
 	reader io.Reader,
-	_ []NativeItem,
+	existing []NativeItem,
 ) (BitwardenImportPreview, error) {
 	var source bitwardenExport
 	if err := json.NewDecoder(reader).Decode(&source); err != nil {
@@ -84,6 +87,12 @@ func PreviewBitwardenImport(
 	}
 
 	preview := BitwardenImportPreview{}
+	duplicateCounts := make(map[[sha256.Size]byte]int)
+	for _, item := range existing {
+		if key, ok := bitwardenSemanticKey(item); ok {
+			duplicateCounts[key]++
+		}
+	}
 	folderIDs := make(map[string]string, len(source.Folders))
 	for _, folder := range source.Folders {
 		itemID, err := NewItemID()
@@ -152,10 +161,12 @@ func PreviewBitwardenImport(
 				FolderID: folderID,
 				Favorite: item.Favorite,
 			}
-			preview.Items = append(preview.Items, NativeItem{
+			normalizedItem := NativeItem{
 				Type:       NativeItemTypeSecureNote,
 				SecureNote: &note,
-			})
+			}
+			nameBitwardenDuplicate(&normalizedItem, duplicateCounts)
+			preview.Items = append(preview.Items, normalizedItem)
 			preview.Counts.SecureNotes++
 			continue
 		}
@@ -169,10 +180,12 @@ func PreviewBitwardenImport(
 				Favorite:   item.Favorite,
 				Data:       append([]byte(nil), rawItem...),
 			}
-			preview.Items = append(preview.Items, NativeItem{
+			normalizedItem := NativeItem{
 				Type:    NativeItemTypeGeneric,
 				Generic: &generic,
-			})
+			}
+			nameBitwardenDuplicate(&normalizedItem, duplicateCounts)
+			preview.Items = append(preview.Items, normalizedItem)
 			preview.Counts.Generic++
 			continue
 		}
@@ -226,10 +239,12 @@ func PreviewBitwardenImport(
 			CustomFields: customFields,
 			TOTP:         totp,
 		}
-		preview.Items = append(preview.Items, NativeItem{
+		normalizedItem := NativeItem{
 			Type:  NativeItemTypeLogin,
 			Login: &login,
-		})
+		}
+		nameBitwardenDuplicate(&normalizedItem, duplicateCounts)
+		preview.Items = append(preview.Items, normalizedItem)
 		preview.Counts.Logins++
 	}
 	return preview, nil
@@ -290,4 +305,155 @@ func bitwardenUnmappedLoginFields(
 		add("login.fido2Credentials")
 	}
 	return issues
+}
+
+func nameBitwardenDuplicate(
+	item *NativeItem,
+	counts map[[sha256.Size]byte]int,
+) {
+	key, ok := bitwardenSemanticKey(*item)
+	if !ok {
+		return
+	}
+	duplicateNumber := counts[key]
+	if duplicateNumber > 0 {
+		suffix := " (Duplicada)"
+		if duplicateNumber > 1 {
+			suffix += fmt.Sprintf(" - %d", duplicateNumber)
+		}
+		switch item.Type {
+		case NativeItemTypeLogin:
+			item.Login.Name += suffix
+		case NativeItemTypeSecureNote:
+			item.SecureNote.Title += suffix
+		case NativeItemTypeGeneric:
+			item.Generic.Title += suffix
+		}
+	}
+	counts[key]++
+}
+
+func bitwardenSemanticKey(
+	item NativeItem,
+) ([sha256.Size]byte, bool) {
+	var semantic any
+	switch item.Type {
+	case NativeItemTypeLogin:
+		if item.Login == nil {
+			return [sha256.Size]byte{}, false
+		}
+		urls := make([]string, 0, len(item.Login.URLs))
+		for _, value := range item.Login.URLs {
+			urls = append(urls, normalizeBitwardenURL(value))
+		}
+		sort.Strings(urls)
+		fields := append([]CustomField(nil), item.Login.CustomFields...)
+		for index := range fields {
+			fields[index].Name = strings.ToLower(
+				strings.TrimSpace(fields[index].Name),
+			)
+			fields[index].Value = normalizeBitwardenText(
+				fields[index].Value,
+			)
+		}
+		sort.Slice(fields, func(left, right int) bool {
+			if fields[left].Name == fields[right].Name {
+				return fields[left].Value < fields[right].Value
+			}
+			return fields[left].Name < fields[right].Name
+		})
+		var totp *TOTPConfig
+		if item.Login.TOTP != nil {
+			normalized := *item.Login.TOTP
+			normalized.Secret = strings.ToUpper(strings.Join(
+				strings.Fields(normalized.Secret),
+				"",
+			))
+			normalized.Issuer = strings.TrimSpace(normalized.Issuer)
+			normalized.Account = strings.TrimSpace(normalized.Account)
+			totp = &normalized
+		}
+		semantic = struct {
+			Type         NativeItemType
+			Username     string
+			Password     string
+			URLs         []string
+			Notes        string
+			CustomFields []CustomField
+			TOTP         *TOTPConfig
+		}{
+			Type: NativeItemTypeLogin,
+			Username: strings.ToLower(strings.TrimSpace(
+				item.Login.Username,
+			)),
+			Password:     item.Login.Password,
+			URLs:         urls,
+			Notes:        normalizeBitwardenText(item.Login.Notes),
+			CustomFields: fields,
+			TOTP:         totp,
+		}
+	case NativeItemTypeSecureNote:
+		if item.SecureNote == nil {
+			return [sha256.Size]byte{}, false
+		}
+		semantic = struct {
+			Type    NativeItemType
+			Content string
+		}{
+			Type: NativeItemTypeSecureNote,
+			Content: normalizeBitwardenText(
+				item.SecureNote.Content,
+			),
+		}
+	case NativeItemTypeGeneric:
+		if item.Generic == nil {
+			return [sha256.Size]byte{}, false
+		}
+		var data map[string]any
+		if json.Unmarshal(item.Generic.Data, &data) != nil {
+			return [sha256.Size]byte{}, false
+		}
+		delete(data, "id")
+		delete(data, "name")
+		delete(data, "folderId")
+		delete(data, "favorite")
+		semantic = struct {
+			Type       NativeItemType
+			Source     string
+			SourceType string
+			Data       map[string]any
+		}{
+			Type:       NativeItemTypeGeneric,
+			Source:     item.Generic.Source,
+			SourceType: item.Generic.SourceType,
+			Data:       data,
+		}
+	default:
+		return [sha256.Size]byte{}, false
+	}
+	encoded, err := json.Marshal(semantic)
+	if err != nil {
+		return [sha256.Size]byte{}, false
+	}
+	defer clearBytes(encoded)
+	return sha256.Sum256(encoded), true
+}
+
+func normalizeBitwardenURL(value string) string {
+	value = strings.TrimSpace(value)
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return value
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	parsed.Host = strings.ToLower(parsed.Host)
+	if parsed.Path == "/" {
+		parsed.Path = ""
+	}
+	return parsed.String()
+}
+
+func normalizeBitwardenText(value string) string {
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	return strings.TrimSpace(value)
 }
