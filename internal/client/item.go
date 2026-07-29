@@ -44,6 +44,7 @@ type LoginItem struct {
 	URLs            []string               `json:"urls"`
 	Notes           string                 `json:"notes"`
 	CustomFields    []CustomField          `json:"custom_fields"`
+	TOTP            *TOTPConfig            `json:"totp,omitempty"`
 }
 
 type SecureNoteItem struct {
@@ -156,6 +157,11 @@ func EncryptLogin(
 	if len(vaultKey) != chacha20poly1305.KeySize ||
 		accountID == "" || login.ItemID == "" || revision == 0 {
 		return EncryptedItem{}, ErrInvalidItemEnvelope
+	}
+	if login.TOTP != nil {
+		if err := ValidateTOTPConfig(*login.TOTP); err != nil {
+			return EncryptedItem{}, err
+		}
 	}
 	return encryptItem(
 		vaultKey,
