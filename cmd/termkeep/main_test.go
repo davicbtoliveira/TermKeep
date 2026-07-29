@@ -18,6 +18,45 @@ import (
 	"github.com/davicbtoliveira/TermKeep/internal/session"
 )
 
+func TestGlobalConfiguresPwnedPasswordsEndpoint(t *testing.T) {
+	t.Setenv(
+		"TERMKEEP_PWNED_PASSWORDS_URL",
+		"https://pwned.internal/range",
+	)
+	cfg, args, err := parseGlobalConfig([]string{"status"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PwnedPasswordsURL != "https://pwned.internal/range" ||
+		len(args) != 1 ||
+		args[0] != "status" {
+		t.Fatalf("environment config: cfg=%+v args=%v", cfg, args)
+	}
+
+	cfg, args, err = parseGlobalConfig([]string{
+		"--pwned-passwords-url",
+		"off",
+		"status",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PwnedPasswordsURL != "off" ||
+		len(args) != 1 ||
+		args[0] != "status" {
+		t.Fatalf("flag config: cfg=%+v args=%v", cfg, args)
+	}
+
+	t.Setenv("TERMKEEP_PWNED_PASSWORDS_URL", "")
+	cfg, _, err = parseGlobalConfig(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PwnedPasswordsURL != client.DefaultPwnedPasswordsURL {
+		t.Fatalf("default endpoint: %q", cfg.PwnedPasswordsURL)
+	}
+}
+
 func TestManualSyncUsesActiveSessionAndCache(t *testing.T) {
 	accountID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 	password := []byte("TermKeep#2026")
