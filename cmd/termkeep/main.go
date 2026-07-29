@@ -28,10 +28,15 @@ const (
 )
 
 var errSecretUsage = errors.New("invalid secret command usage")
+var errTOTPUsage = errors.New("invalid TOTP command usage")
 
 type secretRequest struct {
 	itemID string
 	field  string
+}
+
+type totpRequest struct {
+	itemID string
 }
 
 func main() {
@@ -69,12 +74,14 @@ func run(args []string) int {
 		return runSync(cfg, fs.Args()[1:])
 	case "secret":
 		return runSecret(cfg, fs.Args()[1:])
+	case "totp":
+		return runTOTP(cfg, fs.Args()[1:])
 	case "__session-agent":
 		return runSessionAgent(fs.Args()[1:])
 	case "":
 		return runTUI(cfg)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n\nusage: termkeep [--server URL] [--ca-cert FILE] [status|bootstrap|register|login|logout|sync|secret]\n", fs.Arg(0))
+		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n\nusage: termkeep [--server URL] [--ca-cert FILE] [status|bootstrap|register|login|logout|sync|secret|totp]\n", fs.Arg(0))
 		return exitUsageFailure
 	}
 }
@@ -375,6 +382,47 @@ func runSecret(cfg client.Config, args []string) int {
 	return 0
 }
 
+func parseTOTPRequest(args []string) (totpRequest, error) {
+	fs := flag.NewFlagSet("totp", flag.ContinueOnError)
+	itemID := fs.String("item", "", "Item UUID")
+	stdout := fs.Bool("stdout", false, "write TOTP code to stdout")
+	if err := fs.Parse(args); err != nil ||
+		*itemID == "" || !*stdout || fs.NArg() != 0 {
+		return totpRequest{}, errTOTPUsage
+	}
+	return totpRequest{itemID: *itemID}, nil
+}
+
+func runTOTP(cfg client.Config, args []string) int {
+	request, err := parseTOTPRequest(args)
+	if err != nil {
+		fmt.Fprintln(
+			os.Stderr,
+			"usage: termkeep totp --item UUID --stdout",
+		)
+		return exitUsageFailure
+	}
+	scope, err := session.CurrentScope(os.Stdin)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error: read terminal session failed")
+		return 1
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := outputTOTPAt(
+		ctx,
+		cfg,
+		scope.SocketPath,
+		request,
+		time.Now(),
+		os.Stdout,
+	); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	return 0
+}
+
 func outputSecretAt(
 	ctx context.Context,
 	cfg client.Config,
@@ -382,43 +430,97 @@ func outputSecretAt(
 	request secretRequest,
 	stdout io.Writer,
 ) error {
+	opened, err := openNativeItemAt(
+		ctx,
+		cfg,
+		socketPath,
+		request.itemID,
+	)
+	if err != nil {
+		return err
+	}
+	value, err := requestedSecret(opened, request.field)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(stdout, value); err != nil {
+		return errors.New("write secret output failed")
+	}
+	return nil
+}
+
+func outputTOTPAt(
+	ctx context.Context,
+	cfg client.Config,
+	socketPath string,
+	request totpRequest,
+	at time.Time,
+	stdout io.Writer,
+) error {
+	opened, err := openNativeItemAt(
+		ctx,
+		cfg,
+		socketPath,
+		request.itemID,
+	)
+	if err != nil {
+		return err
+	}
+	if opened.Type != client.NativeItemTypeLogin ||
+		opened.Login == nil ||
+		opened.Login.TOTP == nil {
+		return errors.New("TOTP unavailable for Item")
+	}
+	code, err := client.GenerateTOTP(*opened.Login.TOTP, at)
+	if err != nil {
+		return errors.New("generate TOTP failed")
+	}
+	if _, err := fmt.Fprintln(stdout, code.Value); err != nil {
+		return errors.New("write TOTP output failed")
+	}
+	return nil
+}
+
+func openNativeItemAt(
+	ctx context.Context,
+	cfg client.Config,
+	socketPath string,
+	itemID string,
+) (client.NativeItem, error) {
 	info, err := session.Status(ctx, socketPath)
 	if err != nil {
-		return errors.New("read unlocked session failed")
+		return client.NativeItem{},
+			errors.New("read unlocked session failed")
 	}
 	cache, err := client.OpenCache(cfg, info.Email)
 	if err != nil {
-		return errors.New("open encrypted cache failed")
+		return client.NativeItem{},
+			errors.New("open encrypted cache failed")
 	}
 	groups, err := cache.ItemHeads()
 	if err != nil {
-		return errors.New("read encrypted cache failed")
+		return client.NativeItem{},
+			errors.New("read encrypted cache failed")
 	}
 	for _, group := range groups {
-		if group.ItemID != request.itemID {
+		if group.ItemID != itemID {
 			continue
 		}
 		if len(group.Revisions) != 1 ||
 			group.Revisions[0].Deleted ||
 			group.Revisions[0].Purged {
-			return errors.New(
+			return client.NativeItem{}, errors.New(
 				"resolve Item conflict before reading secret")
 		}
 		opened, err := session.OpenNativeItem(
 			ctx, socketPath, group.Revisions[0])
 		if err != nil {
-			return errors.New("decrypt Item failed")
+			return client.NativeItem{},
+				errors.New("decrypt Item failed")
 		}
-		value, err := requestedSecret(opened, request.field)
-		if err != nil {
-			return err
-		}
-		if _, err := fmt.Fprintln(stdout, value); err != nil {
-			return errors.New("write secret output failed")
-		}
-		return nil
+		return opened, nil
 	}
-	return errors.New("Item not found")
+	return client.NativeItem{}, errors.New("Item not found")
 }
 
 func requestedSecret(
