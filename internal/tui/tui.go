@@ -1445,8 +1445,8 @@ func (m model) View() string {
 		}
 		b.WriteString(
 			"\n[c] new Login  [n] new Secure Note  " +
-				"[/] search  [ctrl+f] Notes search  " +
-				"[enter] open  [f] Favorites  " +
+				"[f] Favorites  [/] search  [ctrl+f] Notes  " +
+				"[enter] open  " +
 				"[o] Folders  [t] Trash  ",
 		)
 		if m.accessToken != "" {
