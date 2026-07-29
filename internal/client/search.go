@@ -5,6 +5,7 @@ import (
 	"strings"
 )
 
+// SearchMode controls whether sensitive Note contents participate in matching.
 type SearchMode uint8
 
 const (
@@ -12,10 +13,24 @@ const (
 	SearchModeNoteContents
 )
 
+const (
+	searchTitleWeight       = 5000
+	searchUsernameWeight    = 4000
+	searchURLWeight         = 3000
+	searchFolderWeight      = 2000
+	searchCustomFieldWeight = 1000
+	substringScore          = 8000
+	subsequenceScore        = 4000
+	startPenalty            = 16
+	gapPenalty              = 32
+)
+
+// SearchResult identifies one matching decrypted Item.
 type SearchResult struct {
 	ItemID string
 }
 
+// SearchIndex holds a Vault's searchable plaintext only in memory.
 type SearchIndex struct {
 	entries []searchEntry
 }
@@ -32,6 +47,7 @@ type searchField struct {
 	weight int
 }
 
+// NewSearchIndex builds a volatile index from decrypted Items and Folders.
 func NewSearchIndex(items []NativeItem, folders []FolderItem) SearchIndex {
 	index := SearchIndex{
 		entries: make([]searchEntry, 0, len(items)),
@@ -41,6 +57,8 @@ func NewSearchIndex(items []NativeItem, folders []FolderItem) SearchIndex {
 		folderNames[folder.ItemID] = folder.Name
 	}
 	for _, item := range items {
+		// Searchable fields stay allowlisted so new secret fields are
+		// excluded by default.
 		switch item.Type {
 		case NativeItemTypeLogin:
 			if item.Login != nil {
@@ -48,14 +66,18 @@ func NewSearchIndex(items []NativeItem, folders []FolderItem) SearchIndex {
 					itemID: item.Login.ItemID,
 					title:  item.Login.Name,
 				}
-				entry.addField(item.Login.Name, 5000)
-				entry.addField(item.Login.Username, 4000)
+				entry.addField(item.Login.Name, searchTitleWeight)
+				entry.addField(item.Login.Username, searchUsernameWeight)
 				for _, itemURL := range item.Login.URLs {
-					entry.addField(itemURL, 3000)
+					entry.addField(itemURL, searchURLWeight)
 				}
-				entry.addField(folderNames[item.Login.FolderID], 2000)
+				entry.addField(
+					folderNames[item.Login.FolderID],
+					searchFolderWeight,
+				)
 				for _, field := range item.Login.CustomFields {
-					entry.addField(field.Name, 1000)
+					entry.addField(
+						field.Name, searchCustomFieldWeight)
 				}
 				entry.noteContent = item.Login.Notes
 				index.entries = append(index.entries, entry)
@@ -66,9 +88,12 @@ func NewSearchIndex(items []NativeItem, folders []FolderItem) SearchIndex {
 					itemID: item.SecureNote.ItemID,
 					title:  item.SecureNote.Title,
 				}
-				entry.addField(item.SecureNote.Title, 5000)
 				entry.addField(
-					folderNames[item.SecureNote.FolderID], 2000)
+					item.SecureNote.Title, searchTitleWeight)
+				entry.addField(
+					folderNames[item.SecureNote.FolderID],
+					searchFolderWeight,
+				)
 				entry.noteContent = item.SecureNote.Content
 				index.entries = append(index.entries, entry)
 			}
@@ -87,6 +112,7 @@ func (entry *searchEntry) addField(value string, weight int) {
 	})
 }
 
+// Search returns matching Item IDs in deterministic relevance order.
 func (index SearchIndex) Search(
 	query string,
 	mode SearchMode,
@@ -154,8 +180,8 @@ func fuzzyScore(query, candidate string) (int, bool) {
 		return 0, false
 	}
 	if start := runeSliceIndex(candidateRunes, queryRunes); start >= 0 {
-		return 8000 -
-			start*16 -
+		return substringScore -
+			start*startPenalty -
 			(len(candidateRunes) - len(queryRunes)), true
 	}
 
@@ -173,9 +199,9 @@ func fuzzyScore(query, candidate string) (int, bool) {
 		queryIndex++
 		if queryIndex == len(queryRunes) {
 			gaps := last - start + 1 - len(queryRunes)
-			return 4000 -
-				start*16 -
-				gaps*32 -
+			return subsequenceScore -
+				start*startPenalty -
+				gaps*gapPenalty -
 				(len(candidateRunes) - len(queryRunes)), true
 		}
 	}

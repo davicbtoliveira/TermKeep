@@ -775,22 +775,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "q", "esc", "ctrl+c":
 			return m, tea.Quit
-		case "/":
+		case "/", "ctrl+f":
 			if m.vaultOpen && !m.showSessions && !m.showActivity &&
 				!m.showItem && !m.showTrash && !m.showFolders &&
 				!m.showFolderConflict {
 				m.searching = true
 				m.searchQuery = ""
 				m.searchMode = client.SearchModeMetadata
-				m.selectedItem = 0
-			}
-		case "ctrl+f":
-			if m.vaultOpen && !m.showSessions && !m.showActivity &&
-				!m.showItem && !m.showTrash && !m.showFolders &&
-				!m.showFolderConflict {
-				m.searching = true
-				m.searchQuery = ""
-				m.searchMode = client.SearchModeNoteContents
+				if msg.String() == "ctrl+f" {
+					m.searchMode = client.SearchModeNoteContents
+				}
 				m.selectedItem = 0
 			}
 		case "s":
@@ -1375,12 +1369,11 @@ func (m model) View() string {
 				if m.searchMode == client.SearchModeNoteContents {
 					searchMode = "Notes"
 				}
-				b.WriteString(
-					"Search:   " +
-						searchMode +
-						" — " +
-						m.searchQuery +
-						"\n",
+				fmt.Fprintf(
+					&b,
+					"Search:   %s — %s\n",
+					searchMode,
+					m.searchQuery,
 				)
 			}
 			if m.favoritesOnly {
