@@ -1094,6 +1094,31 @@ func TestLoginDetailShowsCurrentTOTPWindowWithoutSecret(t *testing.T) {
 	}
 }
 
+func TestOpeningLoginTOTPDetailSchedulesCodeRefresh(t *testing.T) {
+	record := itemRecord{
+		Login: client.LoginItem{
+			ItemID: "11111111-1111-4111-8111-111111111111",
+			Name:   "Production database",
+			TOTP: &client.TOTPConfig{
+				Secret:    "JBSWY3DPEHPK3PXP",
+				Algorithm: client.TOTPAlgorithmSHA1,
+				Digits:    6,
+				Period:    30,
+			},
+		},
+		Revision: 1,
+	}
+	_, command := model{
+		loaded:    true,
+		vaultOpen: true,
+		itemStore: &fakeItemStore{},
+		items:     []itemRecord{record},
+	}.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if command == nil {
+		t.Fatal("opening TOTP detail did not schedule code refresh")
+	}
+}
+
 func TestCreateSecureNoteCapturesTitleAndContent(t *testing.T) {
 	store := &fakeItemStore{}
 	var current tea.Model = model{
