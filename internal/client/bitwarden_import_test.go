@@ -201,3 +201,58 @@ func TestPreviewBitwardenImportPreservesUnsupportedItemAsGeneric(
 		t.Fatalf("Generic Item lost source fields: %+v", preserved)
 	}
 }
+
+func TestPreviewBitwardenImportReportsUnmappedNativeFields(
+	t *testing.T,
+) {
+	export := `{
+		"encrypted": false,
+		"folders": [],
+		"items": [{
+			"type": 1,
+			"name": "Production database",
+			"reprompt": 1,
+			"fields": [{
+				"name": "hidden token",
+				"value": "Token-Sentinel",
+				"type": 1
+			}],
+			"login": {
+				"username": "operator@example.com",
+				"password": "Password-Sentinel",
+				"uris": [{
+					"uri": "https://db.example.com",
+					"match": 2
+				}],
+				"fido2Credentials": [{
+					"credentialId": "Credential-Sentinel"
+				}]
+			}
+		}]
+	}`
+
+	preview, err := PreviewBitwardenImport(
+		strings.NewReader(export),
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(preview.Items) != 1 || len(preview.Errors) != 0 {
+		t.Fatalf("preview did not retain valid Login: %+v", preview)
+	}
+	var fields []string
+	for _, issue := range preview.UnmappedFields {
+		fields = append(fields, issue.Field)
+	}
+	want := []string{
+		"reprompt",
+		"fields[0].type",
+		"login.uris[0].match",
+		"login.fido2Credentials",
+	}
+	if !reflect.DeepEqual(fields, want) {
+		t.Fatalf("unmapped fields:\nwant: %v\ngot:  %v",
+			want, fields)
+	}
+}
