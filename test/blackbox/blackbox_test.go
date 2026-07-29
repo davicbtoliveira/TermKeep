@@ -66,6 +66,7 @@ func TestBlackbox(t *testing.T) {
 	t.Run("status reports unavailability when server is down", s.testStatusUnavailable)
 	t.Run("proxy headers ignored from untrusted sources", s.testTrustedProxyEnforcement)
 	t.Run("bare invocation opens TUI with instance state", s.testTUI)
+	t.Run("password generator honors explicit local output", s.testPasswordGenerator)
 	t.Run("bootstrap creates only encrypted administrator vault material", s.testBootstrap)
 	t.Run("login reuses unlocked session in the same terminal", s.testTerminalSessionReuse)
 	t.Run("another terminal requires its own login", s.testTerminalSessionIsolation)
@@ -85,6 +86,77 @@ func TestBlackbox(t *testing.T) {
 	t.Run("offline organization sync stays zero knowledge", s.testOrganizationOfflineCrossClient)
 	t.Run("sync preserves and resolves concurrent revisions", s.testConcurrentRevisionSync)
 	t.Run("trash expires without resurrecting stale content", s.testTrashLifecycle)
+}
+
+func (s *stack) testPasswordGenerator(t *testing.T) {
+	args := []string{
+		"generate-password",
+		"--length", "48",
+		"--uppercase=true",
+		"--lowercase=false",
+		"--digits=true",
+		"--special=true",
+		"--min-digits", "8",
+		"--min-special", "6",
+		"--exclude-ambiguous",
+	}
+	stdout, stderr, code := s.runClient(args...)
+	if code != 64 ||
+		stdout != "" ||
+		!strings.Contains(stderr, "usage: termkeep generate-password") {
+		t.Fatalf(
+			"generator without --stdout: code=%d stdout=%q stderr=%q",
+			code,
+			stdout,
+			stderr,
+		)
+	}
+
+	stdout, stderr, code = s.runClient(append(args, "--stdout")...)
+	if code != 0 || stderr != "" {
+		t.Fatalf(
+			"generator output: code=%d stdout=%q stderr=%q",
+			code,
+			stdout,
+			stderr,
+		)
+	}
+	password := strings.TrimSuffix(stdout, "\n")
+	if len(password) != 48 || strings.ContainsAny(
+		password,
+		client.PasswordLowercaseCharacters+
+			client.PasswordAmbiguousCharacters,
+	) {
+		t.Fatalf("generator output violates sets: %q", password)
+	}
+	var digits, special int
+	for _, character := range password {
+		switch {
+		case strings.ContainsRune(client.PasswordDigits, character):
+			digits++
+		case strings.ContainsRune(
+			client.PasswordSpecialCharacters,
+			character,
+		):
+			special++
+		case !strings.ContainsRune(
+			client.PasswordUppercaseCharacters,
+			character,
+		):
+			t.Fatalf(
+				"generator output contains unknown character %q",
+				character,
+			)
+		}
+	}
+	if digits < 8 || special < 6 {
+		t.Fatalf(
+			"generator minimums: digits=%d special=%d output=%q",
+			digits,
+			special,
+			password,
+		)
+	}
 }
 
 // newStack boots the ephemeral deployment once for the whole test run.
