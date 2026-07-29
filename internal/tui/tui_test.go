@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -684,6 +685,45 @@ func TestSecureNoteContentCopiesWithExplicitFieldLabel(t *testing.T) {
 		"Copied: Secure Note content (clears in 30 seconds)",
 	) {
 		t.Fatalf("copy feedback missing field name:\n%s", view)
+	}
+}
+
+func TestClipboardFailureDoesNotExposeSecretInTUI(t *testing.T) {
+	board := &fakeClipboard{
+		err: errors.New(
+			"backend rejected Password-Sentinel",
+		),
+	}
+	initial := model{
+		loaded:    true,
+		vaultOpen: true,
+		clipboard: board,
+		items: []itemRecord{{
+			Login: client.LoginItem{
+				ItemID:   "11111111-1111-4111-8111-111111111111",
+				Name:     "Production database",
+				Password: "Password-Sentinel",
+			},
+			Revision: 1,
+		}},
+		showItem: true,
+	}
+	updated, command := initial.Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	if command == nil {
+		t.Fatal("copy password key returned no command")
+	}
+	updated, _ = updated.(model).Update(command())
+	view := updated.(model).View()
+
+	if !strings.Contains(
+		view,
+		"Clipboard error: clipboard operation failed",
+	) {
+		t.Fatalf("sanitized clipboard error missing:\n%s", view)
+	}
+	if strings.Contains(view, "Password-Sentinel") {
+		t.Fatalf("clipboard error exposed password:\n%s", view)
 	}
 }
 
