@@ -7,8 +7,10 @@ import (
 	"io"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
+	"testing/quick"
 )
 
 func TestPreviewBitwardenImportNormalizesLogin(t *testing.T) {
@@ -519,4 +521,60 @@ func FuzzPreviewBitwardenImport(f *testing.F) {
 			}
 		}
 	})
+}
+
+func TestBitwardenDuplicateNamingProperty(t *testing.T) {
+	property := func(generated uint8) bool {
+		count := int(generated%16) + 1
+		items := make([]map[string]any, count)
+		for index := range items {
+			items[index] = map[string]any{
+				"type": 1,
+				"name": "Imported account",
+				"login": map[string]any{
+					"username": "user@example.com",
+					"password": "Password-Sentinel",
+					"uris": []map[string]any{{
+						"uri": "https://example.com",
+					}},
+				},
+			}
+		}
+		encoded, err := json.Marshal(map[string]any{
+			"encrypted": false,
+			"folders":   []any{},
+			"items":     items,
+		})
+		if err != nil {
+			return false
+		}
+		preview, err := PreviewBitwardenImport(
+			bytes.NewReader(encoded),
+			nil,
+		)
+		if err != nil || len(preview.Items) != count {
+			return false
+		}
+		for index, item := range preview.Items {
+			want := "Imported account"
+			switch index {
+			case 0:
+			case 1:
+				want += " (Duplicada)"
+			default:
+				want += " (Duplicada) - " +
+					strconv.Itoa(index)
+			}
+			if item.Login == nil || item.Login.Name != want {
+				return false
+			}
+		}
+		return true
+	}
+	if err := quick.Check(
+		property,
+		&quick.Config{MaxCount: 32},
+	); err != nil {
+		t.Fatal(err)
+	}
 }
