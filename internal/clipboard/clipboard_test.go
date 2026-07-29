@@ -34,6 +34,35 @@ func TestCopyClearsUnchangedClipboardAfterDelay(t *testing.T) {
 	}
 }
 
+func TestCopyPreservesClipboardReplacedBeforeDelay(t *testing.T) {
+	board := &memoryClipboard{}
+
+	cleanup, err := clipboard.Copy(
+		context.Background(),
+		board,
+		"Password-Sentinel",
+		20*time.Millisecond,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := board.Write(context.Background(), "user replacement"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-cleanup:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("clipboard cleanup timed out")
+	}
+	if value, clears := board.snapshot(); value != "user replacement" ||
+		clears != 0 {
+		t.Fatalf("replacement after cleanup: value %q, clears %d", value, clears)
+	}
+}
+
 type memoryClipboard struct {
 	mu     sync.Mutex
 	value  string
