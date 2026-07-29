@@ -2,6 +2,8 @@ package tui
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -11,6 +13,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1010,6 +1013,54 @@ func TestVaultPasswordGeneratorRejectsImpossibleConfig(t *testing.T) {
 		) ||
 		len(store.saved) != 0 {
 		t.Fatalf("invalid generator config changed state:\n%s", got.View())
+	}
+}
+
+func TestGeneratedPasswordChecksPwnedOnlyAfterExplicitKey(t *testing.T) {
+	const password = "Password-Sentinel#2026"
+	sum := sha1.Sum([]byte(password))
+	fullHash := strings.ToUpper(hex.EncodeToString(sum[:]))
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(
+		w http.ResponseWriter,
+		_ *http.Request,
+	) {
+		requests.Add(1)
+		_, _ = w.Write([]byte(fullHash[5:] + ":42\r\n"))
+	}))
+	defer server.Close()
+
+	initial := model{
+		cfg: client.Config{
+			PwnedPasswordsURL: server.URL + "/range",
+		},
+		showGenerator: true,
+		passwordGenerator: passwordGeneratorForm{
+			generated: password,
+		},
+	}
+	_ = initial.View()
+	if requests.Load() != 0 {
+		t.Fatal("rendering generated password triggered Pwned check")
+	}
+	updated, command := initial.Update(tea.KeyMsg{
+		Type:  tea.KeyRunes,
+		Runes: []rune{'b'},
+	})
+	if command == nil ||
+		requests.Load() != 0 ||
+		!strings.Contains(updated.(model).View(), "checking") {
+		t.Fatalf("explicit check did not enter loading state:\n%s",
+			updated.(model).View())
+	}
+	updated, _ = updated.(model).Update(command())
+	if requests.Load() != 1 ||
+		!strings.Contains(
+			updated.(model).View(),
+			"found — 42 occurrences",
+		) {
+		t.Fatalf("Pwned result not rendered:\n%s",
+			updated.(model).View())
 	}
 }
 
