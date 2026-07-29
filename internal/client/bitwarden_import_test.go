@@ -1,6 +1,7 @@
 package client
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -136,5 +137,67 @@ func TestPreviewBitwardenImportPreservesNativeItems(t *testing.T) {
 		note.FolderID != folder.ItemID ||
 		!note.Favorite {
 		t.Fatalf("normalized Secure Note: %+v", note)
+	}
+}
+
+func TestPreviewBitwardenImportPreservesUnsupportedItemAsGeneric(
+	t *testing.T,
+) {
+	export := `{
+		"encrypted": false,
+		"folders": [],
+		"items": [{
+			"id": "source-card-id",
+			"type": 3,
+			"name": "Corporate card",
+			"notes": "Travel only",
+			"favorite": true,
+			"reprompt": 1,
+			"fields": [{
+				"name": "cost center",
+				"value": "platform",
+				"type": 0
+			}],
+			"card": {
+				"cardholderName": "Operator",
+				"number": "4111111111111111",
+				"code": "Security-Code-Sentinel",
+				"expMonth": "12",
+				"expYear": "2030"
+			}
+		}]
+	}`
+
+	preview, err := PreviewBitwardenImport(
+		strings.NewReader(export),
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Counts != (BitwardenImportCounts{Generic: 1}) ||
+		len(preview.Items) != 1 ||
+		len(preview.Errors) != 0 {
+		t.Fatalf("preview summary: %+v", preview)
+	}
+	generic := preview.Items[0].Generic
+	if generic == nil ||
+		generic.ItemID == "" ||
+		generic.Title != "Corporate card" ||
+		generic.Source != "bitwarden" ||
+		generic.SourceType != "card" ||
+		!generic.Favorite {
+		t.Fatalf("normalized Generic Item: %+v", generic)
+	}
+	var preserved map[string]any
+	if err := json.Unmarshal(generic.Data, &preserved); err != nil {
+		t.Fatal(err)
+	}
+	card, ok := preserved["card"].(map[string]any)
+	if !ok ||
+		card["number"] != "4111111111111111" ||
+		card["code"] != "Security-Code-Sentinel" ||
+		preserved["reprompt"] != float64(1) {
+		t.Fatalf("Generic Item lost source fields: %+v", preserved)
 	}
 }
