@@ -64,10 +64,11 @@ type Status struct {
 
 // Config controls how CheckStatus reaches the instance.
 type Config struct {
-	ServerURL  string        // base URL; HTTPS required outside localhost
-	CACertFile string        // optional PEM trust anchor (self-hosted deployments)
-	Timeout    time.Duration // overall request budget
-	DataDir    string        // optional encrypted-cache directory
+	ServerURL         string        // base URL; HTTPS required outside localhost
+	CACertFile        string        // optional PEM trust anchor
+	Timeout           time.Duration // overall request budget
+	DataDir           string        // optional encrypted-cache directory
+	PwnedPasswordsURL string        // range endpoint; empty or "off" disables checks
 }
 
 // statusBody mirrors the server's public status payload.
