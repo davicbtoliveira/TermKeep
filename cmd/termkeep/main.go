@@ -50,47 +50,67 @@ func main() {
 	os.Exit(run(os.Args[1:]))
 }
 
-func run(args []string) int {
+func parseGlobalConfig(args []string) (client.Config, []string, error) {
 	fs := flag.NewFlagSet("termkeep", flag.ContinueOnError)
 	serverURL := fs.String("server", envOr("TERMKEEP_SERVER", "https://localhost"),
 		"instance base URL (env TERMKEEP_SERVER)")
 	caCert := fs.String("ca-cert", os.Getenv("TERMKEEP_CA_CERT"),
 		"PEM file with the deployment CA (env TERMKEEP_CA_CERT)")
+	pwnedPasswordsURL := fs.String(
+		"pwned-passwords-url",
+		envOr(
+			"TERMKEEP_PWNED_PASSWORDS_URL",
+			client.DefaultPwnedPasswordsURL,
+		),
+		"Pwned Passwords range endpoint or off "+
+			"(env TERMKEEP_PWNED_PASSWORDS_URL)",
+	)
 
-	// Parse flags preceding the subcommand; `termkeep status` has no flags
-	// of its own yet.
 	if err := fs.Parse(args); err != nil {
+		return client.Config{}, nil, err
+	}
+	return client.Config{
+		ServerURL:         *serverURL,
+		CACertFile:        *caCert,
+		DataDir:           os.Getenv("TERMKEEP_DATA_DIR"),
+		PwnedPasswordsURL: *pwnedPasswordsURL,
+	}, fs.Args(), nil
+}
+
+func run(args []string) int {
+	cfg, commandArgs, err := parseGlobalConfig(args)
+	if err != nil {
 		return exitUsageFailure
 	}
-
-	cfg := client.Config{ServerURL: *serverURL, CACertFile: *caCert}
-	cfg.DataDir = os.Getenv("TERMKEEP_DATA_DIR")
-
-	switch fs.Arg(0) {
+	var command string
+	if len(commandArgs) > 0 {
+		command = commandArgs[0]
+	}
+	switch command {
 	case "status":
 		return runStatus(cfg)
 	case "bootstrap":
-		return runBootstrap(cfg, fs.Args()[1:])
+		return runBootstrap(cfg, commandArgs[1:])
 	case "register":
-		return runRegister(cfg, fs.Args()[1:])
+		return runRegister(cfg, commandArgs[1:])
 	case "login":
-		return runLogin(cfg, fs.Args()[1:])
+		return runLogin(cfg, commandArgs[1:])
 	case "logout":
-		return runLogout(fs.Args()[1:])
+		return runLogout(commandArgs[1:])
 	case "sync":
-		return runSync(cfg, fs.Args()[1:])
+		return runSync(cfg, commandArgs[1:])
 	case "secret":
-		return runSecret(cfg, fs.Args()[1:])
+		return runSecret(cfg, commandArgs[1:])
 	case "totp":
-		return runTOTP(cfg, fs.Args()[1:])
+		return runTOTP(cfg, commandArgs[1:])
 	case "generate-password":
-		return runGeneratePassword(fs.Args()[1:])
+		return runGeneratePassword(commandArgs[1:])
 	case "__session-agent":
-		return runSessionAgent(fs.Args()[1:])
+		return runSessionAgent(commandArgs[1:])
 	case "":
 		return runTUI(cfg)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n\nusage: termkeep [--server URL] [--ca-cert FILE] [status|bootstrap|register|login|logout|sync|secret|totp|generate-password]\n", fs.Arg(0))
+		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n\nusage: termkeep [--server URL] [--ca-cert FILE] [--pwned-passwords-url URL|off] [status|bootstrap|register|login|logout|sync|secret|totp|generate-password]\n", command)
 		return exitUsageFailure
 	}
 }
