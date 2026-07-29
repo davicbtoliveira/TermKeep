@@ -44,6 +44,7 @@ type bitwardenItem struct {
 	Name     string           `json:"name"`
 	Notes    string           `json:"notes"`
 	Favorite bool             `json:"favorite"`
+	Reprompt int              `json:"reprompt"`
 	Fields   []bitwardenField `json:"fields"`
 	Login    bitwardenLogin   `json:"login"`
 }
@@ -53,16 +54,19 @@ type bitwardenLogin struct {
 	Password string              `json:"password"`
 	URIs     []bitwardenLoginURI `json:"uris"`
 	TOTP     string              `json:"totp"`
+	FIDO2    json.RawMessage     `json:"fido2Credentials"`
 }
 
 type bitwardenLoginURI struct {
-	URI string `json:"uri"`
+	URI   string `json:"uri"`
+	Match *int   `json:"match"`
 }
 
 type bitwardenField struct {
-	Name  string `json:"name"`
-	Value string `json:"value"`
-	Type  int    `json:"type"`
+	Name     string `json:"name"`
+	Value    string `json:"value"`
+	Type     int    `json:"type"`
+	LinkedID *int   `json:"linkedId"`
 }
 
 func PreviewBitwardenImport(
@@ -172,6 +176,10 @@ func PreviewBitwardenImport(
 			preview.Counts.Generic++
 			continue
 		}
+		preview.UnmappedFields = append(
+			preview.UnmappedFields,
+			bitwardenUnmappedLoginFields(index+1, item)...,
+		)
 		urls := make([]string, 0, len(item.Login.URIs))
 		for _, uri := range item.Login.URIs {
 			if value := strings.TrimSpace(uri.URI); value != "" {
@@ -246,4 +254,40 @@ func bitwardenSourceType(itemType int) string {
 	default:
 		return fmt.Sprintf("type_%d", itemType)
 	}
+}
+
+func bitwardenUnmappedLoginFields(
+	itemNumber int,
+	item bitwardenItem,
+) []BitwardenImportIssue {
+	var issues []BitwardenImportIssue
+	add := func(field string) {
+		issues = append(issues, BitwardenImportIssue{
+			Item:    itemNumber,
+			Field:   field,
+			Message: "not mapped to native Login",
+		})
+	}
+	if item.Reprompt != 0 {
+		add("reprompt")
+	}
+	for index, field := range item.Fields {
+		if field.Type != 0 {
+			add(fmt.Sprintf("fields[%d].type", index))
+		}
+		if field.LinkedID != nil {
+			add(fmt.Sprintf("fields[%d].linkedId", index))
+		}
+	}
+	for index, uri := range item.Login.URIs {
+		if uri.Match != nil {
+			add(fmt.Sprintf("login.uris[%d].match", index))
+		}
+	}
+	if len(item.Login.FIDO2) > 0 &&
+		string(item.Login.FIDO2) != "null" &&
+		string(item.Login.FIDO2) != "[]" {
+		add("login.fido2Credentials")
+	}
+	return issues
 }
