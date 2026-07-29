@@ -194,3 +194,52 @@ func TestSecretCommandWritesRequestedPassword(t *testing.T) {
 		t.Fatalf("secret stdout: got %q", got)
 	}
 }
+
+func TestRequestedSecretSupportsExplicitNativeFields(t *testing.T) {
+	login := client.NativeItem{
+		Type: client.NativeItemTypeLogin,
+		Login: &client.LoginItem{
+			Password: "Password-Sentinel",
+			Notes:    "Login-Notes-Sentinel",
+			CustomFields: []client.CustomField{{
+				Name:  "API token",
+				Value: "Custom-Value-Sentinel",
+			}},
+		},
+	}
+	note := client.NativeItem{
+		Type: client.NativeItemTypeSecureNote,
+		SecureNote: &client.SecureNoteItem{
+			Content: "Secure-Note-Content-Sentinel",
+		},
+	}
+	for _, test := range []struct {
+		name  string
+		item  client.NativeItem
+		field string
+		want  string
+	}{
+		{
+			name: "Login notes", item: login,
+			field: "notes", want: "Login-Notes-Sentinel",
+		},
+		{
+			name: "custom field", item: login,
+			field: "custom:API token", want: "Custom-Value-Sentinel",
+		},
+		{
+			name: "Secure Note content", item: note,
+			field: "content", want: "Secure-Note-Content-Sentinel",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := requestedSecret(test.item, test.field)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Fatalf("secret: got %q, want %q", got, test.want)
+			}
+		})
+	}
+}
