@@ -599,6 +599,45 @@ func TestLoginDetailShowsFieldsWithMaskedPassword(t *testing.T) {
 	}
 }
 
+func TestGenericItemListsAndOpensPreservedData(t *testing.T) {
+	initial := model{
+		loaded:    true,
+		vaultOpen: true,
+		items: []itemRecord{{
+			Generic: &client.GenericItem{
+				ItemID:     "11111111-1111-4111-8111-111111111111",
+				Title:      "Corporate card",
+				Source:     "bitwarden",
+				SourceType: "card",
+				Favorite:   true,
+				Data: []byte(`{
+					"type": 3,
+					"card": {"number": "Card-Number-Sentinel"}
+				}`),
+			},
+			Revision: 1,
+		}},
+	}
+	list := initial.View()
+	if !strings.Contains(list, "★ [Generic] Corporate card") ||
+		strings.Contains(list, "Card-Number-Sentinel") {
+		t.Fatalf("Generic Item list differs:\n%s", list)
+	}
+	updated, _ := initial.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	detail := updated.(model).View()
+	for _, want := range []string{
+		"Generic — Corporate card",
+		"Source: bitwarden",
+		"Source type: card",
+		"Card-Number-Sentinel",
+	} {
+		if !strings.Contains(detail, want) {
+			t.Fatalf("Generic Item detail missing %q:\n%s",
+				want, detail)
+		}
+	}
+}
+
 func TestLoginPasswordRevealsOnlyAfterExplicitKey(t *testing.T) {
 	initial := model{
 		loaded:    true,
