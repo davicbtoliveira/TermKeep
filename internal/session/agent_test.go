@@ -262,6 +262,64 @@ func TestAgentSealsAndOpensFolderWithoutExposingVaultKey(t *testing.T) {
 	}
 }
 
+func TestAgentSealsAndOpensGenericItemWithoutExposingFields(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "agent.sock")
+	vaultKey := []byte("01234567890123456789012345678901")
+	agent, err := session.NewAgent(session.AgentConfig{
+		SocketPath: socketPath,
+		OwnerUID:   uint32(os.Getuid()),
+		AccountID:  "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		VaultKey:   vaultKey,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- agent.Serve(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		_ = agent.Close()
+		if err := <-done; err != nil {
+			t.Errorf("serve agent: %v", err)
+		}
+	})
+
+	generic := client.GenericItem{
+		ItemID:     "11111111-1111-4111-8111-111111111111",
+		Title:      "Corporate card",
+		Source:     "bitwarden",
+		SourceType: "card",
+		Data: []byte(`{
+			"type": 3,
+			"card": {"number": "Card-Number-Sentinel"}
+		}`),
+	}
+	encrypted, err := session.SealGenericItem(
+		ctx,
+		socketPath,
+		generic,
+		1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encrypted.Envelope, []byte(generic.Title)) ||
+		bytes.Contains(encrypted.Envelope, []byte("Card-Number-Sentinel")) ||
+		bytes.Contains(encrypted.Envelope, vaultKey) {
+		t.Fatal("sealed response exposed Generic fields or vault key")
+	}
+	native, err := session.OpenNativeItem(ctx, socketPath, encrypted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if native.Type != client.NativeItemTypeGeneric ||
+		native.Generic == nil ||
+		!reflect.DeepEqual(*native.Generic, generic) {
+		t.Fatalf("opened native Generic Item differs: %+v", native)
+	}
+}
+
 func TestAgentSocketIsOwnerOnly(t *testing.T) {
 	socketPath := filepath.Join(t.TempDir(), "agent.sock")
 	agent, err := session.NewAgent(session.AgentConfig{
