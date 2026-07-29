@@ -27,20 +27,27 @@ type PasswordGeneratorConfig struct {
 	ExcludeAmbiguous bool
 }
 
+func ValidatePasswordGeneratorConfig(
+	config PasswordGeneratorConfig,
+) error {
+	if config.Length < 5 ||
+		config.Length > 128 ||
+		config.MinimumDigits < 0 ||
+		config.MinimumSpecial < 0 ||
+		config.MinimumDigits+config.MinimumSpecial > config.Length ||
+		passwordCharacterSet(config) == "" {
+		return ErrInvalidPasswordGeneratorConfig
+	}
+	return nil
+}
+
 func GeneratePassword(
 	config PasswordGeneratorConfig,
 ) (string, error) {
-	if config.Length <= 0 ||
-		config.MinimumDigits < 0 ||
-		config.MinimumSpecial < 0 ||
-		config.MinimumDigits+config.MinimumSpecial > config.Length {
-		return "", ErrInvalidPasswordGeneratorConfig
+	if err := ValidatePasswordGeneratorConfig(config); err != nil {
+		return "", err
 	}
-
 	allowed := passwordCharacterSet(config)
-	if allowed == "" {
-		return "", ErrInvalidPasswordGeneratorConfig
-	}
 	password := make([]byte, 0, config.Length)
 	for range config.MinimumDigits {
 		character, err := randomPasswordCharacter(PasswordDigits)
