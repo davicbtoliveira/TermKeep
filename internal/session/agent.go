@@ -58,6 +58,7 @@ type request struct {
 	Login    *client.LoginItem      `json:"login,omitempty"`
 	Note     *client.SecureNoteItem `json:"note,omitempty"`
 	Folder   *client.FolderItem     `json:"folder,omitempty"`
+	Generic  *client.GenericItem    `json:"generic,omitempty"`
 	Item     *client.EncryptedItem  `json:"item,omitempty"`
 	Revision uint64                 `json:"revision,omitempty"`
 }
@@ -262,6 +263,24 @@ func (a *Agent) handle(conn *net.UnixConn) {
 		}
 		item, err := client.EncryptFolder(
 			a.vaultKey, a.accountID, *req.Folder, req.Revision)
+		if err != nil {
+			_ = json.NewEncoder(conn).Encode(response{Error: err.Error()})
+			return
+		}
+		_ = json.NewEncoder(conn).Encode(response{Item: &item})
+	case "seal-generic-item":
+		if req.Generic == nil {
+			_ = json.NewEncoder(conn).Encode(response{
+				Error: "Generic Item is required",
+			})
+			return
+		}
+		item, err := client.EncryptGenericItem(
+			a.vaultKey,
+			a.accountID,
+			*req.Generic,
+			req.Revision,
+		)
 		if err != nil {
 			_ = json.NewEncoder(conn).Encode(response{Error: err.Error()})
 			return
@@ -493,6 +512,27 @@ func SealFolder(
 	if res.Item == nil {
 		return client.EncryptedItem{}, errors.New(
 			"session agent returned no encrypted Folder")
+	}
+	return *res.Item, nil
+}
+
+func SealGenericItem(
+	ctx context.Context,
+	socketPath string,
+	generic client.GenericItem,
+	revision uint64,
+) (client.EncryptedItem, error) {
+	res, err := requestAgent(ctx, socketPath, request{
+		Action:   "seal-generic-item",
+		Generic:  &generic,
+		Revision: revision,
+	})
+	if err != nil {
+		return client.EncryptedItem{}, err
+	}
+	if res.Item == nil {
+		return client.EncryptedItem{}, errors.New(
+			"session agent returned no encrypted Generic Item")
 	}
 	return *res.Item, nil
 }
