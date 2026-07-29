@@ -634,6 +634,9 @@ func TestLoginPasswordCopyIsDistinctFromReveal(t *testing.T) {
 		}},
 	}
 	updated, _ := initial.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if got := board.current(); got != "" {
+		t.Fatalf("opening Login copied password automatically: %q", got)
+	}
 	updated, command := updated.(model).Update(
 		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
 	if command == nil {

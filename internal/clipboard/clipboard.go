@@ -10,10 +10,15 @@ import (
 	"time"
 )
 
-const ClearDelay = 30 * time.Second
+const (
+	ClearDelay       = 30 * time.Second
+	operationTimeout = 2 * time.Second
+)
 
+// ErrUnavailable means no supported Linux clipboard command is usable.
 var ErrUnavailable = errors.New("clipboard unavailable")
 
+// Backend is the system boundary required for safe clipboard cleanup.
 type Backend interface {
 	Write(ctx context.Context, value string) error
 	Read(ctx context.Context) (string, error)
@@ -30,6 +35,7 @@ type commandBackend struct {
 	read  command
 }
 
+// Open selects an available Wayland or X11 clipboard backend.
 func Open() (Backend, error) {
 	if os.Getenv("WAYLAND_DISPLAY") != "" {
 		write, writeErr := exec.LookPath("wl-copy")
@@ -103,6 +109,7 @@ func (backend commandBackend) Clear(ctx context.Context) error {
 	return backend.Write(ctx, "")
 }
 
+// Copy writes value and clears it after clearAfter only when still unchanged.
 func Copy(
 	ctx context.Context,
 	backend Backend,
@@ -116,16 +123,15 @@ func Copy(
 	go func() {
 		timer := time.NewTimer(clearAfter)
 		defer timer.Stop()
-		select {
-		case <-ctx.Done():
-			cleanup <- ctx.Err()
-		case <-timer.C:
-			current, err := backend.Read(context.Background())
-			if err == nil && current == value {
-				err = backend.Clear(context.Background())
-			}
-			cleanup <- err
+		<-timer.C
+		cleanupCtx, cancel := context.WithTimeout(
+			context.Background(), operationTimeout)
+		defer cancel()
+		current, err := backend.Read(cleanupCtx)
+		if err == nil && current == value {
+			err = backend.Clear(cleanupCtx)
 		}
+		cleanup <- err
 		close(cleanup)
 	}()
 	return cleanup, nil

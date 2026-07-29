@@ -1114,6 +1114,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.showItem = true
 				m.revealPassword = false
 				m.selectedConflict = 0
+				m.copiedField = ""
+				m.clipboardErr = nil
 			}
 		case "g":
 			if m.showActivity && m.activityPage.CanViewAll {
@@ -1142,6 +1144,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showNoteForm = false
 			m.searching = false
 			m.searchQuery = ""
+			m.copiedField = ""
+			m.clipboardErr = nil
 			return m, nil
 		case "j", "down":
 			if m.showSessions && m.selectedSession+1 < len(m.sessions) {
