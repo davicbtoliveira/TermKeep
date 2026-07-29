@@ -7,7 +7,10 @@ import (
 
 type SearchMode uint8
 
-const SearchModeMetadata SearchMode = iota
+const (
+	SearchModeMetadata SearchMode = iota
+	SearchModeNoteContents
+)
 
 type SearchResult struct {
 	ItemID string
@@ -18,9 +21,10 @@ type SearchIndex struct {
 }
 
 type searchEntry struct {
-	itemID string
-	title  string
-	fields []searchField
+	itemID      string
+	title       string
+	fields      []searchField
+	noteContent string
 }
 
 type searchField struct {
@@ -53,6 +57,7 @@ func NewSearchIndex(items []NativeItem, folders []FolderItem) SearchIndex {
 				for _, field := range item.Login.CustomFields {
 					entry.addField(field.Name, 1000)
 				}
+				entry.noteContent = item.Login.Notes
 				index.entries = append(index.entries, entry)
 			}
 		case NativeItemTypeSecureNote:
@@ -64,6 +69,7 @@ func NewSearchIndex(items []NativeItem, folders []FolderItem) SearchIndex {
 				entry.addField(item.SecureNote.Title, 5000)
 				entry.addField(
 					folderNames[item.SecureNote.FolderID], 2000)
+				entry.noteContent = item.SecureNote.Content
 				index.entries = append(index.entries, entry)
 			}
 		}
@@ -83,7 +89,7 @@ func (entry *searchEntry) addField(value string, weight int) {
 
 func (index SearchIndex) Search(
 	query string,
-	_ SearchMode,
+	mode SearchMode,
 ) []SearchResult {
 	query = strings.TrimSpace(strings.ToLower(query))
 	if query == "" {
@@ -105,6 +111,14 @@ func (index SearchIndex) Search(
 			if fieldMatched &&
 				(!matched || fieldScore+field.weight > score) {
 				score = fieldScore + field.weight
+				matched = true
+			}
+		}
+		if mode == SearchModeNoteContents {
+			noteScore, noteMatched := fuzzyScore(
+				query, entry.noteContent)
+			if noteMatched && (!matched || noteScore > score) {
+				score = noteScore
 				matched = true
 			}
 		}
