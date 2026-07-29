@@ -139,12 +139,14 @@ func parsePwnedPasswordsRange(
 	var (
 		found      bool
 		foundCount uint64
+		records    int
 	)
 	for _, line := range strings.Split(string(body), "\n") {
 		line = strings.TrimSuffix(line, "\r")
 		if line == "" {
 			continue
 		}
+		records++
 		suffix, countValue, ok := strings.Cut(line, ":")
 		if !ok ||
 			len(suffix) != 35 ||
@@ -169,6 +171,11 @@ func parsePwnedPasswordsRange(
 		}
 		found = true
 		foundCount = count
+	}
+	if records == 0 {
+		return PwnedPasswordResult{
+			Status: PwnedPasswordInvalidResponse,
+		}
 	}
 	if found && foundCount > 0 {
 		return PwnedPasswordResult{
