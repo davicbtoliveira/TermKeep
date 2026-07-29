@@ -399,6 +399,30 @@ func TestPreviewBitwardenImportRejectsUnsafeInput(t *testing.T) {
 	}
 }
 
+func TestPreviewBitwardenImportRejectsTooManyRecords(t *testing.T) {
+	var export strings.Builder
+	export.WriteString(`{"encrypted":false,"folders":[],"items":[`)
+	for index := 0; index <= maxBitwardenImportRecords; index++ {
+		if index > 0 {
+			export.WriteByte(',')
+		}
+		export.WriteString(`{"type":1,"name":"x","login":{}}`)
+	}
+	export.WriteString(`]}`)
+
+	_, err := PreviewBitwardenImport(
+		strings.NewReader(export.String()),
+		nil,
+	)
+	if !errors.Is(err, ErrBitwardenExportTooManyRecords) {
+		t.Fatalf(
+			"want %v, got %v",
+			ErrBitwardenExportTooManyRecords,
+			err,
+		)
+	}
+}
+
 func TestPreviewBitwardenImportReportsInvalidRecords(t *testing.T) {
 	export := `{
 		"encrypted": false,
