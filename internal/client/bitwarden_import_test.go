@@ -436,6 +436,51 @@ func TestPreviewBitwardenImportRenamesOnlySemanticDuplicates(
 	}
 }
 
+func TestPreviewBitwardenImportIgnoresGenericSourceMetadataForDuplicates(
+	t *testing.T,
+) {
+	export := `{
+		"encrypted": false,
+		"folders": [],
+		"items": [{
+			"id": "first-source-id",
+			"organizationId": "first-organization-id",
+			"collectionIds": ["first-collection-id"],
+			"creationDate": "2026-07-28T10:00:00Z",
+			"revisionDate": "2026-07-28T11:00:00Z",
+			"type": 3,
+			"name": "Corporate card",
+			"favorite": false,
+			"card": {"number": "4111111111111111"}
+		}, {
+			"id": "second-source-id",
+			"organizationId": "second-organization-id",
+			"collectionIds": ["second-collection-id"],
+			"creationDate": "2026-07-29T10:00:00Z",
+			"revisionDate": "2026-07-29T11:00:00Z",
+			"deletedDate": "2026-07-29T12:00:00Z",
+			"type": 3,
+			"name": "Backup card",
+			"favorite": true,
+			"card": {"number": "4111111111111111"}
+		}]
+	}`
+
+	preview, err := PreviewBitwardenImport(
+		strings.NewReader(export),
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(preview.Items) != 2 ||
+		preview.Items[1].Generic == nil ||
+		preview.Items[1].Generic.Title !=
+			"Backup card (Duplicada)" {
+		t.Fatalf("Generic duplicate names differ: %+v", preview)
+	}
+}
+
 func TestPreviewBitwardenImportRejectsUnsafeInput(t *testing.T) {
 	tests := []struct {
 		name    string
