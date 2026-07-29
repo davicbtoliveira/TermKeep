@@ -85,6 +85,89 @@ func TestBitwardenImportRequestRequiresFormatAndFile(t *testing.T) {
 	}
 }
 
+func TestBitwardenImportPreviewDoesNotChangeCache(t *testing.T) {
+	accountID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	vault, err := client.NewVault([]byte("TermKeep#2026"), accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vault.Clear()
+	cfg := client.Config{DataDir: filepath.Join(t.TempDir(), "cache")}
+	if err := client.AuthorizeCache(
+		cfg,
+		"user@example.com",
+		accountID,
+		vault.PasswordEnvelope,
+	); err != nil {
+		t.Fatal(err)
+	}
+	cache, err := client.OpenCache(cfg, "user@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	socketPath := filepath.Join(t.TempDir(), "agent.sock")
+	agent, err := session.NewAgent(session.AgentConfig{
+		SocketPath: socketPath,
+		OwnerUID:   uint32(os.Getuid()),
+		AccountID:  accountID,
+		Email:      "user@example.com",
+		VaultKey:   vault.Key,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- agent.Serve(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		_ = agent.Close()
+		if err := <-done; err != nil {
+			t.Errorf("serve agent: %v", err)
+		}
+	})
+	path := filepath.Join(t.TempDir(), "bitwarden.json")
+	if err := os.WriteFile(path, []byte(`{
+		"encrypted": false,
+		"folders": [],
+		"items": [{
+			"type": 1,
+			"name": "Imported account",
+			"login": {
+				"username": "imported@example.com",
+				"password": "Imported-Password-Sentinel"
+			}
+		}]
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if err := runBitwardenImportAt(
+		context.Background(),
+		cfg,
+		socketPath,
+		bitwardenImportRequest{path: path},
+		&stdout,
+		&stderr,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), "Logins: 1") ||
+		!strings.Contains(stdout.String(), "Preview only") ||
+		!strings.Contains(stderr.String(), "plaintext") {
+		t.Fatalf("preview output:\nstdout=%s\nstderr=%s",
+			stdout.String(), stderr.String())
+	}
+	snapshot, err := cache.SyncSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Mutations) != 0 {
+		t.Fatalf("preview queued mutations: %+v", snapshot)
+	}
+}
+
 func TestManualSyncUsesActiveSessionAndCache(t *testing.T) {
 	accountID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 	password := []byte("TermKeep#2026")
