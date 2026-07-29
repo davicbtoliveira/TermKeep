@@ -3,6 +3,9 @@ package clipboard_test
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -72,6 +75,55 @@ func TestOpenReportsUnavailableWithoutClipboardCommands(t *testing.T) {
 	_, err := clipboard.Open()
 	if !errors.Is(err, clipboard.ErrUnavailable) {
 		t.Fatalf("Open error: got %v, want ErrUnavailable", err)
+	}
+}
+
+func TestOpenUsesAvailableWaylandClipboard(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("TermKeep clipboard supports Linux")
+	}
+	binDir := t.TempDir()
+	clipboardFile := filepath.Join(t.TempDir(), "clipboard")
+	t.Setenv("PATH", binDir)
+	t.Setenv("WAYLAND_DISPLAY", "wayland-0")
+	t.Setenv("DISPLAY", "")
+	t.Setenv("TERMKEEP_TEST_CLIPBOARD", clipboardFile)
+	writeExecutable(t, filepath.Join(binDir, "wl-copy"),
+		"#!/bin/sh\n/bin/cat > \"$TERMKEEP_TEST_CLIPBOARD\"\n")
+	writeExecutable(t, filepath.Join(binDir, "wl-paste"),
+		"#!/bin/sh\n/bin/cat \"$TERMKEEP_TEST_CLIPBOARD\"\n")
+
+	board, err := clipboard.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := board.Write(ctx, "Password-Sentinel"); err != nil {
+		t.Fatal(err)
+	}
+	value, err := board.Read(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value != "Password-Sentinel" {
+		t.Fatalf("clipboard value: got %q", value)
+	}
+	if err := board.Clear(ctx); err != nil {
+		t.Fatal(err)
+	}
+	value, err = board.Read(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value != "" {
+		t.Fatalf("cleared clipboard value: got %q", value)
+	}
+}
+
+func writeExecutable(t *testing.T, path, contents string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(contents), 0o700); err != nil {
+		t.Fatal(err)
 	}
 }
 
