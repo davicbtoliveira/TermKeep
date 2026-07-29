@@ -892,6 +892,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.activityErr = nil
 				return m, loadActivity(m.cfg, m.accessToken, false, "")
 			}
+		case "b":
+			record, selected := m.selectedItemRecord()
+			if m.showItem && selected &&
+				len(record.ConflictVersions) == 0 &&
+				record.SecureNote == nil &&
+				!m.breachLoading {
+				m.breachLoading = true
+				m.breachResult = nil
+				return m, checkPwnedPassword(
+					m.cfg,
+					record.Login.Password,
+				)
+			}
 		case "c":
 			record, selected := m.selectedItemRecord()
 			if m.showItem && selected &&
@@ -939,6 +952,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.itemFormErr = nil
 				m.itemSaving = false
+				m.breachLoading = false
+				m.breachResult = nil
 			}
 		case "n":
 			if m.showActivity && m.activityPage.NextCursor != "" {
@@ -1199,6 +1214,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.selectedConflict = 0
 				m.copiedField = ""
 				m.clipboardErr = nil
+				m.breachLoading = false
+				m.breachResult = nil
 				if record.SecureNote == nil &&
 					record.Login.TOTP != nil {
 					return m, scheduleTOTPRefresh()
@@ -1431,6 +1448,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.showPasswordHistory = false
 		m.historyClearConfirm = false
 		m.selectedConflict = 0
+		m.breachLoading = false
+		m.breachResult = nil
 		m.showLoginForm = false
 		m.showNoteForm = false
 		m.showFolderForm = false
@@ -2978,8 +2997,10 @@ func (m model) itemView() string {
 		fmt.Fprintf(&b, "  %s: %s\n", field.Name, field.Value)
 	}
 	b.WriteString(m.clipboardFeedback())
+	b.WriteString(m.breachFeedback())
 	b.WriteString(
-		"\n[p] reveal/hide password  [c] copy password  [e] edit  " +
+		"\n[p] reveal/hide password  [c] copy password  " +
+			"[b] check Pwned  [e] edit  " +
 			"[h] password history  [t] configure TOTP  " +
 			"[f] favorite/unfavorite  [o] move  [d] delete  " +
 			"[v] vault  [q] quit\n",
