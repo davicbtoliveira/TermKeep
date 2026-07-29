@@ -68,7 +68,8 @@ compromised client host.
 
 An unlocked online vault lists Login names and usernames. Use `j`/`k` to
 select an item and `enter` to open it. Passwords are masked by default; press
-`p` in the detail view to reveal or hide the selected password.
+`p` in the detail view to reveal or hide the selected password, or `c` to
+copy it without revealing it.
 
 Press `c` in the vault to create a Login or `e` on an existing Login to edit
 it. The form captures name, username, password, comma-separated URLs, notes,
@@ -82,7 +83,8 @@ timestamp inside the encrypted Login, newest first, keeping at most five.
 Saving the same password does not add an entry. Historical passwords remain
 hidden from the vault list, Login detail, search, and automatic checks. From a
 Login detail, press `h` to open Password History; entries remain masked until
-`p` reveals the selected one. Press `x` twice to clear the complete history;
+`p` reveals the selected one. Press `c` to copy the selected historical
+password without revealing it. Press `x` twice to clear the complete history;
 the first press shows an irreversible-clear warning.
 
 When offline edits create multiple heads for one Login, the vault marks it as
@@ -121,7 +123,7 @@ passwords, password history, URLs, notes, or custom fields.
 Press `n` from an unlocked vault to create a Secure Note with a required title
 and sensitive content. The vault list shows `[Secure Note]` and its title but
 never its content. Open the selected Note with `enter`; use `e` to edit it or
-`d` to move it to encrypted Trash.
+`c` to copy its content, and `d` to move it to encrypted Trash.
 
 Secure Notes use the same encrypted cache, immutable revision graph, mutation
 queue, synchronization, Trash, and explicit Conflict workflow as Logins. They
@@ -131,6 +133,36 @@ or manually merged without last-write-wins.
 Native Item type and payload version live inside authenticated ciphertext.
 The Server receives the same opaque envelope and generic Item metadata for
 Logins and Secure Notes; it cannot identify titles, content, or native type.
+
+## Secret output and clipboard
+
+Reveal and copy are separate actions. Copying a secret reports the field name,
+never the copied value. On Linux, TermKeep uses `wl-copy`/`wl-paste` under
+Wayland or `xclip`/`xsel` under X11. It reports a fixed error when no supported
+clipboard is available.
+
+Copied content is checked after 30 seconds. TermKeep clears the clipboard only
+when it still exactly matches the value TermKeep placed there; content copied
+later by the user is left untouched.
+
+CLI secret output requires an unlocked terminal session and an explicit
+`--stdout` flag:
+
+```sh
+termkeep secret --item ITEM_UUID --field password --stdout
+termkeep secret --item ITEM_UUID --field notes --stdout
+termkeep secret --item ITEM_UUID --field content --stdout
+termkeep secret --item ITEM_UUID --field 'custom:API token' --stdout
+```
+
+Account creation also requires `--stdout-recovery-key` before the one-time
+Recovery key can be written to stdout:
+
+```sh
+termkeep bootstrap --email admin@example.com --stdout-recovery-key
+termkeep register --email user@example.com --invite-token TOKEN \
+  --stdout-recovery-key
+```
 
 ## Folders and favorites
 
