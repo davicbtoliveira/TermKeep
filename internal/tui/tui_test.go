@@ -975,6 +975,44 @@ func TestVaultPasswordGeneratorHonorsControlsAndHidesOutput(
 	}
 }
 
+func TestVaultPasswordGeneratorRejectsImpossibleConfig(t *testing.T) {
+	store := &fakeItemStore{}
+	var current tea.Model = model{
+		loaded:    true,
+		vaultOpen: true,
+		itemStore: store,
+	}
+	current, _ = current.Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	values := []string{
+		"5",
+		"no",
+		"no",
+		"yes",
+		"yes",
+		"3",
+		"3",
+		"no",
+	}
+	for _, value := range values {
+		current, _ = current.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+		current, _ = current.Update(tea.KeyMsg{
+			Type:  tea.KeyRunes,
+			Runes: []rune(value),
+		})
+		current, _ = current.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	}
+	got := current.(model)
+	if got.passwordGenerator.generated != "" ||
+		!strings.Contains(
+			got.View(),
+			client.ErrInvalidPasswordGeneratorConfig.Error(),
+		) ||
+		len(store.saved) != 0 {
+		t.Fatalf("invalid generator config changed state:\n%s", got.View())
+	}
+}
+
 func TestLoginAcceptsTOTPURIWithoutExposingSecret(t *testing.T) {
 	record := itemRecord{
 		Login: client.LoginItem{
