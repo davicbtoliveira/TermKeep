@@ -57,6 +57,34 @@ func TestGlobalConfiguresPwnedPasswordsEndpoint(t *testing.T) {
 	}
 }
 
+func TestBitwardenImportRequestRequiresFormatAndFile(t *testing.T) {
+	for _, args := range [][]string{
+		nil,
+		{"bitwarden"},
+		{"unknown", "--file", "vault.json"},
+	} {
+		if _, err := parseBitwardenImportRequest(args); !errors.Is(
+			err,
+			errImportUsage,
+		) {
+			t.Fatalf("args %v: got %v", args, err)
+		}
+	}
+
+	request, err := parseBitwardenImportRequest([]string{
+		"bitwarden",
+		"--file",
+		"/tmp/bitwarden.json",
+		"--confirm",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.path != "/tmp/bitwarden.json" || !request.confirm {
+		t.Fatalf("import request: %+v", request)
+	}
+}
+
 func TestManualSyncUsesActiveSessionAndCache(t *testing.T) {
 	accountID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 	password := []byte("TermKeep#2026")
