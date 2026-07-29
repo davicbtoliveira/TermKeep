@@ -82,8 +82,18 @@ func run(args []string) int {
 func runBootstrap(cfg client.Config, args []string) int {
 	fs := flag.NewFlagSet("bootstrap", flag.ContinueOnError)
 	email := fs.String("email", "", "administrator email")
-	if err := fs.Parse(args); err != nil || *email == "" || fs.NArg() != 0 {
-		fmt.Fprintln(os.Stderr, "usage: termkeep bootstrap --email EMAIL")
+	recoveryStdout := fs.Bool(
+		"stdout-recovery-key",
+		false,
+		"write the one-time Recovery key to stdout",
+	)
+	if err := fs.Parse(args); err != nil || *email == "" ||
+		!*recoveryStdout || fs.NArg() != 0 {
+		fmt.Fprintln(
+			os.Stderr,
+			"usage: termkeep bootstrap --email EMAIL "+
+				"--stdout-recovery-key",
+		)
 		return exitUsageFailure
 	}
 	password, err := readMasterPassword("Master password: ")
@@ -125,8 +135,18 @@ func runRegister(cfg client.Config, args []string) int {
 	fs := flag.NewFlagSet("register", flag.ContinueOnError)
 	email := fs.String("email", "", "invited account email")
 	inviteToken := fs.String("invite-token", "", "single-use invitation token")
-	if err := fs.Parse(args); err != nil || *email == "" || *inviteToken == "" || fs.NArg() != 0 {
-		fmt.Fprintln(os.Stderr, "usage: termkeep register --email EMAIL --invite-token TOKEN")
+	recoveryStdout := fs.Bool(
+		"stdout-recovery-key",
+		false,
+		"write the one-time Recovery key to stdout",
+	)
+	if err := fs.Parse(args); err != nil || *email == "" ||
+		*inviteToken == "" || !*recoveryStdout || fs.NArg() != 0 {
+		fmt.Fprintln(
+			os.Stderr,
+			"usage: termkeep register --email EMAIL "+
+				"--invite-token TOKEN --stdout-recovery-key",
+		)
 		return exitUsageFailure
 	}
 	password, err := readMasterPassword("Master password: ")
