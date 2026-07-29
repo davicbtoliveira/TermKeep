@@ -593,10 +593,19 @@ func bitwardenSemanticKey(
 		if json.Unmarshal(item.Generic.Data, &data) != nil {
 			return [sha256.Size]byte{}, false
 		}
-		delete(data, "id")
-		delete(data, "name")
-		delete(data, "folderId")
-		delete(data, "favorite")
+		for _, field := range []string{
+			"id",
+			"name",
+			"folderId",
+			"favorite",
+			"organizationId",
+			"collectionIds",
+			"creationDate",
+			"revisionDate",
+			"deletedDate",
+		} {
+			delete(data, field)
+		}
 		semantic = struct {
 			Type       NativeItemType
 			Source     string
