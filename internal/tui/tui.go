@@ -47,6 +47,7 @@ type secretCopiedMsg struct {
 	field string
 	err   error
 }
+type breachCheckMsg client.PwnedPasswordResult
 type itemSavedMsg struct {
 	items   []itemRecord
 	pending int
@@ -220,6 +221,8 @@ type model struct {
 	clipboard           clipboard.Backend
 	copiedField         string
 	clipboardErr        error
+	breachLoading       bool
+	breachResult        *client.PwnedPasswordResult
 	showPasswordHistory bool
 	selectedHistory     int
 	revealHistory       bool
@@ -1219,6 +1222,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.generatorErr = nil
 				m.copiedField = ""
 				m.clipboardErr = nil
+				m.breachLoading = false
+				m.breachResult = nil
 				return m, nil
 			}
 		case "v":
@@ -1244,6 +1249,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.searchQuery = ""
 			m.copiedField = ""
 			m.clipboardErr = nil
+			m.breachLoading = false
+			m.breachResult = nil
 			return m, nil
 		case "j", "down":
 			if m.showSessions && m.selectedSession+1 < len(m.sessions) {
@@ -1411,6 +1418,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.copiedField = msg.field
 		}
+	case breachCheckMsg:
+		result := client.PwnedPasswordResult(msg)
+		m.breachLoading = false
+		m.breachResult = &result
 	case itemSavedMsg:
 		m.setRecords(msg.items)
 		m.showItem = false
@@ -1669,6 +1680,43 @@ func (m model) clipboardFeedback() string {
 	}
 }
 
+func checkPwnedPassword(
+	cfg client.Config,
+	password string,
+) tea.Cmd {
+	return func() tea.Msg {
+		return breachCheckMsg(client.CheckPwnedPassword(
+			context.Background(),
+			cfg,
+			password,
+		))
+	}
+}
+
+func (m model) breachFeedback() string {
+	switch {
+	case m.breachLoading:
+		return "\nPwned Passwords: checking…\n"
+	case m.breachResult == nil:
+		return ""
+	}
+	switch m.breachResult.Status {
+	case client.PwnedPasswordDisabled:
+		return "\nPwned Passwords: disabled\n"
+	case client.PwnedPasswordNotFound:
+		return "\nPwned Passwords: not found\n"
+	case client.PwnedPasswordFound:
+		return fmt.Sprintf(
+			"\nPwned Passwords: found — %d occurrences\n",
+			m.breachResult.Count,
+		)
+	case client.PwnedPasswordUnavailable:
+		return "\nPwned Passwords: unavailable\n"
+	default:
+		return "\nPwned Passwords: invalid response\n"
+	}
+}
+
 func defaultPasswordGeneratorForm() passwordGeneratorForm {
 	return passwordGeneratorForm{
 		values: [passwordGeneratorFieldCount]string{
@@ -1697,6 +1745,8 @@ func (m model) updatePasswordGenerator(
 			m.generatorErr = nil
 			m.copiedField = ""
 			m.clipboardErr = nil
+			m.breachLoading = false
+			m.breachResult = nil
 		case "p":
 			m.passwordGenerator.reveal =
 				!m.passwordGenerator.reveal
@@ -1706,6 +1756,15 @@ func (m model) updatePasswordGenerator(
 				"generated password",
 				m.passwordGenerator.generated,
 			)
+		case "b":
+			if !m.breachLoading {
+				m.breachLoading = true
+				m.breachResult = nil
+				return m, checkPwnedPassword(
+					m.cfg,
+					m.passwordGenerator.generated,
+				)
+			}
 		case "g":
 			password, err := generatePasswordFromForm(
 				m.passwordGenerator,
@@ -1719,6 +1778,8 @@ func (m model) updatePasswordGenerator(
 			m.generatorErr = nil
 			m.copiedField = ""
 			m.clipboardErr = nil
+			m.breachLoading = false
+			m.breachResult = nil
 		}
 		return m, nil
 	}
@@ -1730,6 +1791,8 @@ func (m model) updatePasswordGenerator(
 		m.showGenerator = false
 		m.passwordGenerator = passwordGeneratorForm{}
 		m.generatorErr = nil
+		m.breachLoading = false
+		m.breachResult = nil
 		return m, nil
 	case "ctrl+u":
 		m.passwordGenerator.values[m.passwordGenerator.field] = ""
@@ -1758,6 +1821,8 @@ func (m model) updatePasswordGenerator(
 		m.passwordGenerator.generated = password
 		m.passwordGenerator.reveal = false
 		m.generatorErr = nil
+		m.breachLoading = false
+		m.breachResult = nil
 	default:
 		if msg.Type == tea.KeyRunes {
 			m.passwordGenerator.values[m.passwordGenerator.field] +=
@@ -1850,8 +1915,10 @@ func (m model) passwordGeneratorView() string {
 			)
 		}
 		b.WriteString(m.clipboardFeedback())
+		b.WriteString(m.breachFeedback())
 		b.WriteString(
-			"\n[p] reveal/hide  [c] copy  [g] regenerate  " +
+			"\n[p] reveal/hide  [c] copy  [b] check Pwned  " +
+				"[g] regenerate  " +
 				"[esc] vault  [q] quit\n",
 		)
 		return b.String()
