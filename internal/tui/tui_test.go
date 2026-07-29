@@ -1064,6 +1064,61 @@ func TestGeneratedPasswordChecksPwnedOnlyAfterExplicitKey(t *testing.T) {
 	}
 }
 
+func TestLoginPasswordChecksPwnedOnlyAfterExplicitKey(t *testing.T) {
+	const password = "Login-Password-Sentinel#2026"
+	sum := sha1.Sum([]byte(password))
+	fullHash := strings.ToUpper(hex.EncodeToString(sum[:]))
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(
+		w http.ResponseWriter,
+		_ *http.Request,
+	) {
+		requests.Add(1)
+		_, _ = w.Write([]byte(fullHash[5:] + ":7\r\n"))
+	}))
+	defer server.Close()
+
+	initial := model{
+		cfg: client.Config{
+			PwnedPasswordsURL: server.URL + "/range",
+		},
+		loaded:    true,
+		vaultOpen: true,
+		items: []itemRecord{{
+			Login: client.LoginItem{
+				ItemID:   "11111111-1111-4111-8111-111111111111",
+				Name:     "Production database",
+				Password: password,
+			},
+			Revision: 1,
+		}},
+	}
+	updated, _ := initial.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_ = updated.(model).View()
+	if requests.Load() != 0 {
+		t.Fatal("opening Login triggered Pwned check")
+	}
+	updated, command := updated.(model).Update(tea.KeyMsg{
+		Type:  tea.KeyRunes,
+		Runes: []rune{'b'},
+	})
+	if command == nil ||
+		requests.Load() != 0 ||
+		!strings.Contains(updated.(model).View(), "checking") {
+		t.Fatalf("explicit check did not enter loading state:\n%s",
+			updated.(model).View())
+	}
+	updated, _ = updated.(model).Update(command())
+	if requests.Load() != 1 ||
+		!strings.Contains(
+			updated.(model).View(),
+			"found — 7 occurrences",
+		) {
+		t.Fatalf("Pwned result not rendered:\n%s",
+			updated.(model).View())
+	}
+}
+
 func TestLoginAcceptsTOTPURIWithoutExposingSecret(t *testing.T) {
 	record := itemRecord{
 		Login: client.LoginItem{
