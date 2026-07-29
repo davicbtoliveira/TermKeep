@@ -286,6 +286,43 @@ The index is rebuilt from decrypted Items after unlock and remains only in the
 TUI process memory. It is never written to the encrypted cache, synchronized,
 or sent to the Server.
 
+## Bitwarden import
+
+TermKeep accepts an unencrypted Bitwarden JSON export from an unlocked terminal
+session. In the TUI, press `i`, enter the local file path, and press `enter`.
+The Client displays Login, Secure Note, Folder, and Generic counts together
+with unmapped fields and validation errors before writing anything. Press `y`
+to confirm or `esc` to cancel.
+
+The equivalent scriptable preview is read-only:
+
+```sh
+termkeep import bitwarden --file ./bitwarden-export.json
+```
+
+After reviewing it, explicitly confirm:
+
+```sh
+termkeep import bitwarden --file ./bitwarden-export.json --confirm
+```
+
+The parser accepts at most 16 MiB and 10,000 combined Folders and Items.
+Supported Login fields, password history, Secure Notes, Folders, favorites,
+TOTP, and text custom fields become native records. Cards, identities, SSH
+keys, and unknown source types become encrypted Generic Items containing the
+complete original record. Unsupported fields on otherwise native Logins are
+listed in the preview.
+
+Semantic duplicates are retained. Their names receive `(Duplicada)`, then
+`(Duplicada) - 2`, `(Duplicada) - 3`, and so on; a matching title alone is not
+a duplicate. Confirmation first queues encrypted local mutations, so an
+unavailable Server leaves the import pending for later synchronization. The
+source file is opened only by the Client and is never uploaded.
+
+Bitwarden documents JSON exports as plaintext files that contain unencrypted
+Vault data. Delete the source securely as soon as it is no longer needed; see
+[Bitwarden's export guidance](https://bitwarden.com/help/export-your-data/).
+
 ## Offline use and synchronization
 
 A successful registration or online login authorizes an encrypted local

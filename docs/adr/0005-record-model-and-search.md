@@ -26,7 +26,9 @@ When a Login password changes, the Client prepends the replaced non-empty value 
 
 After unlock, the client builds an in-memory fuzzy index over item name, username, domain/URL, folder, and custom-field names. Passwords, TOTP secrets, and hidden values are never indexed. Notes enter search only through an explicit content-search action. No semantic search index is stored by the server.
 
-Bitwarden, 1Password, and generic CSV exports are parsed locally. Import previews never merge items automatically. Semantically identical records are retained and renamed with `(Duplicada)`, then `(Duplicada) - 2`, `(Duplicada) - 3`, and so on. Same-name records with different content are not duplicates.
+Bitwarden, 1Password, and generic CSV exports are parsed locally. The Bitwarden path accepts an unencrypted JSON export bounded to 16 MiB and 10,000 combined records. It maps supported Login fields, password history, Secure Notes, Folders, favorites, TOTP, and text custom fields to native records. Unsupported item types retain their complete original JSON inside the encrypted Generic Item schema; native Login fields that cannot be represented are listed in the preview.
+
+Import previews never mutate the cache or contact the Server. Confirmation encrypts every normalized record through the terminal session agent and queues ordinary offline-first mutations before optional synchronization. Cancellation leaves both cache and Server unchanged. Semantically identical records are retained and renamed with `(Duplicada)`, then `(Duplicada) - 2`, `(Duplicada) - 3`, and so on. Same-name records with different content are not duplicates.
 
 TOTP accepts `otpauth://totp/...` URIs or manual Base32 secret, issuer, account, algorithm, digits, and period parameters; QR decoding is deferred. SHA-1, SHA-256, and SHA-512 are supported with 6- or 8-digit codes. Manual algorithm, digits, and period default to SHA-1, 6, and 30 seconds. URI labels and supported parameters are retained in the encrypted Login payload, while malformed or unsupported input is rejected before a new revision is queued.
 
