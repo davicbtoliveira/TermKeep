@@ -2056,6 +2056,9 @@ func (m model) updateTOTPForm(
 		m.showTOTPForm = false
 		m.showItem = true
 		m.itemFormErr = nil
+		if m.totpForm.record.Login.TOTP != nil {
+			return m, scheduleTOTPRefresh()
+		}
 		return m, nil
 	case "ctrl+u":
 		m.totpForm.values[m.totpForm.field] = ""
