@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -63,6 +64,7 @@ var itemOperationTimeout = 10 * time.Second
 
 const loginFormFieldCount = 6
 const secureNoteFormFieldCount = 2
+const totpFormFieldCount = 7
 const unfiledFolderFilter = "__termkeep_no_folder__"
 
 var loginFormLabels = [loginFormFieldCount]string{
@@ -74,6 +76,16 @@ var loginFormLabels = [loginFormFieldCount]string{
 	"Custom fields (name=value, comma-separated)",
 }
 
+var totpFormLabels = [totpFormFieldCount]string{
+	"otpauth URI (optional)",
+	"Secret (manual)",
+	"Issuer",
+	"Account",
+	"Algorithm (SHA1/SHA256/SHA512)",
+	"Digits (6/8)",
+	"Period (seconds)",
+}
+
 type loginForm struct {
 	itemID            string
 	revision          uint64
@@ -82,10 +94,17 @@ type loginForm struct {
 	favorite          bool
 	previousPassword  string
 	passwordHistory   []client.PasswordHistoryEntry
+	totp              *client.TOTPConfig
 	field             int
 	values            [loginFormFieldCount]string
 	editing           bool
 	manualMerge       bool
+}
+
+type totpForm struct {
+	record itemRecord
+	field  int
+	values [totpFormFieldCount]string
 }
 
 type secureNoteForm struct {
@@ -188,6 +207,8 @@ type model struct {
 	itemStore           itemStore
 	showLoginForm       bool
 	loginForm           loginForm
+	showTOTPForm        bool
+	totpForm            totpForm
 	showNoteForm        bool
 	noteForm            secureNoteForm
 	itemFormErr         error
@@ -763,6 +784,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, schedulePeriodicSync()
 	case tea.KeyMsg:
+		if m.showTOTPForm {
+			return m.updateTOTPForm(msg)
+		}
 		if m.showLoginForm {
 			return m.updateLoginForm(msg)
 		}
@@ -1057,6 +1081,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case "t":
+			record, selected := m.selectedItemRecord()
+			if m.showItem && selected &&
+				len(record.ConflictVersions) == 0 &&
+				record.SecureNote == nil {
+				m.showItem = false
+				m.showTOTPForm = true
+				m.totpForm = formForTOTP(record)
+				m.itemFormErr = nil
+				m.itemSaving = false
+				return m, nil
+			}
 			if m.vaultOpen && m.itemStore != nil &&
 				!m.showSessions && !m.showActivity &&
 				!m.showItem && !m.showFolders &&
@@ -1134,6 +1169,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showFolderConflict = false
 			m.showMoveFolder = false
 			m.showFolderForm = false
+			m.showTOTPForm = false
 			m.showPasswordHistory = false
 			m.historyClearConfirm = false
 			m.revealPassword = false
@@ -1278,6 +1314,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.setRecords([]itemRecord(msg))
 		m.selectedConflict = 0
 		m.showLoginForm = false
+		m.showTOTPForm = false
 		m.showNoteForm = false
 		m.showFolderForm = false
 		m.itemFormErr = nil
@@ -1347,6 +1384,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() string {
+	if m.showTOTPForm {
+		return m.totpFormView()
+	}
 	if m.showLoginForm {
 		return m.loginFormView()
 	}
@@ -1937,6 +1977,7 @@ func recordFromLoginForm(
 		URLs:         urls,
 		Notes:        form.values[4],
 		CustomFields: customFields,
+		TOTP:         cloneTOTPConfig(form.totp),
 	}, form.values[2], changedAt)
 	return itemRecord{
 		Login:    login,
@@ -1966,6 +2007,7 @@ func formForLogin(record itemRecord) loginForm {
 			[]client.PasswordHistoryEntry(nil),
 			record.Login.PasswordHistory...,
 		),
+		totp:    cloneTOTPConfig(record.Login.TOTP),
 		editing: true,
 		values: [loginFormFieldCount]string{
 			record.Login.Name,
@@ -1976,6 +2018,170 @@ func formForLogin(record itemRecord) loginForm {
 			strings.Join(customFields, ", "),
 		},
 	}
+}
+
+func (m model) updateTOTPForm(
+	msg tea.KeyMsg,
+) (tea.Model, tea.Cmd) {
+	if m.itemSaving {
+		if msg.String() == "ctrl+c" {
+			return m, tea.Quit
+		}
+		return m, nil
+	}
+	switch msg.String() {
+	case "ctrl+c", "q":
+		return m, tea.Quit
+	case "esc":
+		m.showTOTPForm = false
+		m.showItem = true
+		m.itemFormErr = nil
+		return m, nil
+	case "ctrl+u":
+		m.totpForm.values[m.totpForm.field] = ""
+	case "backspace":
+		value := []rune(m.totpForm.values[m.totpForm.field])
+		if len(value) > 0 {
+			m.totpForm.values[m.totpForm.field] =
+				string(value[:len(value)-1])
+		}
+	case "enter":
+		if m.totpForm.field+1 < totpFormFieldCount {
+			m.totpForm.field++
+			m.itemFormErr = nil
+			return m, nil
+		}
+		record, err := recordFromTOTPForm(m.totpForm)
+		if err != nil {
+			m.itemFormErr = err
+			return m, nil
+		}
+		m.itemSaving = true
+		m.itemFormErr = nil
+		return m, saveItem(m.itemStore, record)
+	default:
+		if msg.Type == tea.KeyRunes {
+			m.totpForm.values[m.totpForm.field] += string(msg.Runes)
+		}
+	}
+	return m, nil
+}
+
+func recordFromTOTPForm(form totpForm) (itemRecord, error) {
+	values := form.values
+	var config *client.TOTPConfig
+	if rawURI := strings.TrimSpace(values[0]); rawURI != "" {
+		parsed, err := client.ParseTOTPURI(rawURI)
+		if err != nil {
+			return itemRecord{}, err
+		}
+		config = &parsed
+	} else {
+		allEmpty := true
+		for _, value := range values[1:] {
+			if value != "" {
+				allEmpty = false
+				break
+			}
+		}
+		if !allEmpty {
+			digits, err := optionalTOTPInt(values[5])
+			if err != nil {
+				return itemRecord{}, err
+			}
+			period, err := optionalTOTPInt(values[6])
+			if err != nil {
+				return itemRecord{}, err
+			}
+			parsed, err := client.NewTOTPConfig(
+				values[1],
+				values[2],
+				values[3],
+				strings.TrimSpace(values[4]),
+				digits,
+				period,
+			)
+			if err != nil {
+				return itemRecord{}, err
+			}
+			config = &parsed
+		}
+	}
+
+	record := form.record
+	record.Login.TOTP = config
+	record.Revision++
+	if record.RevisionID != "" {
+		record.ParentRevisionIDs = []string{record.RevisionID}
+	} else {
+		record.ParentRevisionIDs = nil
+	}
+	record.RevisionID = ""
+	record.ConflictVersions = nil
+	return record, nil
+}
+
+func optionalTOTPInt(value string) (int, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, client.ErrInvalidTOTP
+	}
+	return parsed, nil
+}
+
+func formForTOTP(record itemRecord) totpForm {
+	form := totpForm{record: record}
+	if record.Login.TOTP == nil {
+		return form
+	}
+	config := record.Login.TOTP
+	form.values[1] = config.Secret
+	form.values[2] = config.Issuer
+	form.values[3] = config.Account
+	form.values[4] = string(config.Algorithm)
+	form.values[5] = strconv.Itoa(config.Digits)
+	form.values[6] = strconv.Itoa(config.Period)
+	return form
+}
+
+func cloneTOTPConfig(config *client.TOTPConfig) *client.TOTPConfig {
+	if config == nil {
+		return nil
+	}
+	cloned := *config
+	return &cloned
+}
+
+func (m model) totpFormView() string {
+	var b strings.Builder
+	b.WriteString("TermKeep — TOTP Setup\n\n")
+	for index, label := range totpFormLabels {
+		cursor := " "
+		if index == m.totpForm.field {
+			cursor = ">"
+		}
+		value := m.totpForm.values[index]
+		if (index == 0 || index == 1) && value != "" {
+			value = "••••••••"
+		}
+		fmt.Fprintf(&b, "%s %s: %s\n", cursor, label, value)
+	}
+	if m.itemFormErr != nil {
+		fmt.Fprintf(&b, "\nError: %s\n", m.itemFormErr)
+	}
+	if m.itemSaving {
+		b.WriteString("\nSaving…  [ctrl+c] quit\n")
+	} else {
+		b.WriteString(
+			"\n[enter] next/save  [ctrl+u] clear field  " +
+				"[esc] cancel  [ctrl+c] quit\n",
+		)
+	}
+	return b.String()
 }
 
 func formForSecureNote(record itemRecord) secureNoteForm {
@@ -2392,6 +2598,26 @@ func (m model) itemView() string {
 		password = login.Password
 	}
 	fmt.Fprintf(&b, "Password: %s\n", password)
+	if login.TOTP != nil {
+		now := m.currentTime()
+		code, err := client.GenerateTOTP(*login.TOTP, now)
+		if err != nil {
+			b.WriteString("TOTP: unavailable\n")
+		} else {
+			remaining := code.ExpiresAt.Unix() - now.Unix()
+			if remaining < 0 {
+				remaining = 0
+			}
+			fmt.Fprintf(
+				&b,
+				"TOTP: %s (expires in %ds)\n",
+				code.Value,
+				remaining,
+			)
+		}
+	} else {
+		b.WriteString("TOTP: not configured\n")
+	}
 	b.WriteString("URLs:\n")
 	for _, value := range login.URLs {
 		fmt.Fprintf(&b, "  - %s\n", value)
@@ -2410,7 +2636,7 @@ func (m model) itemView() string {
 	b.WriteString(m.clipboardFeedback())
 	b.WriteString(
 		"\n[p] reveal/hide password  [c] copy password  [e] edit  " +
-			"[h] password history  " +
+			"[h] password history  [t] configure TOTP  " +
 			"[f] favorite/unfavorite  [o] move  [d] delete  " +
 			"[v] vault  [q] quit\n",
 	)
