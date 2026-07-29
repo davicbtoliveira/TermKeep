@@ -97,6 +97,22 @@ func NewSearchIndex(items []NativeItem, folders []FolderItem) SearchIndex {
 				entry.noteContent = item.SecureNote.Content
 				index.entries = append(index.entries, entry)
 			}
+		case NativeItemTypeGeneric:
+			if item.Generic != nil {
+				entry := searchEntry{
+					itemID: item.Generic.ItemID,
+					title:  item.Generic.Title,
+				}
+				entry.addField(
+					item.Generic.Title,
+					searchTitleWeight,
+				)
+				entry.addField(
+					folderNames[item.Generic.FolderID],
+					searchFolderWeight,
+				)
+				index.entries = append(index.entries, entry)
+			}
 		}
 	}
 	return index

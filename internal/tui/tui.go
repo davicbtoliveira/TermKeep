@@ -754,6 +754,10 @@ func newSearchIndex(
 			continue
 		}
 		if record.Generic != nil {
+			nativeItems = append(nativeItems, client.NativeItem{
+				Type:    client.NativeItemTypeGeneric,
+				Generic: record.Generic,
+			})
 			continue
 		}
 		nativeItems = append(nativeItems, client.NativeItem{
