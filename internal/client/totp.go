@@ -10,6 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"hash"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -36,6 +38,115 @@ type TOTPConfig struct {
 type TOTPCode struct {
 	Value     string
 	ExpiresAt time.Time
+}
+
+func ParseTOTPURI(raw string) (TOTPConfig, error) {
+	parsed, err := url.Parse(raw)
+	if err != nil ||
+		!strings.EqualFold(parsed.Scheme, "otpauth") ||
+		!strings.EqualFold(parsed.Host, "totp") ||
+		parsed.User != nil ||
+		parsed.Fragment != "" {
+		return TOTPConfig{}, ErrInvalidTOTP
+	}
+	label := strings.TrimPrefix(parsed.Path, "/")
+	if label == "" || strings.Contains(label, "/") {
+		return TOTPConfig{}, ErrInvalidTOTP
+	}
+
+	account := label
+	labelIssuer := ""
+	if issuer, remainder, found := strings.Cut(label, ":"); found {
+		if issuer == "" || remainder == "" {
+			return TOTPConfig{}, ErrInvalidTOTP
+		}
+		labelIssuer = issuer
+		account = remainder
+	}
+
+	query := parsed.Query()
+	secret, err := totpQueryValue(query, "secret")
+	if err != nil {
+		return TOTPConfig{}, err
+	}
+	issuer, err := totpQueryValue(query, "issuer")
+	if err != nil {
+		return TOTPConfig{}, err
+	}
+	if issuer == "" {
+		issuer = labelIssuer
+	} else if labelIssuer != "" && issuer != labelIssuer {
+		return TOTPConfig{}, ErrInvalidTOTP
+	}
+	algorithm, err := totpQueryValue(query, "algorithm")
+	if err != nil {
+		return TOTPConfig{}, err
+	}
+	digits, err := totpQueryInt(query, "digits")
+	if err != nil {
+		return TOTPConfig{}, err
+	}
+	period, err := totpQueryInt(query, "period")
+	if err != nil {
+		return TOTPConfig{}, err
+	}
+	return NewTOTPConfig(
+		secret,
+		issuer,
+		account,
+		algorithm,
+		digits,
+		period,
+	)
+}
+
+func NewTOTPConfig(
+	secret string,
+	issuer string,
+	account string,
+	algorithm string,
+	digits int,
+	period int,
+) (TOTPConfig, error) {
+	if algorithm == "" {
+		algorithm = string(TOTPAlgorithmSHA1)
+	}
+	if digits == 0 {
+		digits = 6
+	}
+	if period == 0 {
+		period = 30
+	}
+	config := TOTPConfig{
+		Secret:    secret,
+		Issuer:    issuer,
+		Account:   account,
+		Algorithm: TOTPAlgorithm(strings.ToUpper(algorithm)),
+		Digits:    digits,
+		Period:    period,
+	}
+	if err := ValidateTOTPConfig(config); err != nil {
+		return TOTPConfig{}, err
+	}
+	return config, nil
+}
+
+func ValidateTOTPConfig(config TOTPConfig) error {
+	secret, err := decodeTOTPSecret(config.Secret)
+	if err != nil {
+		return ErrInvalidTOTP
+	}
+	clearBytes(secret)
+	if _, err := totpHash(config.Algorithm); err != nil {
+		return ErrInvalidTOTP
+	}
+	if _, err := totpDivisor(config.Digits); err != nil {
+		return ErrInvalidTOTP
+	}
+	if config.Period <= 0 {
+		return ErrInvalidTOTP
+	}
+	return nil
 }
 
 func GenerateHOTP(
@@ -71,7 +182,7 @@ func GenerateHOTP(
 }
 
 func GenerateTOTP(config TOTPConfig, at time.Time) (TOTPCode, error) {
-	if config.Period <= 0 || at.Unix() < 0 {
+	if ValidateTOTPConfig(config) != nil || at.Unix() < 0 {
 		return TOTPCode{}, ErrInvalidTOTP
 	}
 	counter := uint64(at.Unix() / int64(config.Period))
@@ -132,4 +243,30 @@ func totpDivisor(digits int) (uint32, error) {
 	default:
 		return 0, ErrInvalidTOTP
 	}
+}
+
+func totpQueryValue(
+	query url.Values,
+	key string,
+) (string, error) {
+	values, found := query[key]
+	if !found {
+		return "", nil
+	}
+	if len(values) != 1 {
+		return "", ErrInvalidTOTP
+	}
+	return values[0], nil
+}
+
+func totpQueryInt(query url.Values, key string) (int, error) {
+	value, err := totpQueryValue(query, key)
+	if err != nil || value == "" {
+		return 0, err
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, ErrInvalidTOTP
+	}
+	return parsed, nil
 }
