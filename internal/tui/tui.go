@@ -2262,6 +2262,16 @@ func (m model) updatePasswordHistory(
 			m.revealHistory = !m.revealHistory
 			m.historyClearConfirm = false
 		}
+	case "c":
+		if m.selectedHistory < len(history) {
+			entry := history[m.selectedHistory]
+			return m, copySecret(
+				m.clipboard,
+				"historical password from "+
+					entry.ChangedAt.UTC().Format(time.RFC3339),
+				entry.Password,
+			)
+		}
 	case "x":
 		if len(history) == 0 {
 			return m, nil
@@ -2326,12 +2336,14 @@ func (m model) passwordHistoryView() string {
 	if m.itemFormErr != nil {
 		fmt.Fprintf(&b, "\nError: %s\n", m.itemFormErr)
 	}
+	b.WriteString(m.clipboardFeedback())
 	if m.itemSaving {
 		b.WriteString("\nSaving…  [ctrl+c] quit\n")
 		return b.String()
 	}
 	b.WriteString(
-		"\n[j/k] select  [p] reveal/hide selected  [x] clear all  " +
+		"\n[j/k] select  [p] reveal/hide selected  " +
+			"[c] copy selected  [x] clear all  " +
 			"[esc] Login  [v] vault  [q] quit\n",
 	)
 	return b.String()
