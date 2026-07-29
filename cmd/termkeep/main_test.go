@@ -188,6 +188,49 @@ func TestPasswordGeneratorRequestRequiresExplicitValidOutput(t *testing.T) {
 	}
 }
 
+func TestPasswordGeneratorCommandWritesConstrainedPassword(t *testing.T) {
+	config := client.PasswordGeneratorConfig{
+		Length:           48,
+		Uppercase:        true,
+		Lowercase:        true,
+		Digits:           true,
+		MinimumDigits:    8,
+		ExcludeAmbiguous: true,
+	}
+	var stdout bytes.Buffer
+	if err := outputGeneratedPassword(config, &stdout); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(stdout.String(), "\n") {
+		t.Fatalf("password output lacks newline: %q", stdout.String())
+	}
+	password := strings.TrimSuffix(stdout.String(), "\n")
+	if len(password) != config.Length {
+		t.Fatalf("length: want %d, got %d", config.Length, len(password))
+	}
+	var digits int
+	allowed := client.PasswordUppercaseCharacters +
+		client.PasswordLowercaseCharacters +
+		client.PasswordDigits
+	for _, character := range password {
+		if !strings.ContainsRune(allowed, character) {
+			t.Fatalf("disallowed output character %q", character)
+		}
+		if strings.ContainsRune(client.PasswordDigits, character) {
+			digits++
+		}
+	}
+	if digits < config.MinimumDigits {
+		t.Fatalf("minimum digits not met: %q", password)
+	}
+	if strings.ContainsAny(
+		password,
+		client.PasswordAmbiguousCharacters,
+	) {
+		t.Fatalf("ambiguous character in output: %q", password)
+	}
+}
+
 func TestSecretCommandWritesRequestedPassword(t *testing.T) {
 	accountID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 	itemID := "11111111-1111-4111-8111-111111111111"
