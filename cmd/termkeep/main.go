@@ -504,6 +504,109 @@ func parseBitwardenImportRequest(
 	}, nil
 }
 
+func runBitwardenImportAt(
+	ctx context.Context,
+	cfg client.Config,
+	socketPath string,
+	request bitwardenImportRequest,
+	stdout io.Writer,
+	stderr io.Writer,
+) error {
+	info, err := session.Status(ctx, socketPath)
+	if err != nil {
+		return errors.New("read unlocked session failed")
+	}
+	cache, err := client.OpenCache(cfg, info.Email)
+	if err != nil {
+		return errors.New("open encrypted cache failed")
+	}
+	existing, err := cachedNativeItems(ctx, cache, socketPath)
+	if err != nil {
+		return err
+	}
+	file, err := os.Open(request.path)
+	if err != nil {
+		return errors.New("open Bitwarden export failed")
+	}
+	defer file.Close()
+	preview, err := client.PreviewBitwardenImport(file, existing)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(
+		stderr,
+		"Warning: Bitwarden export probably contains plaintext secrets; "+
+			"delete the original file after import.",
+	)
+	writeBitwardenImportPreview(stdout, preview)
+	if !request.confirm {
+		fmt.Fprintln(stdout, "Preview only; rerun with --confirm to import.")
+		return nil
+	}
+	return errors.New("confirmed Bitwarden import unavailable")
+}
+
+func cachedNativeItems(
+	ctx context.Context,
+	cache *client.Cache,
+	socketPath string,
+) ([]client.NativeItem, error) {
+	groups, err := cache.ItemHeads()
+	if err != nil {
+		return nil, errors.New("read encrypted cache failed")
+	}
+	var items []client.NativeItem
+	for _, group := range groups {
+		for _, revision := range group.Revisions {
+			if revision.Deleted || revision.Purged {
+				continue
+			}
+			opened, err := session.OpenNativeItem(
+				ctx,
+				socketPath,
+				revision,
+			)
+			if err != nil {
+				return nil, errors.New("decrypt cached Item failed")
+			}
+			items = append(items, opened)
+		}
+	}
+	return items, nil
+}
+
+func writeBitwardenImportPreview(
+	writer io.Writer,
+	preview client.BitwardenImportPreview,
+) {
+	fmt.Fprintln(writer, "Bitwarden import preview")
+	fmt.Fprintf(writer, "Logins: %d\n", preview.Counts.Logins)
+	fmt.Fprintf(writer, "Secure Notes: %d\n", preview.Counts.SecureNotes)
+	fmt.Fprintf(writer, "Folders: %d\n", preview.Counts.Folders)
+	fmt.Fprintf(writer, "Generic: %d\n", preview.Counts.Generic)
+	fmt.Fprintf(writer, "Unmapped fields: %d\n",
+		len(preview.UnmappedFields))
+	fmt.Fprintf(writer, "Errors: %d\n", len(preview.Errors))
+	for _, issue := range preview.UnmappedFields {
+		fmt.Fprintf(
+			writer,
+			"Unmapped Item %d %s: %s\n",
+			issue.Item,
+			issue.Field,
+			issue.Message,
+		)
+	}
+	for _, issue := range preview.Errors {
+		fmt.Fprintf(
+			writer,
+			"Error Item %d %s: %s\n",
+			issue.Item,
+			issue.Field,
+			issue.Message,
+		)
+	}
+}
+
 func outputGeneratedPassword(
 	config client.PasswordGeneratorConfig,
 	stdout io.Writer,
