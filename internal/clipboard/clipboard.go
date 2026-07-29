@@ -2,15 +2,22 @@ package clipboard
 
 import (
 	"context"
+	"errors"
 	"time"
 )
 
 const ClearDelay = 30 * time.Second
 
+var ErrUnavailable = errors.New("clipboard unavailable")
+
 type Backend interface {
 	Write(ctx context.Context, value string) error
 	Read(ctx context.Context) (string, error)
 	Clear(ctx context.Context) error
+}
+
+func Open() (Backend, error) {
+	return nil, ErrUnavailable
 }
 
 func Copy(
