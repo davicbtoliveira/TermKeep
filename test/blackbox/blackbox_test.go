@@ -1067,6 +1067,24 @@ func (s *stack) testEncryptedLoginRoundTrip(t *testing.T) {
 	if len(items) != 1 {
 		t.Fatalf("opaque API items: want 1, got %d", len(items))
 	}
+	secretCommand := fmt.Sprintf(
+		"%q --server %q --ca-cert %q secret --item %q "+
+			"--field password",
+		s.binary,
+		s.serverURL,
+		filepath.Join(s.certsDir, "ca.pem"),
+		items[0].ItemID,
+	)
+	shell.clear()
+	write(t, shell.ptmx, secretCommand+"\n")
+	_, output = shell.waitFor(10*time.Second, "usage: termkeep secret")
+	if strings.Contains(output, loginPass) {
+		t.Fatalf("secret command without --stdout exposed password:\n%s", output)
+	}
+	shell.clear()
+	write(t, shell.ptmx, secretCommand+" --stdout\n")
+	shell.waitFor(10*time.Second, loginPass)
+
 	apiBody, err := json.Marshal(items)
 	if err != nil {
 		t.Fatal(err)
