@@ -53,3 +53,46 @@ func TestSearchIndexRanksPartialTitleMatchesDeterministically(t *testing.T) {
 		t.Fatalf("ranked results:\nwant: %v\ngot:  %v", want, got)
 	}
 }
+
+func TestSearchIndexFindsItemsByNonSecretMetadata(t *testing.T) {
+	const folderID = "ffffffff-ffff-4fff-8fff-ffffffffffff"
+	index := NewSearchIndex(
+		[]NativeItem{{
+			Type: NativeItemTypeLogin,
+			Login: &LoginItem{
+				ItemID:   "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+				Name:     "Database credential",
+				Username: "operator@example.com",
+				FolderID: folderID,
+				URLs: []string{
+					"https://db.production.example.com/admin",
+				},
+				CustomFields: []CustomField{{
+					Name:  "Emergency contact",
+					Value: "hidden-custom-value",
+				}},
+			},
+		}},
+		[]FolderItem{{
+			ItemID: folderID,
+			Name:   "Infrastructure",
+		}},
+	)
+
+	for _, query := range []string{
+		"operat",
+		"prod.example",
+		"/admin",
+		"infras",
+		"emcont",
+	} {
+		t.Run(query, func(t *testing.T) {
+			results := index.Search(query, SearchModeMetadata)
+			if len(results) != 1 ||
+				results[0].ItemID !=
+					"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" {
+				t.Fatalf("results for %q: %+v", query, results)
+			}
+		})
+	}
+}
