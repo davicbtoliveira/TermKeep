@@ -900,6 +900,81 @@ func TestCreateLoginCapturesAllNativeFields(t *testing.T) {
 	}
 }
 
+func TestVaultPasswordGeneratorHonorsControlsAndHidesOutput(
+	t *testing.T,
+) {
+	board := &fakeClipboard{}
+	var current tea.Model = model{
+		loaded:    true,
+		vaultOpen: true,
+		itemStore: &fakeItemStore{},
+		clipboard: board,
+	}
+	current, _ = current.Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	if !strings.Contains(current.(model).View(), "Password Generator") {
+		t.Fatalf("generator key did not open form:\n%s", current.(model).View())
+	}
+
+	values := []string{
+		"32",
+		"yes",
+		"no",
+		"yes",
+		"yes",
+		"5",
+		"4",
+		"yes",
+	}
+	for _, value := range values {
+		current, _ = current.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+		current, _ = current.Update(tea.KeyMsg{
+			Type:  tea.KeyRunes,
+			Runes: []rune(value),
+		})
+		current, _ = current.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	}
+	got := current.(model)
+	password := got.passwordGenerator.generated
+	if len(password) != 32 {
+		t.Fatalf("generated length: want 32, got %d", len(password))
+	}
+	if strings.Contains(got.View(), password) {
+		t.Fatalf("generator exposed password before reveal:\n%s", got.View())
+	}
+	if strings.ContainsAny(
+		password,
+		client.PasswordLowercaseCharacters+
+			client.PasswordAmbiguousCharacters,
+	) {
+		t.Fatalf("generated password violates selected sets: %q", password)
+	}
+	if countCharacters(password, client.PasswordDigits) < 5 ||
+		countCharacters(
+			password,
+			client.PasswordSpecialCharacters,
+		) < 4 {
+		t.Fatalf("generated password misses minimums: %q", password)
+	}
+
+	current, _ = current.Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	if !strings.Contains(current.(model).View(), password) {
+		t.Fatalf("reveal did not show generated password:\n%s",
+			current.(model).View())
+	}
+	current, command := current.Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	if command == nil {
+		t.Fatal("copy did not return clipboard command")
+	}
+	current, _ = current.Update(command())
+	if board.current() != password {
+		t.Fatalf("clipboard: want generated password, got %q",
+			board.current())
+	}
+}
+
 func TestLoginAcceptsTOTPURIWithoutExposingSecret(t *testing.T) {
 	record := itemRecord{
 		Login: client.LoginItem{
@@ -2787,6 +2862,16 @@ func TestFolderRenameConflictRequiresExplicitResolution(t *testing.T) {
 		) {
 		t.Fatalf("Folder Conflict resolution: %+v", store.saved)
 	}
+}
+
+func countCharacters(value string, characters string) int {
+	var count int
+	for _, character := range value {
+		if strings.ContainsRune(characters, character) {
+			count++
+		}
+	}
+	return count
 }
 
 type fakeItemStore struct {
