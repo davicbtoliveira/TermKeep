@@ -54,3 +54,87 @@ func TestPreviewBitwardenImportNormalizesLogin(t *testing.T) {
 		t.Fatalf("normalized Login: %+v", login)
 	}
 }
+
+func TestPreviewBitwardenImportPreservesNativeItems(t *testing.T) {
+	export := `{
+		"encrypted": false,
+		"folders": [{
+			"id": "source-folder-id",
+			"name": "Infrastructure"
+		}],
+		"items": [{
+			"id": "source-login-id",
+			"folderId": "source-folder-id",
+			"type": 1,
+			"name": "Production database",
+			"notes": "Primary credentials",
+			"favorite": true,
+			"fields": [{
+				"name": "region",
+				"value": "us-east-1",
+				"type": 0
+			}],
+			"login": {
+				"username": "operator@example.com",
+				"password": "Password-Sentinel",
+				"uris": [{"uri": "https://db.example.com"}],
+				"totp": "otpauth://totp/Example:operator@example.com?secret=JBSWY3DPEHPK3PXP&issuer=Example&algorithm=SHA256&digits=8&period=45"
+			}
+		}, {
+			"id": "source-note-id",
+			"folderId": "source-folder-id",
+			"type": 2,
+			"name": "Recovery procedure",
+			"notes": "Sensitive recovery steps",
+			"favorite": true,
+			"secureNote": {"type": 0}
+		}]
+	}`
+
+	preview, err := PreviewBitwardenImport(
+		strings.NewReader(export),
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Counts != (BitwardenImportCounts{
+		Logins:      1,
+		SecureNotes: 1,
+		Folders:     1,
+	}) || len(preview.Items) != 3 || len(preview.Errors) != 0 {
+		t.Fatalf("preview summary: %+v", preview)
+	}
+	folder := preview.Items[0].Folder
+	login := preview.Items[1].Login
+	note := preview.Items[2].SecureNote
+	if folder == nil || folder.ItemID == "" ||
+		folder.Name != "Infrastructure" {
+		t.Fatalf("normalized Folder: %+v", folder)
+	}
+	wantTOTP := &TOTPConfig{
+		Secret:    "JBSWY3DPEHPK3PXP",
+		Issuer:    "Example",
+		Account:   "operator@example.com",
+		Algorithm: TOTPAlgorithmSHA256,
+		Digits:    8,
+		Period:    45,
+	}
+	if login == nil ||
+		login.FolderID != folder.ItemID ||
+		!reflect.DeepEqual(login.CustomFields, []CustomField{{
+			Name:  "region",
+			Value: "us-east-1",
+		}}) ||
+		!reflect.DeepEqual(login.TOTP, wantTOTP) {
+		t.Fatalf("normalized Login fields: %+v", login)
+	}
+	if note == nil ||
+		note.ItemID == "" ||
+		note.Title != "Recovery procedure" ||
+		note.Content != "Sensitive recovery steps" ||
+		note.FolderID != folder.ItemID ||
+		!note.Favorite {
+		t.Fatalf("normalized Secure Note: %+v", note)
+	}
+}
