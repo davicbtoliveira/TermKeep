@@ -130,7 +130,36 @@ func PreviewBitwardenImport(
 		}
 	}
 	folderIDs := make(map[string]string, len(source.Folders))
-	for _, folder := range source.Folders {
+	for index, folder := range source.Folders {
+		folder.ID = strings.TrimSpace(folder.ID)
+		folder.Name = strings.TrimSpace(folder.Name)
+		if folder.ID == "" || folder.Name == "" {
+			field := fmt.Sprintf("folders[%d].id", index)
+			if folder.ID != "" {
+				field = fmt.Sprintf("folders[%d].name", index)
+			}
+			preview.Errors = append(
+				preview.Errors,
+				BitwardenImportIssue{
+					Field:   field,
+					Message: "Folder ID and name are required",
+				},
+			)
+			continue
+		}
+		if _, exists := folderIDs[folder.ID]; exists {
+			preview.Errors = append(
+				preview.Errors,
+				BitwardenImportIssue{
+					Field: fmt.Sprintf(
+						"folders[%d].id",
+						index,
+					),
+					Message: "duplicate Bitwarden Folder ID",
+				},
+			)
+			continue
+		}
 		itemID, err := NewItemID()
 		if err != nil {
 			return BitwardenImportPreview{}, err
@@ -154,6 +183,18 @@ func PreviewBitwardenImport(
 				BitwardenImportIssue{
 					Item:    index + 1,
 					Message: "invalid Bitwarden Item",
+				},
+			)
+			continue
+		}
+		item.Name = strings.TrimSpace(item.Name)
+		if item.Name == "" {
+			preview.Errors = append(
+				preview.Errors,
+				BitwardenImportIssue{
+					Item:    index + 1,
+					Field:   "name",
+					Message: "Item name is required",
 				},
 			)
 			continue
@@ -192,7 +233,7 @@ func PreviewBitwardenImport(
 		if item.Type == 2 {
 			note := SecureNoteItem{
 				ItemID:   itemID,
-				Title:    strings.TrimSpace(item.Name),
+				Title:    item.Name,
 				Content:  item.Notes,
 				FolderID: folderID,
 				Favorite: item.Favorite,
@@ -209,7 +250,7 @@ func PreviewBitwardenImport(
 		if item.Type != 1 {
 			generic := GenericItem{
 				ItemID:     itemID,
-				Title:      strings.TrimSpace(item.Name),
+				Title:      item.Name,
 				Source:     "bitwarden",
 				SourceType: bitwardenSourceType(item.Type),
 				FolderID:   folderID,
@@ -265,7 +306,7 @@ func PreviewBitwardenImport(
 		}
 		login := LoginItem{
 			ItemID:       itemID,
-			Name:         strings.TrimSpace(item.Name),
+			Name:         item.Name,
 			Username:     strings.TrimSpace(item.Login.Username),
 			Password:     item.Login.Password,
 			FolderID:     folderID,
