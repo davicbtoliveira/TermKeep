@@ -17,6 +17,7 @@ import (
 const loginItemSchemaVersion = 1
 const secureNoteItemSchemaVersion = 1
 const folderItemSchemaVersion = 1
+const genericItemSchemaVersion = 1
 const itemEnvelopeVersion = 1
 const itemPlaintextVersion = 1
 const maxPasswordHistoryEntries = 5
@@ -60,12 +61,23 @@ type FolderItem struct {
 	Name   string `json:"name"`
 }
 
+type GenericItem struct {
+	ItemID     string `json:"item_id"`
+	Title      string `json:"title"`
+	Source     string `json:"source"`
+	SourceType string `json:"source_type"`
+	FolderID   string `json:"folder_id,omitempty"`
+	Favorite   bool   `json:"favorite,omitempty"`
+	Data       []byte `json:"data"`
+}
+
 type NativeItemType string
 
 const (
 	NativeItemTypeLogin      NativeItemType = "login"
 	NativeItemTypeSecureNote NativeItemType = "secure_note"
 	NativeItemTypeFolder     NativeItemType = "folder"
+	NativeItemTypeGeneric    NativeItemType = "generic"
 )
 
 type NativeItem struct {
@@ -73,6 +85,7 @@ type NativeItem struct {
 	Login      *LoginItem      `json:"login,omitempty"`
 	SecureNote *SecureNoteItem `json:"secure_note,omitempty"`
 	Folder     *FolderItem     `json:"folder,omitempty"`
+	Generic    *GenericItem    `json:"generic,omitempty"`
 }
 
 type EncryptedItem struct {
@@ -108,6 +121,12 @@ type folderPlaintext struct {
 	Type    string `json:"type"`
 	Version int    `json:"version"`
 	FolderItem
+}
+
+type genericPlaintext struct {
+	Type    string `json:"type"`
+	Version int    `json:"version"`
+	GenericItem
 }
 
 func RotateLoginPassword(
@@ -225,6 +244,36 @@ func EncryptFolder(
 	)
 }
 
+func EncryptGenericItem(
+	vaultKey []byte,
+	accountID string,
+	generic GenericItem,
+	revision uint64,
+) (EncryptedItem, error) {
+	if len(vaultKey) != chacha20poly1305.KeySize ||
+		accountID == "" ||
+		generic.ItemID == "" ||
+		generic.Title == "" ||
+		generic.Source == "" ||
+		generic.SourceType == "" ||
+		!json.Valid(generic.Data) ||
+		revision == 0 {
+		return EncryptedItem{}, ErrInvalidItemEnvelope
+	}
+	return encryptItem(
+		vaultKey,
+		accountID,
+		generic.ItemID,
+		genericItemSchemaVersion,
+		revision,
+		genericPlaintext{
+			Type:        "generic",
+			Version:     itemPlaintextVersion,
+			GenericItem: generic,
+		},
+	)
+}
+
 func encryptItem(
 	vaultKey []byte,
 	accountID string,
@@ -317,6 +366,21 @@ func DecryptFolder(
 	return *opened.Folder, nil
 }
 
+func DecryptGenericItem(
+	vaultKey []byte,
+	accountID string,
+	item EncryptedItem,
+) (GenericItem, error) {
+	opened, err := DecryptNativeItem(vaultKey, accountID, item)
+	if err != nil {
+		return GenericItem{}, err
+	}
+	if opened.Type != NativeItemTypeGeneric || opened.Generic == nil {
+		return GenericItem{}, ErrInvalidItemEnvelope
+	}
+	return *opened.Generic, nil
+}
+
 func DecryptNativeItem(
 	vaultKey []byte,
 	accountID string,
@@ -376,6 +440,22 @@ func DecryptNativeItem(
 		return NativeItem{
 			Type:   NativeItemTypeFolder,
 			Folder: &decoded.FolderItem,
+		}, nil
+	case NativeItemTypeGeneric:
+		var decoded genericPlaintext
+		if item.SchemaVersion != genericItemSchemaVersion ||
+			json.Unmarshal(plaintext, &decoded) != nil ||
+			decoded.Version != itemPlaintextVersion ||
+			decoded.ItemID != item.ItemID ||
+			decoded.Title == "" ||
+			decoded.Source == "" ||
+			decoded.SourceType == "" ||
+			!json.Valid(decoded.Data) {
+			return NativeItem{}, ErrInvalidItemEnvelope
+		}
+		return NativeItem{
+			Type:    NativeItemTypeGeneric,
+			Generic: &decoded.GenericItem,
 		}, nil
 	default:
 		return NativeItem{}, ErrInvalidItemEnvelope
