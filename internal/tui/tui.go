@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/davicbtoliveira/TermKeep/internal/client"
+	"github.com/davicbtoliveira/TermKeep/internal/clipboard"
 	"github.com/davicbtoliveira/TermKeep/internal/session"
 )
 
@@ -41,6 +42,10 @@ type itemsErrMsg error
 type trashMsg []itemRecord
 type trashErrMsg error
 type itemSaveErrMsg error
+type secretCopiedMsg struct {
+	field string
+	err   error
+}
 type itemSavedMsg struct {
 	items   []itemRecord
 	pending int
@@ -173,6 +178,9 @@ type model struct {
 	purgeConfirm        bool
 	showItem            bool
 	revealPassword      bool
+	clipboard           clipboard.Backend
+	copiedField         string
+	clipboardErr        error
 	showPasswordHistory bool
 	selectedHistory     int
 	revealHistory       bool
@@ -202,6 +210,7 @@ func Run(cfg client.Config) error {
 // stays with the caller; this package receives no secret material.
 func RunVault(cfg client.Config, accessToken, socketPath string) error {
 	m := model{cfg: cfg, vaultOpen: true, accessToken: accessToken}
+	m.clipboard, _ = clipboard.Open()
 	if socketPath != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		info, err := session.Status(ctx, socketPath)
@@ -812,6 +821,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, loadActivity(m.cfg, m.accessToken, false, "")
 			}
 		case "c":
+			record, selected := m.selectedItemRecord()
+			if m.showItem && selected &&
+				len(record.ConflictVersions) == 0 &&
+				record.SecureNote == nil {
+				return m, copySecret(
+					m.clipboard,
+					"password",
+					record.Login.Password,
+				)
+			}
 			if m.showFolders && m.itemStore != nil {
 				itemID, err := client.NewItemID()
 				if err != nil {
@@ -1270,6 +1289,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case itemSaveErrMsg:
 		m.itemFormErr = msg
 		m.itemSaving = false
+	case secretCopiedMsg:
+		m.copiedField = ""
+		m.clipboardErr = nil
+		if msg.err != nil {
+			if errors.Is(msg.err, clipboard.ErrUnavailable) {
+				m.clipboardErr = clipboard.ErrUnavailable
+			} else {
+				m.clipboardErr = errors.New(
+					"clipboard operation failed")
+			}
+		} else {
+			m.copiedField = msg.field
+		}
 	case itemSavedMsg:
 		m.setRecords(msg.items)
 		m.showItem = false
@@ -1485,6 +1517,40 @@ func (m model) updateSearch(
 		}
 	}
 	return m, nil
+}
+
+func copySecret(
+	board clipboard.Backend,
+	field string,
+	value string,
+) tea.Cmd {
+	return func() tea.Msg {
+		if board == nil {
+			return secretCopiedMsg{
+				field: field,
+				err:   clipboard.ErrUnavailable,
+			}
+		}
+		_, err := clipboard.Copy(
+			context.Background(),
+			board,
+			value,
+			clipboard.ClearDelay,
+		)
+		return secretCopiedMsg{field: field, err: err}
+	}
+}
+
+func (m model) clipboardFeedback() string {
+	switch {
+	case m.clipboardErr != nil:
+		return "\nClipboard error: " + m.clipboardErr.Error() + "\n"
+	case m.copiedField != "":
+		return "\nCopied: " + m.copiedField +
+			" (clears in 30 seconds)\n"
+	default:
+		return ""
+	}
 }
 
 func (m model) updateSecureNoteForm(
@@ -2317,8 +2383,9 @@ func (m model) itemView() string {
 	for _, field := range login.CustomFields {
 		fmt.Fprintf(&b, "  %s: %s\n", field.Name, field.Value)
 	}
+	b.WriteString(m.clipboardFeedback())
 	b.WriteString(
-		"\n[p] reveal/hide password  [e] edit  " +
+		"\n[p] reveal/hide password  [c] copy password  [e] edit  " +
 			"[h] password history  " +
 			"[f] favorite/unfavorite  [o] move  [d] delete  " +
 			"[v] vault  [q] quit\n",
