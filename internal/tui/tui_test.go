@@ -1164,6 +1164,52 @@ func TestPasswordHistoryRequiresIntentionalOpenAndReveal(t *testing.T) {
 	}
 }
 
+func TestPasswordHistoryCopiesSelectedEntryWithoutReveal(t *testing.T) {
+	changedAt := time.Date(
+		2026, time.July, 28, 15, 0, 0, 0, time.UTC)
+	board := &fakeClipboard{}
+	var current tea.Model = model{
+		loaded:    true,
+		vaultOpen: true,
+		clipboard: board,
+		items: []itemRecord{{
+			Login: client.LoginItem{
+				ItemID: "11111111-1111-4111-8111-111111111111",
+				Name:   "Production database",
+				PasswordHistory: []client.PasswordHistoryEntry{{
+					Password:  "Previous-Password-Sentinel",
+					ChangedAt: changedAt,
+				}},
+			},
+			Revision: 2,
+		}},
+		showItem: true,
+	}
+	current, _ = current.Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
+	current, command := current.Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	if command == nil {
+		t.Fatal("copy historical password key returned no command")
+	}
+	current, _ = current.Update(command())
+
+	if got := board.current(); got != "Previous-Password-Sentinel" {
+		t.Fatalf("clipboard: got %q", got)
+	}
+	view := current.(model).View()
+	if !strings.Contains(
+		view,
+		"Copied: historical password from "+
+			changedAt.Format(time.RFC3339),
+	) {
+		t.Fatalf("history copy feedback missing field:\n%s", view)
+	}
+	if strings.Contains(view, "Previous-Password-Sentinel") {
+		t.Fatalf("history copy revealed password:\n%s", view)
+	}
+}
+
 func TestPasswordHistoryClearRequiresConfirmation(t *testing.T) {
 	revisionID := "22222222-2222-4222-8222-222222222222"
 	record := itemRecord{
