@@ -175,6 +175,48 @@ func TestSearchIndexRequiresExplicitModeForNoteContents(t *testing.T) {
 	}
 }
 
+func TestSearchIndexFindsGenericMetadataButNotPreservedData(t *testing.T) {
+	const (
+		itemID   = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+		folderID = "ffffffff-ffff-4fff-8fff-ffffffffffff"
+	)
+	index := NewSearchIndex(
+		[]NativeItem{{
+			Type: NativeItemTypeGeneric,
+			Generic: &GenericItem{
+				ItemID:     itemID,
+				Title:      "Corporate card",
+				Source:     "bitwarden",
+				SourceType: "card",
+				FolderID:   folderID,
+				Data: []byte(`{
+					"card": {"number": "Card-Number-Sentinel"}
+				}`),
+			},
+		}},
+		[]FolderItem{{
+			ItemID: folderID,
+			Name:   "Finance",
+		}},
+	)
+
+	for _, query := range []string{"corporate", "finance"} {
+		results := index.Search(query, SearchModeMetadata)
+		if len(results) != 1 || results[0].ItemID != itemID {
+			t.Fatalf("Generic results for %q: %+v", query, results)
+		}
+	}
+	for _, mode := range []SearchMode{
+		SearchModeMetadata,
+		SearchModeNoteContents,
+	} {
+		if results := index.Search("Card-Number-Sentinel", mode); len(results) != 0 {
+			t.Fatalf("Generic preserved data entered search: %+v",
+				results)
+		}
+	}
+}
+
 func TestRepresentativeVaultSearchMeetsLatencyBudget(t *testing.T) {
 	const (
 		itemCount    = 10_000
