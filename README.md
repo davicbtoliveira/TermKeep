@@ -187,6 +187,42 @@ termkeep register --email user@example.com --invite-token TOKEN \
   --stdout-recovery-key
 ```
 
+## Password generation
+
+Press `g` from an unlocked vault to open Password Generator. Configure length,
+enabled character sets, minimum digit/special counts, and ambiguous-character
+exclusion. Generated output is masked; press `p` to reveal, `c` to copy with
+the normal 30-second conditional clipboard cleanup, or `g` to regenerate from
+the same configuration.
+
+Supported length is 5–128. Character sets are:
+
+- Uppercase: `A-Z`
+- Lowercase: `a-z`
+- Digits: `0-9`
+- Special: `!@#$%^&*()-_=+[]{};:,.?/|`
+
+Exclude-ambiguous removes `I`, `l`, `1`, `O`, `o`, `0`, and `|` from every
+selected or minimum-required pool. At least one set must remain enabled,
+digit/special minimums require their corresponding sets, and combined
+minimums cannot exceed length.
+
+CLI defaults are length 20, all four sets enabled, minimum one digit and one
+special character, with ambiguous characters allowed. Output requires
+explicit opt-in:
+
+```sh
+termkeep generate-password --stdout
+termkeep generate-password --length 32 \
+  --special=false --min-special 0 \
+  --min-digits 4 --exclude-ambiguous --stdout
+```
+
+Generation uses Go's `crypto/rand`, backed by the Linux operating-system
+cryptographic random source. Passwords remain in the client process and
+explicit output destination only; generation performs no server request,
+synchronization, persistence, audit event, or logging.
+
 ## Folders and favorites
 
 Press `f` in the vault to switch the Favorites view on or off. From a Login or

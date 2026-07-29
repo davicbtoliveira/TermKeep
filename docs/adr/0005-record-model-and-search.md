@@ -32,7 +32,9 @@ TOTP accepts `otpauth://totp/...` URIs or manual Base32 secret, issuer, account,
 
 Codes are derived locally from RFC 4226/6238 HOTP/TOTP primitives. The unlocked TUI displays the current code and refreshes its expiration window; the CLI requires an explicit `totp --item UUID --stdout` action. Neither the TOTP configuration nor generated codes enter the search index, server requests in plaintext, or audit events.
 
-The random-password generator supports 5–128 characters, uppercase, lowercase, digits, special characters, minimum digit/special counts, and ambiguous-character exclusion. Passphrases are deferred. Pwned-password checks use a configurable k-anonymity-compatible endpoint directly from the client, only from the generator or an explicit item-view action.
+The random-password generator supports 5–128 characters and independently enabled ASCII uppercase, lowercase, digit, and `!@#$%^&*()-_=+[]{};:,.?/|` special-character sets. Users may require minimum digit and special counts. Exclude-ambiguous removes `I`, `l`, `1`, `O`, `o`, `0`, and `|` from both general and minimum-required pools. Empty character pools, disabled required pools, out-of-range lengths, negative minimums, and combined minimums above length are rejected before generation.
+
+Generation and unbiased shuffling use Go's `crypto/rand`, backed by the Linux operating-system cryptographic random source. The TUI masks generated output until explicit reveal or copy; CLI output requires `generate-password ... --stdout`. Generation is local and produces no server request, synchronization, persistence, audit event, or log entry. Passphrases are deferred. Pwned-password checks use a configurable k-anonymity-compatible endpoint directly from the client, only from the generator or an explicit item-view action.
 
 Encrypted portable backup and guarded plaintext JSON/CSV export are supported. Encrypted backups use a distinct backup password.
 
