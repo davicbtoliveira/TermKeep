@@ -377,10 +377,26 @@ func requestedSecret(
 	item client.NativeItem,
 	field string,
 ) (string, error) {
-	if field == "password" &&
-		item.Type == client.NativeItemTypeLogin &&
-		item.Login != nil {
-		return item.Login.Password, nil
+	if item.Type == client.NativeItemTypeLogin && item.Login != nil {
+		switch field {
+		case "password":
+			return item.Login.Password, nil
+		case "notes":
+			return item.Login.Notes, nil
+		}
+		if name, found := strings.CutPrefix(field, "custom:"); found &&
+			name != "" {
+			for _, customField := range item.Login.CustomFields {
+				if customField.Name == name {
+					return customField.Value, nil
+				}
+			}
+		}
+	}
+	if field == "content" &&
+		item.Type == client.NativeItemTypeSecureNote &&
+		item.SecureNote != nil {
+		return item.SecureNote.Content, nil
 	}
 	return "", errors.New("secret field unavailable for Item")
 }
