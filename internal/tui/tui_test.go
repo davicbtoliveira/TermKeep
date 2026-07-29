@@ -349,6 +349,55 @@ func TestVaultMetadataSearchFiltersItemsAndMarksFavorite(t *testing.T) {
 	}
 }
 
+func TestVaultNoteContentSearchRequiresExplicitShortcut(t *testing.T) {
+	initial := model{
+		loaded:    true,
+		vaultOpen: true,
+		itemStore: &fakeItemStore{},
+	}
+	updated, _ := initial.Update(itemsMsg{{
+		SecureNote: &client.SecureNoteItem{
+			ItemID:  "11111111-1111-4111-8111-111111111111",
+			Title:   "Recovery runbook",
+			Content: "recovery-coordinates-sentinel",
+		},
+		Revision: 1,
+	}})
+
+	updated, _ = updated.(model).Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	updated, _ = updated.(model).Update(
+		tea.KeyMsg{
+			Type:  tea.KeyRunes,
+			Runes: []rune("recovery-coordinates"),
+		})
+	metadataView := updated.(model).View()
+	if !strings.Contains(metadataView, "No Items in this view.") ||
+		strings.Contains(metadataView, "Recovery runbook") {
+		t.Fatalf("metadata search exposed Note content:\n%s", metadataView)
+	}
+
+	updated, _ = updated.(model).Update(tea.KeyMsg{Type: tea.KeyEsc})
+	updated, _ = updated.(model).Update(tea.KeyMsg{Type: tea.KeyCtrlF})
+	updated, _ = updated.(model).Update(
+		tea.KeyMsg{
+			Type:  tea.KeyRunes,
+			Runes: []rune("recovery-coordinates"),
+		})
+	noteView := updated.(model).View()
+	for _, want := range []string{
+		"Search:   Notes — recovery-coordinates",
+		"[Secure Note] Recovery runbook",
+	} {
+		if !strings.Contains(noteView, want) {
+			t.Fatalf("Note search missing %q:\n%s", want, noteView)
+		}
+	}
+	if strings.Contains(noteView, "recovery-coordinates-sentinel") {
+		t.Fatalf("search result exposed Note content:\n%s", noteView)
+	}
+}
+
 func TestOfflineVaultAdvertisesLoginEditing(t *testing.T) {
 	view := model{
 		loaded:    true,
