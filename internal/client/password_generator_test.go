@@ -2,6 +2,7 @@ package client
 
 import (
 	"errors"
+	"math"
 	"math/rand"
 	"strings"
 	"testing"
@@ -116,6 +117,22 @@ func TestPasswordGeneratorRejectsImpossibleComposition(t *testing.T) {
 				)
 			}
 		})
+	}
+}
+
+func TestPasswordGeneratorRejectsOverflowingMinimums(t *testing.T) {
+	config := PasswordGeneratorConfig{
+		Length:         128,
+		Digits:         true,
+		Special:        true,
+		MinimumDigits:  math.MaxInt,
+		MinimumSpecial: math.MaxInt,
+	}
+	if err := ValidatePasswordGeneratorConfig(config); !errors.Is(
+		err,
+		ErrInvalidPasswordGeneratorConfig,
+	) {
+		t.Fatalf("overflowing minimums error: got %v", err)
 	}
 }
 
