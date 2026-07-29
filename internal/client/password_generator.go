@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"math/big"
+	"strings"
 )
 
 var ErrInvalidPasswordGeneratorConfig = errors.New(
@@ -52,7 +53,9 @@ func GeneratePassword(
 	allowed := passwordCharacterSet(config)
 	password := make([]byte, 0, config.Length)
 	for range config.MinimumDigits {
-		character, err := randomPasswordCharacter(PasswordDigits)
+		character, err := randomPasswordCharacter(
+			passwordCharacters(config, PasswordDigits),
+		)
 		if err != nil {
 			return "", err
 		}
@@ -60,7 +63,7 @@ func GeneratePassword(
 	}
 	for range config.MinimumSpecial {
 		character, err := randomPasswordCharacter(
-			PasswordSpecialCharacters,
+			passwordCharacters(config, PasswordSpecialCharacters),
 		)
 		if err != nil {
 			return "", err
@@ -98,7 +101,25 @@ func passwordCharacterSet(config PasswordGeneratorConfig) string {
 	if config.Special {
 		characters += PasswordSpecialCharacters
 	}
-	return characters
+	return passwordCharacters(config, characters)
+}
+
+func passwordCharacters(
+	config PasswordGeneratorConfig,
+	characters string,
+) string {
+	if !config.ExcludeAmbiguous {
+		return characters
+	}
+	return strings.Map(func(character rune) rune {
+		if strings.ContainsRune(
+			PasswordAmbiguousCharacters,
+			character,
+		) {
+			return -1
+		}
+		return character
+	}, characters)
 }
 
 func randomPasswordCharacter(characters string) (byte, error) {
