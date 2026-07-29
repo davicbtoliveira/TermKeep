@@ -2,8 +2,10 @@ package client
 
 import (
 	"errors"
+	"math/rand"
 	"strings"
 	"testing"
+	"testing/quick"
 )
 
 func TestGeneratePasswordSatisfiesSelectedConstraints(t *testing.T) {
@@ -141,6 +143,104 @@ func TestGeneratePasswordExcludesDocumentedAmbiguousCharacters(t *testing.T) {
 			t.Fatalf("password contains ambiguous character: %q", password)
 		}
 	}
+}
+
+func TestGeneratePasswordPropertiesAcrossConfigurations(t *testing.T) {
+	property := func(
+		lengthSeed uint8,
+		selectionSeed uint8,
+		digitSeed uint8,
+		specialSeed uint8,
+		excludeAmbiguous bool,
+	) bool {
+		config := PasswordGeneratorConfig{
+			Length:           5 + int(lengthSeed)%124,
+			Uppercase:        selectionSeed&1 != 0,
+			Lowercase:        selectionSeed&2 != 0,
+			Digits:           selectionSeed&4 != 0,
+			Special:          selectionSeed&8 != 0,
+			ExcludeAmbiguous: excludeAmbiguous,
+		}
+		if !config.Uppercase &&
+			!config.Lowercase &&
+			!config.Digits &&
+			!config.Special {
+			config.Lowercase = true
+		}
+		remaining := config.Length
+		if config.Digits {
+			config.MinimumDigits =
+				int(digitSeed) % (remaining + 1)
+			remaining -= config.MinimumDigits
+		}
+		if config.Special {
+			config.MinimumSpecial =
+				int(specialSeed) % (remaining + 1)
+		}
+
+		if ValidatePasswordGeneratorConfig(config) != nil {
+			return false
+		}
+		password, err := GeneratePassword(config)
+		if err != nil || len(password) != config.Length {
+			return false
+		}
+		allowed := allowedPasswordCharacters(config)
+		for _, character := range password {
+			if !strings.ContainsRune(allowed, character) {
+				return false
+			}
+		}
+		if countPasswordCharacters(password, PasswordDigits) <
+			config.MinimumDigits ||
+			countPasswordCharacters(
+				password,
+				PasswordSpecialCharacters,
+			) < config.MinimumSpecial {
+			return false
+		}
+		return !config.ExcludeAmbiguous ||
+			!strings.ContainsAny(
+				password,
+				PasswordAmbiguousCharacters,
+			)
+	}
+
+	err := quick.Check(property, &quick.Config{
+		MaxCount: 1000,
+		Rand:     rand.New(rand.NewSource(18)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func allowedPasswordCharacters(config PasswordGeneratorConfig) string {
+	var characters string
+	if config.Uppercase {
+		characters += PasswordUppercaseCharacters
+	}
+	if config.Lowercase {
+		characters += PasswordLowercaseCharacters
+	}
+	if config.Digits {
+		characters += PasswordDigits
+	}
+	if config.Special {
+		characters += PasswordSpecialCharacters
+	}
+	if !config.ExcludeAmbiguous {
+		return characters
+	}
+	return strings.Map(func(character rune) rune {
+		if strings.ContainsRune(
+			PasswordAmbiguousCharacters,
+			character,
+		) {
+			return -1
+		}
+		return character
+	}, characters)
 }
 
 func countPasswordCharacters(value string, characters string) int {
