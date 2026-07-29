@@ -117,6 +117,32 @@ func TestPasswordGeneratorRejectsImpossibleComposition(t *testing.T) {
 	}
 }
 
+func TestGeneratePasswordExcludesDocumentedAmbiguousCharacters(t *testing.T) {
+	config := PasswordGeneratorConfig{
+		Length:           128,
+		Uppercase:        true,
+		Lowercase:        true,
+		Digits:           true,
+		Special:          true,
+		MinimumDigits:    32,
+		MinimumSpecial:   32,
+		ExcludeAmbiguous: true,
+	}
+
+	for range 20 {
+		password, err := GeneratePassword(config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.ContainsAny(
+			password,
+			PasswordAmbiguousCharacters,
+		) {
+			t.Fatalf("password contains ambiguous character: %q", password)
+		}
+	}
+}
+
 func countPasswordCharacters(value string, characters string) int {
 	var count int
 	for _, character := range value {
