@@ -66,6 +66,7 @@ var itemOperationTimeout = 10 * time.Second
 const loginFormFieldCount = 6
 const secureNoteFormFieldCount = 2
 const totpFormFieldCount = 7
+const passwordGeneratorFieldCount = 8
 const unfiledFolderFilter = "__termkeep_no_folder__"
 
 var loginFormLabels = [loginFormFieldCount]string{
@@ -87,6 +88,17 @@ var totpFormLabels = [totpFormFieldCount]string{
 	"Period (seconds)",
 }
 
+var passwordGeneratorLabels = [passwordGeneratorFieldCount]string{
+	"Length (5-128)",
+	"Uppercase (yes/no)",
+	"Lowercase (yes/no)",
+	"Digits (yes/no)",
+	"Special characters (yes/no)",
+	"Minimum digits",
+	"Minimum special characters",
+	"Exclude ambiguous (yes/no)",
+}
+
 type loginForm struct {
 	itemID            string
 	revision          uint64
@@ -106,6 +118,13 @@ type totpForm struct {
 	record itemRecord
 	field  int
 	values [totpFormFieldCount]string
+}
+
+type passwordGeneratorForm struct {
+	field     int
+	values    [passwordGeneratorFieldCount]string
+	generated string
+	reveal    bool
 }
 
 type secureNoteForm struct {
@@ -153,71 +172,74 @@ type cachedItemStore struct {
 
 // model is the single-screen state: the shared status lines plus keys.
 type model struct {
-	cfg                 client.Config
-	lines               []string
-	err                 error
-	loaded              bool
-	vaultOpen           bool
-	accessToken         string
-	showSessions        bool
-	sessionsLoading     bool
-	sessions            []client.OnlineSession
-	selectedSession     int
-	sessionsErr         error
-	showActivity        bool
-	activityAll         bool
-	activityLoading     bool
-	activityPage        client.ActivityPage
-	activityErr         error
-	itemsLoading        bool
-	items               []itemRecord
-	selectedItem        int
-	searchIndex         client.SearchIndex
-	searching           bool
-	searchQuery         string
-	searchMode          client.SearchMode
-	selectedConflict    int
-	itemsErr            error
-	folders             []itemRecord
-	selectedFolder      int
-	showFolders         bool
-	showFolderConflict  bool
-	folderFilter        string
-	favoritesOnly       bool
-	folderDeleteConfirm bool
-	folderActionErr     error
-	showFolderForm      bool
-	folderForm          folderForm
-	showMoveFolder      bool
-	selectedMoveFolder  int
-	showTrash           bool
-	trashLoading        bool
-	trash               []itemRecord
-	selectedTrash       int
-	trashErr            error
-	purgeConfirm        bool
-	showItem            bool
-	revealPassword      bool
-	clipboard           clipboard.Backend
-	copiedField         string
-	clipboardErr        error
-	showPasswordHistory bool
-	selectedHistory     int
-	revealHistory       bool
-	historyClearConfirm bool
-	itemStore           itemStore
-	showLoginForm       bool
-	loginForm           loginForm
-	showTOTPForm        bool
-	totpForm            totpForm
-	showNoteForm        bool
-	noteForm            secureNoteForm
-	itemFormErr         error
-	itemSaving          bool
-	syncLoading         bool
-	syncErr             error
-	pendingMutations    int
-	now                 func() time.Time
+	cfg                   client.Config
+	lines                 []string
+	err                   error
+	loaded                bool
+	vaultOpen             bool
+	accessToken           string
+	showSessions          bool
+	sessionsLoading       bool
+	sessions              []client.OnlineSession
+	selectedSession       int
+	sessionsErr           error
+	showActivity          bool
+	activityAll           bool
+	activityLoading       bool
+	activityPage          client.ActivityPage
+	activityErr           error
+	itemsLoading          bool
+	items                 []itemRecord
+	selectedItem          int
+	searchIndex           client.SearchIndex
+	searching             bool
+	searchQuery           string
+	searchMode            client.SearchMode
+	selectedConflict      int
+	itemsErr              error
+	folders               []itemRecord
+	selectedFolder        int
+	showFolders           bool
+	showFolderConflict    bool
+	folderFilter          string
+	favoritesOnly         bool
+	folderDeleteConfirm   bool
+	folderActionErr       error
+	showFolderForm        bool
+	folderForm            folderForm
+	showMoveFolder        bool
+	selectedMoveFolder    int
+	showTrash             bool
+	trashLoading          bool
+	trash                 []itemRecord
+	selectedTrash         int
+	trashErr              error
+	purgeConfirm          bool
+	showItem              bool
+	revealPassword        bool
+	clipboard             clipboard.Backend
+	copiedField           string
+	clipboardErr          error
+	showPasswordHistory   bool
+	selectedHistory       int
+	revealHistory         bool
+	historyClearConfirm   bool
+	itemStore             itemStore
+	showLoginForm         bool
+	loginForm             loginForm
+	showTOTPForm          bool
+	totpForm              totpForm
+	showPasswordGenerator bool
+	passwordGenerator     passwordGeneratorForm
+	passwordGeneratorErr  error
+	showNoteForm          bool
+	noteForm              secureNoteForm
+	itemFormErr           error
+	itemSaving            bool
+	syncLoading           bool
+	syncErr               error
+	pendingMutations      int
+	now                   func() time.Time
 }
 
 // Run starts the Bubble Tea program on the controlling terminal.
@@ -804,6 +826,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.KeyMsg:
+		if m.showPasswordGenerator {
+			return m.updatePasswordGenerator(msg)
+		}
 		if m.showTOTPForm {
 			return m.updateTOTPForm(msg)
 		}
@@ -1184,6 +1209,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, loadActivity(
 					m.cfg, m.accessToken, m.activityAll, "")
 			}
+			if m.vaultOpen && m.itemStore != nil &&
+				!m.showSessions && !m.showActivity &&
+				!m.showItem && !m.showTrash &&
+				!m.showFolders && !m.showFolderConflict {
+				m.showPasswordGenerator = true
+				m.passwordGenerator =
+					defaultPasswordGeneratorForm()
+				m.passwordGeneratorErr = nil
+				m.copiedField = ""
+				m.clipboardErr = nil
+				return m, nil
+			}
 		case "v":
 			m.showSessions = false
 			m.showActivity = false
@@ -1194,6 +1231,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showMoveFolder = false
 			m.showFolderForm = false
 			m.showTOTPForm = false
+			m.showPasswordGenerator = false
 			m.showPasswordHistory = false
 			m.historyClearConfirm = false
 			m.revealPassword = false
@@ -1408,6 +1446,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() string {
+	if m.showPasswordGenerator {
+		return m.passwordGeneratorView()
+	}
 	if m.showTOTPForm {
 		return m.totpFormView()
 	}
@@ -1551,6 +1592,7 @@ func (m model) View() string {
 		}
 		b.WriteString(
 			"\n[c] new Login  [n] new Secure Note  " +
+				"[g] generate password  " +
 				"[f] Favorites  [/] search  [ctrl+f] Notes  " +
 				"[enter] open  " +
 				"[o] Folders  [t] Trash  ",
@@ -1625,6 +1667,217 @@ func (m model) clipboardFeedback() string {
 	default:
 		return ""
 	}
+}
+
+func defaultPasswordGeneratorForm() passwordGeneratorForm {
+	return passwordGeneratorForm{
+		values: [passwordGeneratorFieldCount]string{
+			"20",
+			"yes",
+			"yes",
+			"yes",
+			"yes",
+			"1",
+			"1",
+			"no",
+		},
+	}
+}
+
+func (m model) updatePasswordGenerator(
+	msg tea.KeyMsg,
+) (tea.Model, tea.Cmd) {
+	if m.passwordGenerator.generated != "" {
+		switch msg.String() {
+		case "ctrl+c", "q":
+			return m, tea.Quit
+		case "esc":
+			m.showPasswordGenerator = false
+			m.passwordGenerator = passwordGeneratorForm{}
+			m.passwordGeneratorErr = nil
+			m.copiedField = ""
+			m.clipboardErr = nil
+		case "p":
+			m.passwordGenerator.reveal =
+				!m.passwordGenerator.reveal
+		case "c":
+			return m, copySecret(
+				m.clipboard,
+				"generated password",
+				m.passwordGenerator.generated,
+			)
+		case "g":
+			password, err := generatePasswordFromForm(
+				m.passwordGenerator,
+			)
+			if err != nil {
+				m.passwordGeneratorErr = err
+				return m, nil
+			}
+			m.passwordGenerator.generated = password
+			m.passwordGenerator.reveal = false
+			m.passwordGeneratorErr = nil
+			m.copiedField = ""
+			m.clipboardErr = nil
+		}
+		return m, nil
+	}
+
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "esc":
+		m.showPasswordGenerator = false
+		m.passwordGenerator = passwordGeneratorForm{}
+		m.passwordGeneratorErr = nil
+		return m, nil
+	case "ctrl+u":
+		m.passwordGenerator.values[m.passwordGenerator.field] = ""
+	case "backspace":
+		value := []rune(
+			m.passwordGenerator.values[m.passwordGenerator.field],
+		)
+		if len(value) > 0 {
+			m.passwordGenerator.values[m.passwordGenerator.field] =
+				string(value[:len(value)-1])
+		}
+	case "enter":
+		if m.passwordGenerator.field+1 <
+			passwordGeneratorFieldCount {
+			m.passwordGenerator.field++
+			m.passwordGeneratorErr = nil
+			return m, nil
+		}
+		password, err := generatePasswordFromForm(
+			m.passwordGenerator,
+		)
+		if err != nil {
+			m.passwordGeneratorErr = err
+			return m, nil
+		}
+		m.passwordGenerator.generated = password
+		m.passwordGenerator.reveal = false
+		m.passwordGeneratorErr = nil
+	default:
+		if msg.Type == tea.KeyRunes {
+			m.passwordGenerator.values[m.passwordGenerator.field] +=
+				string(msg.Runes)
+		}
+	}
+	return m, nil
+}
+
+func generatePasswordFromForm(
+	form passwordGeneratorForm,
+) (string, error) {
+	length, err := passwordGeneratorInt(form.values[0])
+	if err != nil {
+		return "", err
+	}
+	uppercase, err := passwordGeneratorBool(form.values[1])
+	if err != nil {
+		return "", err
+	}
+	lowercase, err := passwordGeneratorBool(form.values[2])
+	if err != nil {
+		return "", err
+	}
+	digits, err := passwordGeneratorBool(form.values[3])
+	if err != nil {
+		return "", err
+	}
+	special, err := passwordGeneratorBool(form.values[4])
+	if err != nil {
+		return "", err
+	}
+	minimumDigits, err := passwordGeneratorInt(form.values[5])
+	if err != nil {
+		return "", err
+	}
+	minimumSpecial, err := passwordGeneratorInt(form.values[6])
+	if err != nil {
+		return "", err
+	}
+	excludeAmbiguous, err := passwordGeneratorBool(form.values[7])
+	if err != nil {
+		return "", err
+	}
+	return client.GeneratePassword(client.PasswordGeneratorConfig{
+		Length:           length,
+		Uppercase:        uppercase,
+		Lowercase:        lowercase,
+		Digits:           digits,
+		Special:          special,
+		MinimumDigits:    minimumDigits,
+		MinimumSpecial:   minimumSpecial,
+		ExcludeAmbiguous: excludeAmbiguous,
+	})
+}
+
+func passwordGeneratorInt(value string) (int, error) {
+	parsed, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil {
+		return 0, client.ErrInvalidPasswordGeneratorConfig
+	}
+	return parsed, nil
+}
+
+func passwordGeneratorBool(value string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "yes", "y", "true", "on":
+		return true, nil
+	case "no", "n", "false", "off":
+		return false, nil
+	default:
+		return false, client.ErrInvalidPasswordGeneratorConfig
+	}
+}
+
+func (m model) passwordGeneratorView() string {
+	var b strings.Builder
+	b.WriteString("TermKeep — Password Generator\n\n")
+	if m.passwordGenerator.generated != "" {
+		password := "••••••••••••"
+		if m.passwordGenerator.reveal {
+			password = m.passwordGenerator.generated
+		}
+		fmt.Fprintf(&b, "Generated password: %s\n", password)
+		if m.passwordGeneratorErr != nil {
+			fmt.Fprintf(
+				&b,
+				"\nError: %s\n",
+				m.passwordGeneratorErr,
+			)
+		}
+		b.WriteString(m.clipboardFeedback())
+		b.WriteString(
+			"\n[p] reveal/hide  [c] copy  [g] regenerate  " +
+				"[esc] vault  [q] quit\n",
+		)
+		return b.String()
+	}
+
+	for index, label := range passwordGeneratorLabels {
+		cursor := " "
+		if index == m.passwordGenerator.field {
+			cursor = ">"
+		}
+		fmt.Fprintf(
+			&b,
+			"%s %s: %s\n",
+			cursor,
+			label,
+			m.passwordGenerator.values[index],
+		)
+	}
+	if m.passwordGeneratorErr != nil {
+		fmt.Fprintf(&b, "\nError: %s\n", m.passwordGeneratorErr)
+	}
+	b.WriteString(
+		"\n[enter] next/generate  [ctrl+u] clear field  " +
+			"[esc] cancel  [ctrl+c] quit\n",
+	)
+	return b.String()
 }
 
 func (m model) updateSecureNoteForm(
