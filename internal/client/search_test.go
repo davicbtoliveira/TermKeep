@@ -1,8 +1,10 @@
 package client
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestSearchIndexRanksPartialTitleMatchesDeterministically(t *testing.T) {
@@ -158,6 +160,97 @@ func TestSearchIndexRequiresExplicitModeForNoteContents(t *testing.T) {
 			SearchModeNoteContents,
 		); len(results) != 0 {
 			t.Fatalf("Note-content search exposed %q: %+v", query, results)
+		}
+	}
+}
+
+func TestRepresentativeVaultSearchMeetsLatencyBudget(t *testing.T) {
+	const (
+		itemCount    = 10_000
+		targetID     = "item-04321"
+		buildBudget  = 500 * time.Millisecond
+		searchBudget = 250 * time.Millisecond
+	)
+	folders := make([]FolderItem, 100)
+	for folderIndex := range folders {
+		folders[folderIndex] = FolderItem{
+			ItemID: fmt.Sprintf("folder-%03d", folderIndex),
+			Name:   fmt.Sprintf("Team %03d infrastructure", folderIndex),
+		}
+	}
+	items := make([]NativeItem, 0, itemCount+1)
+	for itemIndex := range itemCount {
+		itemID := fmt.Sprintf("item-%05d", itemIndex)
+		folderID := fmt.Sprintf("folder-%03d", itemIndex%len(folders))
+		if itemIndex%10 == 0 {
+			items = append(items, NativeItem{
+				Type: NativeItemTypeSecureNote,
+				SecureNote: &SecureNoteItem{
+					ItemID:   itemID,
+					Title:    fmt.Sprintf("Runbook %05d", itemIndex),
+					Content:  fmt.Sprintf("note-secret-%05d", itemIndex),
+					FolderID: folderID,
+				},
+			})
+			continue
+		}
+		name := fmt.Sprintf("Service %05d", itemIndex)
+		if itemID == targetID {
+			name = "Production database"
+		}
+		items = append(items, NativeItem{
+			Type: NativeItemTypeLogin,
+			Login: &LoginItem{
+				ItemID:   itemID,
+				Name:     name,
+				Username: fmt.Sprintf("operator-%05d@example.com", itemIndex),
+				Password: fmt.Sprintf("password-secret-%05d", itemIndex),
+				FolderID: folderID,
+				URLs: []string{
+					fmt.Sprintf("https://service-%05d.example.com", itemIndex),
+				},
+				Notes: fmt.Sprintf("login-note-secret-%05d", itemIndex),
+				CustomFields: []CustomField{{
+					Name:  "Environment",
+					Value: fmt.Sprintf("custom-secret-%05d", itemIndex),
+				}},
+			},
+		})
+	}
+	items = append(items, NativeItem{
+		Type: NativeItemTypeLogin,
+		Login: &LoginItem{
+			ItemID: "item-secondary",
+			Name:   "Emergency production access",
+		},
+	})
+
+	started := time.Now()
+	index := NewSearchIndex(items, folders)
+	if elapsed := time.Since(started); elapsed > buildBudget {
+		t.Fatalf("build took %s; budget %s", elapsed, buildBudget)
+	}
+
+	started = time.Now()
+	results := index.Search("prod", SearchModeMetadata)
+	if elapsed := time.Since(started); elapsed > searchBudget {
+		t.Fatalf("search took %s; budget %s", elapsed, searchBudget)
+	}
+	if len(results) < 2 ||
+		results[0].ItemID != targetID ||
+		results[1].ItemID != "item-secondary" {
+		t.Fatalf("representative ranking: %+v", results)
+	}
+	for _, query := range []string{
+		"password-secret-04321",
+		"custom-secret-04321",
+		"login-note-secret-04321",
+	} {
+		if results := index.Search(
+			query,
+			SearchModeMetadata,
+		); len(results) != 0 {
+			t.Fatalf("metadata search exposed %q: %+v", query, results)
 		}
 	}
 }
