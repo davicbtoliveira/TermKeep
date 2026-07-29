@@ -66,6 +66,7 @@ type bitwardenItem struct {
 	Reprompt        int                        `json:"reprompt"`
 	Fields          []bitwardenField           `json:"fields"`
 	Login           bitwardenLogin             `json:"login"`
+	SecureNote      bitwardenSecureNote        `json:"secureNote"`
 	PasswordHistory []bitwardenPasswordHistory `json:"passwordHistory"`
 }
 
@@ -80,6 +81,10 @@ type bitwardenLogin struct {
 type bitwardenLoginURI struct {
 	URI   string `json:"uri"`
 	Match *int   `json:"match"`
+}
+
+type bitwardenSecureNote struct {
+	Type int `json:"type"`
 }
 
 type bitwardenField struct {
@@ -248,6 +253,10 @@ func PreviewBitwardenImport(
 			return BitwardenImportPreview{}, err
 		}
 		if item.Type == 2 {
+			preview.UnmappedFields = append(
+				preview.UnmappedFields,
+				bitwardenUnmappedSecureNoteFields(index+1, item)...,
+			)
 			note := SecureNoteItem{
 				ItemID:   itemID,
 				Title:    item.Name,
@@ -359,6 +368,33 @@ func PreviewBitwardenImport(
 		preview.Counts.Logins++
 	}
 	return preview, nil
+}
+
+func bitwardenUnmappedSecureNoteFields(
+	itemNumber int,
+	item bitwardenItem,
+) []BitwardenImportIssue {
+	var issues []BitwardenImportIssue
+	add := func(field string) {
+		issues = append(issues, BitwardenImportIssue{
+			Item:    itemNumber,
+			Field:   field,
+			Message: "not mapped to native Secure Note",
+		})
+	}
+	if item.Reprompt != 0 {
+		add("reprompt")
+	}
+	for index := range item.Fields {
+		add(fmt.Sprintf("fields[%d]", index))
+	}
+	if item.SecureNote.Type != 0 {
+		add("secureNote.type")
+	}
+	if len(item.PasswordHistory) != 0 {
+		add("passwordHistory")
+	}
+	return issues
 }
 
 func bitwardenPasswordHistoryEntries(
