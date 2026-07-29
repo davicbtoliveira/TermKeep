@@ -28,26 +28,41 @@ type BitwardenImportPreview struct {
 }
 
 type bitwardenExport struct {
-	Encrypted bool            `json:"encrypted"`
-	Items     []bitwardenItem `json:"items"`
+	Encrypted bool              `json:"encrypted"`
+	Folders   []bitwardenFolder `json:"folders"`
+	Items     []bitwardenItem   `json:"items"`
+}
+
+type bitwardenFolder struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
 type bitwardenItem struct {
-	Type     int            `json:"type"`
-	Name     string         `json:"name"`
-	Notes    string         `json:"notes"`
-	Favorite bool           `json:"favorite"`
-	Login    bitwardenLogin `json:"login"`
+	FolderID string           `json:"folderId"`
+	Type     int              `json:"type"`
+	Name     string           `json:"name"`
+	Notes    string           `json:"notes"`
+	Favorite bool             `json:"favorite"`
+	Fields   []bitwardenField `json:"fields"`
+	Login    bitwardenLogin   `json:"login"`
 }
 
 type bitwardenLogin struct {
 	Username string              `json:"username"`
 	Password string              `json:"password"`
 	URIs     []bitwardenLoginURI `json:"uris"`
+	TOTP     string              `json:"totp"`
 }
 
 type bitwardenLoginURI struct {
 	URI string `json:"uri"`
+}
+
+type bitwardenField struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+	Type  int    `json:"type"`
 }
 
 func PreviewBitwardenImport(
@@ -65,8 +80,41 @@ func PreviewBitwardenImport(
 	}
 
 	preview := BitwardenImportPreview{}
+	folderIDs := make(map[string]string, len(source.Folders))
+	for _, folder := range source.Folders {
+		itemID, err := NewItemID()
+		if err != nil {
+			return BitwardenImportPreview{}, err
+		}
+		folderIDs[folder.ID] = itemID
+		normalized := FolderItem{
+			ItemID: itemID,
+			Name:   strings.TrimSpace(folder.Name),
+		}
+		preview.Items = append(preview.Items, NativeItem{
+			Type:   NativeItemTypeFolder,
+			Folder: &normalized,
+		})
+		preview.Counts.Folders++
+	}
 	for index, item := range source.Items {
-		if item.Type != 1 {
+		folderID := ""
+		if item.FolderID != "" {
+			var found bool
+			folderID, found = folderIDs[item.FolderID]
+			if !found {
+				preview.Errors = append(
+					preview.Errors,
+					BitwardenImportIssue{
+						Item:    index + 1,
+						Field:   "folderId",
+						Message: "unknown Bitwarden Folder",
+					},
+				)
+				continue
+			}
+		}
+		if item.Type != 1 && item.Type != 2 {
 			preview.Errors = append(
 				preview.Errors,
 				BitwardenImportIssue{
@@ -81,20 +129,66 @@ func PreviewBitwardenImport(
 		if err != nil {
 			return BitwardenImportPreview{}, err
 		}
+		if item.Type == 2 {
+			note := SecureNoteItem{
+				ItemID:   itemID,
+				Title:    strings.TrimSpace(item.Name),
+				Content:  item.Notes,
+				FolderID: folderID,
+				Favorite: item.Favorite,
+			}
+			preview.Items = append(preview.Items, NativeItem{
+				Type:       NativeItemTypeSecureNote,
+				SecureNote: &note,
+			})
+			preview.Counts.SecureNotes++
+			continue
+		}
 		urls := make([]string, 0, len(item.Login.URIs))
 		for _, uri := range item.Login.URIs {
 			if value := strings.TrimSpace(uri.URI); value != "" {
 				urls = append(urls, value)
 			}
 		}
+		customFields := make([]CustomField, 0, len(item.Fields))
+		for _, field := range item.Fields {
+			if field.Type == 0 {
+				customFields = append(customFields, CustomField{
+					Name:  strings.TrimSpace(field.Name),
+					Value: field.Value,
+				})
+			}
+		}
+		var totp *TOTPConfig
+		if strings.TrimSpace(item.Login.TOTP) != "" {
+			config, err := bitwardenTOTP(
+				item.Login.TOTP,
+				item.Login.Username,
+			)
+			if err != nil {
+				preview.Errors = append(
+					preview.Errors,
+					BitwardenImportIssue{
+						Item:    index + 1,
+						Field:   "login.totp",
+						Message: "invalid TOTP configuration",
+					},
+				)
+				continue
+			}
+			totp = &config
+		}
 		login := LoginItem{
-			ItemID:   itemID,
-			Name:     strings.TrimSpace(item.Name),
-			Username: strings.TrimSpace(item.Login.Username),
-			Password: item.Login.Password,
-			Favorite: item.Favorite,
-			URLs:     urls,
-			Notes:    item.Notes,
+			ItemID:       itemID,
+			Name:         strings.TrimSpace(item.Name),
+			Username:     strings.TrimSpace(item.Login.Username),
+			Password:     item.Login.Password,
+			FolderID:     folderID,
+			Favorite:     item.Favorite,
+			URLs:         urls,
+			Notes:        item.Notes,
+			CustomFields: customFields,
+			TOTP:         totp,
 		}
 		preview.Items = append(preview.Items, NativeItem{
 			Type:  NativeItemTypeLogin,
@@ -103,4 +197,12 @@ func PreviewBitwardenImport(
 		preview.Counts.Logins++
 	}
 	return preview, nil
+}
+
+func bitwardenTOTP(raw string, username string) (TOTPConfig, error) {
+	raw = strings.TrimSpace(raw)
+	if strings.HasPrefix(strings.ToLower(raw), "otpauth://") {
+		return ParseTOTPURI(raw)
+	}
+	return NewTOTPConfig(raw, "", strings.TrimSpace(username), "", 0, 0)
 }
