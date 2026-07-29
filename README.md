@@ -307,11 +307,11 @@ termkeep import bitwarden --file ./bitwarden-export.json --confirm
 ```
 
 The parser accepts at most 16 MiB and 10,000 combined Folders and Items.
-Supported Login fields, password history, Secure Notes, Folders, favorites,
-TOTP, and text custom fields become native records. Cards, identities, SSH
-keys, and unknown source types become encrypted Generic Items containing the
-complete original record. Unsupported fields on otherwise native Logins are
-listed in the preview.
+Supported Login fields, Login password history, Login text custom fields,
+Secure Notes, Folders, favorites, and TOTP become native records. Cards,
+identities, SSH keys, and unknown source types become encrypted Generic Items
+containing the complete original record. Unsupported fields on otherwise
+native Logins and Secure Notes are listed in the preview.
 
 Semantic duplicates are retained. Their names receive `(Duplicada)`, then
 `(Duplicada) - 2`, `(Duplicada) - 3`, and so on; a matching title alone is not
