@@ -395,6 +395,59 @@ func TestPreviewBitwardenImportRejectsUnsafeInput(t *testing.T) {
 	}
 }
 
+func TestPreviewBitwardenImportReportsInvalidRecords(t *testing.T) {
+	export := `{
+		"encrypted": false,
+		"folders": [{
+			"id": "duplicate-folder-id",
+			"name": "Infrastructure"
+		}, {
+			"id": "duplicate-folder-id",
+			"name": "Duplicate source Folder"
+		}],
+		"items": [{
+			"type": 1,
+			"name": "   ",
+			"login": {}
+		}, {
+			"type": 1,
+			"name": "Unknown Folder",
+			"folderId": "missing-folder-id",
+			"login": {}
+		}, {
+			"type": 1,
+			"name": "Invalid TOTP",
+			"login": {"totp": "not-base32!"}
+		}]
+	}`
+
+	preview, err := PreviewBitwardenImport(
+		strings.NewReader(export),
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Counts != (BitwardenImportCounts{Folders: 1}) ||
+		len(preview.Items) != 1 {
+		t.Fatalf("invalid records changed preview: %+v", preview)
+	}
+	var fields []string
+	for _, issue := range preview.Errors {
+		fields = append(fields, issue.Field)
+	}
+	want := []string{
+		"folders[1].id",
+		"name",
+		"folderId",
+		"login.totp",
+	}
+	if !reflect.DeepEqual(fields, want) {
+		t.Fatalf("error fields:\nwant: %v\ngot:  %v",
+			want, fields)
+	}
+}
+
 type repeatedByteReader struct {
 	value byte
 }
