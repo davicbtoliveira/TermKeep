@@ -823,8 +823,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "c":
 			record, selected := m.selectedItemRecord()
 			if m.showItem && selected &&
-				len(record.ConflictVersions) == 0 &&
-				record.SecureNote == nil {
+				len(record.ConflictVersions) == 0 {
+				if record.SecureNote != nil {
+					return m, copySecret(
+						m.clipboard,
+						"Secure Note content",
+						record.SecureNote.Content,
+					)
+				}
 				return m, copySecret(
 					m.clipboard,
 					"password",
@@ -2353,8 +2359,10 @@ func (m model) itemView() string {
 			m.folderName(record.SecureNote.FolderID),
 			yesNo(record.SecureNote.Favorite),
 		)
+		b.WriteString(m.clipboardFeedback())
 		b.WriteString(
-			"\n[e] edit  [f] favorite/unfavorite  [o] move  " +
+			"\n[c] copy content  [e] edit  " +
+				"[f] favorite/unfavorite  [o] move  " +
 				"[d] delete  [v] vault  [q] quit\n",
 		)
 		return b.String()
