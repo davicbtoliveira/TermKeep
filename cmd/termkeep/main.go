@@ -29,6 +29,9 @@ const (
 
 var errSecretUsage = errors.New("invalid secret command usage")
 var errTOTPUsage = errors.New("invalid TOTP command usage")
+var errPasswordGeneratorUsage = errors.New(
+	"invalid password generator command usage",
+)
 
 type secretRequest struct {
 	itemID string
@@ -37,6 +40,10 @@ type secretRequest struct {
 
 type totpRequest struct {
 	itemID string
+}
+
+type passwordGeneratorRequest struct {
+	config client.PasswordGeneratorConfig
 }
 
 func main() {
@@ -354,6 +361,46 @@ func parseSecretRequest(args []string) (secretRequest, error) {
 		return secretRequest{}, errSecretUsage
 	}
 	return secretRequest{itemID: *itemID, field: *field}, nil
+}
+
+func parsePasswordGeneratorRequest(
+	args []string,
+) (passwordGeneratorRequest, error) {
+	fs := flag.NewFlagSet("generate-password", flag.ContinueOnError)
+	length := fs.Int("length", 20, "password length (5-128)")
+	uppercase := fs.Bool("uppercase", true, "include uppercase")
+	lowercase := fs.Bool("lowercase", true, "include lowercase")
+	digits := fs.Bool("digits", true, "include digits")
+	special := fs.Bool("special", true, "include special characters")
+	minimumDigits := fs.Int("min-digits", 1, "minimum digits")
+	minimumSpecial := fs.Int(
+		"min-special",
+		1,
+		"minimum special characters",
+	)
+	excludeAmbiguous := fs.Bool(
+		"exclude-ambiguous",
+		false,
+		"exclude ambiguous characters",
+	)
+	stdout := fs.Bool("stdout", false, "write password to stdout")
+	if err := fs.Parse(args); err != nil || !*stdout || fs.NArg() != 0 {
+		return passwordGeneratorRequest{}, errPasswordGeneratorUsage
+	}
+	config := client.PasswordGeneratorConfig{
+		Length:           *length,
+		Uppercase:        *uppercase,
+		Lowercase:        *lowercase,
+		Digits:           *digits,
+		Special:          *special,
+		MinimumDigits:    *minimumDigits,
+		MinimumSpecial:   *minimumSpecial,
+		ExcludeAmbiguous: *excludeAmbiguous,
+	}
+	if err := client.ValidatePasswordGeneratorConfig(config); err != nil {
+		return passwordGeneratorRequest{}, errPasswordGeneratorUsage
+	}
+	return passwordGeneratorRequest{config: config}, nil
 }
 
 func runSecret(cfg client.Config, args []string) int {
