@@ -652,6 +652,41 @@ func TestLoginPasswordCopyIsDistinctFromReveal(t *testing.T) {
 	}
 }
 
+func TestSecureNoteContentCopiesWithExplicitFieldLabel(t *testing.T) {
+	board := &fakeClipboard{}
+	initial := model{
+		loaded:    true,
+		vaultOpen: true,
+		clipboard: board,
+		items: []itemRecord{{
+			SecureNote: &client.SecureNoteItem{
+				ItemID:  "11111111-1111-4111-8111-111111111111",
+				Title:   "Recovery runbook",
+				Content: "Secure-Note-Content-Sentinel",
+			},
+			Revision: 1,
+		}},
+	}
+	updated, _ := initial.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, command := updated.(model).Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	if command == nil {
+		t.Fatal("copy Secure Note key returned no command")
+	}
+	updated, _ = updated.(model).Update(command())
+
+	if got := board.current(); got != "Secure-Note-Content-Sentinel" {
+		t.Fatalf("clipboard: got %q", got)
+	}
+	view := updated.(model).View()
+	if !strings.Contains(
+		view,
+		"Copied: Secure Note content (clears in 30 seconds)",
+	) {
+		t.Fatalf("copy feedback missing field name:\n%s", view)
+	}
+}
+
 func TestVaultRefreshLoadsDecryptedLogins(t *testing.T) {
 	store := &fakeItemStore{records: []itemRecord{{
 		Login: client.LoginItem{
