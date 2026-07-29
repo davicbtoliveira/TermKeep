@@ -32,6 +32,7 @@ var errTOTPUsage = errors.New("invalid TOTP command usage")
 var errPasswordGeneratorUsage = errors.New(
 	"invalid password generator command usage",
 )
+var errImportUsage = errors.New("invalid import command usage")
 
 type secretRequest struct {
 	itemID string
@@ -44,6 +45,11 @@ type totpRequest struct {
 
 type passwordGeneratorRequest struct {
 	config client.PasswordGeneratorConfig
+}
+
+type bitwardenImportRequest struct {
+	path    string
+	confirm bool
 }
 
 func main() {
@@ -472,6 +478,30 @@ func runGeneratePassword(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+func parseBitwardenImportRequest(
+	args []string,
+) (bitwardenImportRequest, error) {
+	if len(args) == 0 || args[0] != "bitwarden" {
+		return bitwardenImportRequest{}, errImportUsage
+	}
+	fs := flag.NewFlagSet("import bitwarden", flag.ContinueOnError)
+	path := fs.String("file", "", "Bitwarden JSON export")
+	confirm := fs.Bool(
+		"confirm",
+		false,
+		"confirm import after preview",
+	)
+	if err := fs.Parse(args[1:]); err != nil ||
+		strings.TrimSpace(*path) == "" ||
+		fs.NArg() != 0 {
+		return bitwardenImportRequest{}, errImportUsage
+	}
+	return bitwardenImportRequest{
+		path:    strings.TrimSpace(*path),
+		confirm: *confirm,
+	}, nil
 }
 
 func outputGeneratedPassword(
