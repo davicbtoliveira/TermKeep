@@ -1064,6 +1064,48 @@ func TestGeneratedPasswordChecksPwnedOnlyAfterExplicitKey(t *testing.T) {
 	}
 }
 
+func TestGeneratedPasswordIgnoresStalePwnedResult(t *testing.T) {
+	const password = "Password-Sentinel#2026"
+	sum := sha1.Sum([]byte(password))
+	fullHash := strings.ToUpper(hex.EncodeToString(sum[:]))
+	server := httptest.NewServer(http.HandlerFunc(func(
+		w http.ResponseWriter,
+		_ *http.Request,
+	) {
+		_, _ = w.Write([]byte(fullHash[5:] + ":42\r\n"))
+	}))
+	defer server.Close()
+
+	form := defaultPasswordGeneratorForm()
+	form.generated = password
+	initial := model{
+		cfg: client.Config{
+			PwnedPasswordsURL: server.URL + "/range",
+		},
+		showGenerator:     true,
+		passwordGenerator: form,
+	}
+	updated, staleCommand := initial.Update(tea.KeyMsg{
+		Type:  tea.KeyRunes,
+		Runes: []rune{'b'},
+	})
+	if staleCommand == nil {
+		t.Fatal("explicit check returned no command")
+	}
+	updated, _ = updated.(model).Update(tea.KeyMsg{
+		Type:  tea.KeyRunes,
+		Runes: []rune{'g'},
+	})
+	if updated.(model).passwordGenerator.generated == password {
+		t.Fatal("generator did not replace password")
+	}
+	updated, _ = updated.(model).Update(staleCommand())
+	if strings.Contains(updated.(model).View(), "found — 42 occurrences") {
+		t.Fatalf("stale result applied to regenerated password:\n%s",
+			updated.(model).View())
+	}
+}
+
 func TestLoginPasswordChecksPwnedOnlyAfterExplicitKey(t *testing.T) {
 	const password = "Login-Password-Sentinel#2026"
 	sum := sha1.Sum([]byte(password))
