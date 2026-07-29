@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -24,6 +25,13 @@ const (
 	exitTLSFailure   = 2
 	exitUsageFailure = 64
 )
+
+var errSecretUsage = errors.New("invalid secret command usage")
+
+type secretRequest struct {
+	itemID string
+	field  string
+}
 
 func main() {
 	os.Exit(run(os.Args[1:]))
@@ -304,6 +312,18 @@ func runSyncAt(cfg client.Config, socketPath string) int {
 	}
 	fmt.Fprintf(os.Stdout, "Sync: complete (%d pending)\n", len(snapshot.Mutations))
 	return 0
+}
+
+func parseSecretRequest(args []string) (secretRequest, error) {
+	fs := flag.NewFlagSet("secret", flag.ContinueOnError)
+	itemID := fs.String("item", "", "Item UUID")
+	field := fs.String("field", "", "secret field")
+	stdout := fs.Bool("stdout", false, "write secret to stdout")
+	if err := fs.Parse(args); err != nil ||
+		*itemID == "" || *field == "" || !*stdout || fs.NArg() != 0 {
+		return secretRequest{}, errSecretUsage
+	}
+	return secretRequest{itemID: *itemID, field: *field}, nil
 }
 
 func runVaultTUI(cfg client.Config, socketPath string) int {
