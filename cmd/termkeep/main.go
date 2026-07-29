@@ -67,12 +67,14 @@ func run(args []string) int {
 		return runLogout(fs.Args()[1:])
 	case "sync":
 		return runSync(cfg, fs.Args()[1:])
+	case "secret":
+		return runSecret(cfg, fs.Args()[1:])
 	case "__session-agent":
 		return runSessionAgent(fs.Args()[1:])
 	case "":
 		return runTUI(cfg)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n\nusage: termkeep [--server URL] [--ca-cert FILE] [status|bootstrap|register|login|logout|sync]\n", fs.Arg(0))
+		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n\nusage: termkeep [--server URL] [--ca-cert FILE] [status|bootstrap|register|login|logout|sync|secret]\n", fs.Arg(0))
 		return exitUsageFailure
 	}
 }
@@ -325,6 +327,32 @@ func parseSecretRequest(args []string) (secretRequest, error) {
 		return secretRequest{}, errSecretUsage
 	}
 	return secretRequest{itemID: *itemID, field: *field}, nil
+}
+
+func runSecret(cfg client.Config, args []string) int {
+	request, err := parseSecretRequest(args)
+	if err != nil {
+		fmt.Fprintln(
+			os.Stderr,
+			"usage: termkeep secret --item UUID "+
+				"--field password|notes|content|custom:NAME --stdout",
+		)
+		return exitUsageFailure
+	}
+	scope, err := session.CurrentScope(os.Stdin)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error: read terminal session failed")
+		return 1
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := outputSecretAt(
+		ctx, cfg, scope.SocketPath, request, os.Stdout,
+	); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	return 0
 }
 
 func outputSecretAt(
