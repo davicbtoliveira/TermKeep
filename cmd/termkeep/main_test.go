@@ -85,7 +85,7 @@ func TestBitwardenImportRequestRequiresFormatAndFile(t *testing.T) {
 	}
 }
 
-func TestBitwardenImportPreviewDoesNotChangeCache(t *testing.T) {
+func TestBitwardenImportPreviewAndExplicitConfirmation(t *testing.T) {
 	accountID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 	vault, err := client.NewVault([]byte("TermKeep#2026"), accountID)
 	if err != nil {
@@ -165,6 +165,52 @@ func TestBitwardenImportPreviewDoesNotChangeCache(t *testing.T) {
 	}
 	if len(snapshot.Mutations) != 0 {
 		t.Fatalf("preview queued mutations: %+v", snapshot)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if err := runBitwardenImportAt(
+		context.Background(),
+		cfg,
+		socketPath,
+		bitwardenImportRequest{path: path, confirm: true},
+		&stdout,
+		&stderr,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), "Imported locally: 1") {
+		t.Fatalf("confirmation output:\n%s", stdout.String())
+	}
+	snapshot, err = cache.SyncSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Mutations) != 1 {
+		t.Fatalf("confirmation mutations: %+v", snapshot)
+	}
+	envelope := snapshot.Mutations[0].Item.Envelope
+	for _, forbidden := range []string{
+		"Imported account",
+		"imported@example.com",
+		"Imported-Password-Sentinel",
+	} {
+		if bytes.Contains(envelope, []byte(forbidden)) {
+			t.Fatalf("encrypted mutation exposed %q", forbidden)
+		}
+	}
+	opened, err := session.OpenNativeItem(
+		context.Background(),
+		socketPath,
+		snapshot.Mutations[0].Item,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opened.Login == nil ||
+		opened.Login.Name != "Imported account" ||
+		opened.Login.Password != "Imported-Password-Sentinel" {
+		t.Fatalf("confirmed Login differs: %+v", opened)
 	}
 }
 
