@@ -499,11 +499,28 @@ func TestCachedItemStoreSavesListsAndEditsOffline(t *testing.T) {
 	if err := store.Save(ctx, wantFolder); err != nil {
 		t.Fatal(err)
 	}
+	wantGeneric := itemRecord{
+		Generic: &client.GenericItem{
+			ItemID:     "44444444-4444-4444-8444-444444444444",
+			Title:      "Imported corporate card",
+			Source:     "bitwarden",
+			SourceType: "card",
+			FolderID:   folderID,
+			Data: []byte(`{
+				"type": 3,
+				"card": {"number": "Card-Number-Sentinel"}
+			}`),
+		},
+		Revision: 1,
+	}
+	if err := store.Save(ctx, wantGeneric); err != nil {
+		t.Fatal(err)
+	}
 	got, err := store.List(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 3 ||
+	if len(got) != 4 ||
 		!reflect.DeepEqual(got[0].Login, want.Login) ||
 		got[0].Revision != want.Revision ||
 		got[0].RevisionID == "" ||
@@ -524,6 +541,13 @@ func TestCachedItemStoreSavesListsAndEditsOffline(t *testing.T) {
 		len(got[2].ParentRevisionIDs) != 0 {
 		t.Fatalf("offline Folder differs: %+v", got)
 	}
+	if got[3].Generic == nil ||
+		!reflect.DeepEqual(*got[3].Generic, *wantGeneric.Generic) ||
+		got[3].Revision != wantGeneric.Revision ||
+		got[3].RevisionID == "" ||
+		len(got[3].ParentRevisionIDs) != 0 {
+		t.Fatalf("offline Generic Item differs: %+v", got)
+	}
 
 	edited := got[1]
 	note := *edited.SecureNote
@@ -539,7 +563,7 @@ func TestCachedItemStoreSavesListsAndEditsOffline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 3 ||
+	if len(got) != 4 ||
 		got[1].SecureNote == nil ||
 		got[1].SecureNote.Content != note.Content ||
 		got[1].Revision != 2 ||
@@ -550,9 +574,9 @@ func TestCachedItemStoreSavesListsAndEditsOffline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshot.Mutations) != 4 ||
-		snapshot.Mutations[3].BaseRevision != 1 ||
-		snapshot.Mutations[3].Item.ItemID != note.ItemID {
+	if len(snapshot.Mutations) != 5 ||
+		snapshot.Mutations[4].BaseRevision != 1 ||
+		snapshot.Mutations[4].Item.ItemID != note.ItemID {
 		t.Fatalf("offline Secure Note mutation queue: %+v", snapshot)
 	}
 }
