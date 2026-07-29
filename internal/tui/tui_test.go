@@ -1127,6 +1127,61 @@ func TestGeneratedPasswordChecksPwnedOnlyAfterExplicitKey(t *testing.T) {
 	}
 }
 
+func TestBitwardenImportPreviewsLocallyAndCancelsWithoutChanges(
+	t *testing.T,
+) {
+	path := filepath.Join(t.TempDir(), "bitwarden.json")
+	if err := os.WriteFile(path, []byte(`{
+		"encrypted": false,
+		"folders": [],
+		"items": [{
+			"type": 1,
+			"name": "Imported account",
+			"login": {
+				"username": "imported@example.com",
+				"password": "Imported-Password-Sentinel"
+			}
+		}]
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := &fakeItemStore{}
+	var current tea.Model = model{
+		loaded:    true,
+		vaultOpen: true,
+		itemStore: store,
+	}
+	current, _ = current.Update(tea.KeyMsg{
+		Type:  tea.KeyRunes,
+		Runes: []rune{'i'},
+	})
+	current, _ = current.Update(tea.KeyMsg{
+		Type:  tea.KeyRunes,
+		Runes: []rune(path),
+	})
+	current, command := current.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if command == nil || len(store.saved) != 0 {
+		t.Fatal("preview changed Vault or returned no command")
+	}
+	current, _ = current.Update(command())
+	view := current.(model).View()
+	for _, want := range []string{
+		"Bitwarden import preview",
+		"Logins:      1",
+		"plaintext",
+		"delete the original file",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("import preview missing %q:\n%s", want, view)
+		}
+	}
+	current, _ = current.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if len(store.saved) != 0 ||
+		strings.Contains(current.(model).View(), "Bitwarden import") {
+		t.Fatalf("cancel changed Vault:\n%s", current.(model).View())
+	}
+}
+
 func TestGeneratedPasswordIgnoresStalePwnedResult(t *testing.T) {
 	const password = "Password-Sentinel#2026"
 	sum := sha1.Sum([]byte(password))
