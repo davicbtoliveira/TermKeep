@@ -180,82 +180,82 @@ type cachedItemStore struct {
 
 // model is the single-screen state: the shared status lines plus keys.
 type model struct {
-	cfg                    client.Config
-	lines                  []string
-	err                    error
-	loaded                 bool
-	vaultOpen              bool
-	accessToken            string
-	showSessions           bool
-	sessionsLoading        bool
-	sessions               []client.OnlineSession
-	selectedSession        int
-	sessionsErr            error
-	showActivity           bool
-	activityAll            bool
-	activityLoading        bool
-	activityPage           client.ActivityPage
-	activityErr            error
-	itemsLoading           bool
-	items                  []itemRecord
-	selectedItem           int
-	searchIndex            client.SearchIndex
-	searching              bool
-	searchQuery            string
-	searchMode             client.SearchMode
-	selectedConflict       int
-	itemsErr               error
-	folders                []itemRecord
-	selectedFolder         int
-	showFolders            bool
-	showFolderConflict     bool
-	folderFilter           string
-	favoritesOnly          bool
-	folderDeleteConfirm    bool
-	folderActionErr        error
-	showFolderForm         bool
-	folderForm             folderForm
-	showMoveFolder         bool
-	selectedMoveFolder     int
-	showTrash              bool
-	trashLoading           bool
-	trash                  []itemRecord
-	selectedTrash          int
-	trashErr               error
-	purgeConfirm           bool
-	showItem               bool
-	revealPassword         bool
-	clipboard              clipboard.Backend
-	copiedField            string
-	clipboardErr           error
-	breachLoading          bool
-	breachResult           *client.PwnedPasswordResult
-	breachCheckID          uint64
-	showPasswordHistory    bool
-	selectedHistory        int
-	revealHistory          bool
-	historyClearConfirm    bool
-	itemStore              itemStore
-	showLoginForm          bool
-	loginForm              loginForm
-	showTOTPForm           bool
-	totpForm               totpForm
-	showGenerator          bool
-	passwordGenerator      passwordGeneratorForm
-	generatorErr           error
-	showBitwardenImport    bool
-	bitwardenImportPath    string
-	bitwardenPreview       *client.BitwardenImportPreview
-	bitwardenImportErr     error
-	bitwardenImportLoading bool
-	showNoteForm           bool
-	noteForm               secureNoteForm
-	itemFormErr            error
-	itemSaving             bool
-	syncLoading            bool
-	syncErr                error
-	pendingMutations       int
-	now                    func() time.Time
+	cfg                 client.Config
+	lines               []string
+	err                 error
+	loaded              bool
+	vaultOpen           bool
+	accessToken         string
+	showSessions        bool
+	sessionsLoading     bool
+	sessions            []client.OnlineSession
+	selectedSession     int
+	sessionsErr         error
+	showActivity        bool
+	activityAll         bool
+	activityLoading     bool
+	activityPage        client.ActivityPage
+	activityErr         error
+	itemsLoading        bool
+	items               []itemRecord
+	selectedItem        int
+	searchIndex         client.SearchIndex
+	searching           bool
+	searchQuery         string
+	searchMode          client.SearchMode
+	selectedConflict    int
+	itemsErr            error
+	folders             []itemRecord
+	selectedFolder      int
+	showFolders         bool
+	showFolderConflict  bool
+	folderFilter        string
+	favoritesOnly       bool
+	folderDeleteConfirm bool
+	folderActionErr     error
+	showFolderForm      bool
+	folderForm          folderForm
+	showMoveFolder      bool
+	selectedMoveFolder  int
+	showTrash           bool
+	trashLoading        bool
+	trash               []itemRecord
+	selectedTrash       int
+	trashErr            error
+	purgeConfirm        bool
+	showItem            bool
+	revealPassword      bool
+	clipboard           clipboard.Backend
+	copiedField         string
+	clipboardErr        error
+	breachLoading       bool
+	breachResult        *client.PwnedPasswordResult
+	breachCheckID       uint64
+	showPasswordHistory bool
+	selectedHistory     int
+	revealHistory       bool
+	historyClearConfirm bool
+	itemStore           itemStore
+	showLoginForm       bool
+	loginForm           loginForm
+	showTOTPForm        bool
+	totpForm            totpForm
+	showGenerator       bool
+	passwordGenerator   passwordGeneratorForm
+	generatorErr        error
+	showImport          bool
+	importPath          string
+	importPreview       *client.BitwardenImportPreview
+	importErr           error
+	importLoading       bool
+	showNoteForm        bool
+	noteForm            secureNoteForm
+	itemFormErr         error
+	itemSaving          bool
+	syncLoading         bool
+	syncErr             error
+	pendingMutations    int
+	now                 func() time.Time
 }
 
 // Run starts the Bubble Tea program on the controlling terminal.
@@ -957,7 +957,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.showGenerator {
 			return m.updatePasswordGenerator(msg)
 		}
-		if m.showBitwardenImport {
+		if m.showImport {
 			return m.updateBitwardenImport(msg)
 		}
 		if m.showTOTPForm {
@@ -1202,11 +1202,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				!m.showSessions && !m.showActivity &&
 				!m.showItem && !m.showTrash &&
 				!m.showFolders && !m.showFolderConflict {
-				m.showBitwardenImport = true
-				m.bitwardenImportPath = ""
-				m.bitwardenPreview = nil
-				m.bitwardenImportErr = nil
-				m.bitwardenImportLoading = false
+				m.showImport = true
+				m.importPath = ""
+				m.importPreview = nil
+				m.importErr = nil
+				m.importLoading = false
 				return m, nil
 			}
 		case "f":
@@ -1549,13 +1549,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.activityErr = msg
 	case bitwardenPreviewMsg:
 		preview := client.BitwardenImportPreview(msg)
-		m.bitwardenPreview = &preview
-		m.bitwardenImportErr = nil
-		m.bitwardenImportLoading = false
+		m.importPreview = &preview
+		m.importErr = nil
+		m.importLoading = false
 	case bitwardenPreviewErrMsg:
-		m.bitwardenPreview = nil
-		m.bitwardenImportErr = msg
-		m.bitwardenImportLoading = false
+		m.importPreview = nil
+		m.importErr = msg
+		m.importLoading = false
 	case itemsMsg:
 		m.itemsLoading = false
 		m.setRecords([]itemRecord(msg))
@@ -1581,8 +1581,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.trashLoading = false
 		m.trashErr = msg
 	case itemSaveErrMsg:
-		if m.showBitwardenImport {
-			m.bitwardenImportErr = msg
+		if m.showImport {
+			m.importErr = msg
 		} else {
 			m.itemFormErr = msg
 		}
@@ -1620,11 +1620,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.showLoginForm = false
 		m.showNoteForm = false
 		m.showFolderForm = false
-		m.showBitwardenImport = false
-		m.bitwardenImportPath = ""
-		m.bitwardenPreview = nil
-		m.bitwardenImportErr = nil
-		m.bitwardenImportLoading = false
+		m.showImport = false
+		m.importPath = ""
+		m.importPreview = nil
+		m.importErr = nil
+		m.importLoading = false
 		m.itemFormErr = nil
 		m.folderActionErr = nil
 		m.folderDeleteConfirm = false
@@ -1651,7 +1651,7 @@ func (m model) View() string {
 	if m.showGenerator {
 		return m.passwordGeneratorView()
 	}
-	if m.showBitwardenImport {
+	if m.showImport {
 		return m.bitwardenImportView()
 	}
 	if m.showTOTPForm {
@@ -1936,55 +1936,55 @@ func (m model) updateBitwardenImport(
 	case "ctrl+c":
 		return m, tea.Quit
 	case "esc":
-		m.showBitwardenImport = false
-		m.bitwardenImportPath = ""
-		m.bitwardenPreview = nil
-		m.bitwardenImportErr = nil
-		m.bitwardenImportLoading = false
+		m.showImport = false
+		m.importPath = ""
+		m.importPreview = nil
+		m.importErr = nil
+		m.importLoading = false
 		return m, nil
 	}
-	if m.itemSaving || m.bitwardenImportLoading {
+	if m.itemSaving || m.importLoading {
 		return m, nil
 	}
-	if m.bitwardenPreview != nil {
+	if m.importPreview != nil {
 		if msg.String() != "y" {
 			return m, nil
 		}
-		if len(m.bitwardenPreview.Errors) != 0 {
-			m.bitwardenImportErr = errors.New(
+		if len(m.importPreview.Errors) != 0 {
+			m.importErr = errors.New(
 				"resolve preview errors before import",
 			)
 			return m, nil
 		}
 		records, err := recordsForBitwardenImport(
-			m.bitwardenPreview.Items,
+			m.importPreview.Items,
 		)
 		if err != nil {
-			m.bitwardenImportErr = err
+			m.importErr = err
 			return m, nil
 		}
 		m.itemSaving = true
-		m.bitwardenImportErr = nil
+		m.importErr = nil
 		return m, saveItems(m.itemStore, records)
 	}
 	switch msg.String() {
 	case "ctrl+u":
-		m.bitwardenImportPath = ""
+		m.importPath = ""
 	case "backspace":
-		value := []rune(m.bitwardenImportPath)
+		value := []rune(m.importPath)
 		if len(value) > 0 {
-			m.bitwardenImportPath = string(value[:len(value)-1])
+			m.importPath = string(value[:len(value)-1])
 		}
 	case "enter":
-		path := strings.TrimSpace(m.bitwardenImportPath)
+		path := strings.TrimSpace(m.importPath)
 		if path == "" {
-			m.bitwardenImportErr = errors.New(
+			m.importErr = errors.New(
 				"Bitwarden export path is required",
 			)
 			return m, nil
 		}
-		m.bitwardenImportLoading = true
-		m.bitwardenImportErr = nil
+		m.importLoading = true
+		m.importErr = nil
 		return m, previewBitwardenImport(
 			path,
 			nativeItemsForImport(append(
@@ -1994,8 +1994,8 @@ func (m model) updateBitwardenImport(
 		)
 	default:
 		if msg.Type == tea.KeyRunes {
-			m.bitwardenImportPath += string(msg.Runes)
-			m.bitwardenImportErr = nil
+			m.importPath += string(msg.Runes)
+			m.importErr = nil
 		}
 	}
 	return m, nil
@@ -2011,10 +2011,10 @@ func (m model) bitwardenImportView() string {
 	switch {
 	case m.itemSaving:
 		b.WriteString("Importing into encrypted cache…\n")
-	case m.bitwardenImportLoading:
+	case m.importLoading:
 		b.WriteString("Reading and validating locally…\n")
-	case m.bitwardenPreview != nil:
-		preview := m.bitwardenPreview
+	case m.importPreview != nil:
+		preview := m.importPreview
 		b.WriteString("Bitwarden import preview\n\n")
 		fmt.Fprintf(&b, "Logins:      %d\n", preview.Counts.Logins)
 		fmt.Fprintf(&b, "Secure Notes: %d\n", preview.Counts.SecureNotes)
@@ -2044,21 +2044,21 @@ func (m model) bitwardenImportView() string {
 				issue.Message,
 			)
 		}
-		if m.bitwardenImportErr != nil {
-			fmt.Fprintf(&b, "\nError: %s\n", m.bitwardenImportErr)
+		if m.importErr != nil {
+			fmt.Fprintf(&b, "\nError: %s\n", m.importErr)
 		}
 	default:
 		fmt.Fprintf(
 			&b,
 			"Bitwarden JSON path: %s\n",
-			m.bitwardenImportPath,
+			m.importPath,
 		)
-		if m.bitwardenImportErr != nil {
-			fmt.Fprintf(&b, "\nError: %s\n", m.bitwardenImportErr)
+		if m.importErr != nil {
+			fmt.Fprintf(&b, "\nError: %s\n", m.importErr)
 		}
 	}
-	if m.bitwardenPreview != nil &&
-		len(m.bitwardenPreview.Errors) == 0 &&
+	if m.importPreview != nil &&
+		len(m.importPreview.Errors) == 0 &&
 		!m.itemSaving {
 		b.WriteString("\n[y] confirm import  ")
 	}
