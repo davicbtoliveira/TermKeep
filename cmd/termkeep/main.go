@@ -83,12 +83,14 @@ func run(args []string) int {
 		return runSecret(cfg, fs.Args()[1:])
 	case "totp":
 		return runTOTP(cfg, fs.Args()[1:])
+	case "generate-password":
+		return runGeneratePassword(fs.Args()[1:])
 	case "__session-agent":
 		return runSessionAgent(fs.Args()[1:])
 	case "":
 		return runTUI(cfg)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n\nusage: termkeep [--server URL] [--ca-cert FILE] [status|bootstrap|register|login|logout|sync|secret|totp]\n", fs.Arg(0))
+		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n\nusage: termkeep [--server URL] [--ca-cert FILE] [status|bootstrap|register|login|logout|sync|secret|totp|generate-password]\n", fs.Arg(0))
 		return exitUsageFailure
 	}
 }
@@ -427,6 +429,43 @@ func runSecret(cfg client.Config, args []string) int {
 		return 1
 	}
 	return 0
+}
+
+func runGeneratePassword(args []string) int {
+	request, err := parsePasswordGeneratorRequest(args)
+	if err != nil {
+		fmt.Fprintln(
+			os.Stderr,
+			"usage: termkeep generate-password "+
+				"[--length 5-128] "+
+				"[--uppercase=true|false] "+
+				"[--lowercase=true|false] "+
+				"[--digits=true|false] "+
+				"[--special=true|false] "+
+				"[--min-digits N] [--min-special N] "+
+				"[--exclude-ambiguous] --stdout",
+		)
+		return exitUsageFailure
+	}
+	if err := outputGeneratedPassword(request.config, os.Stdout); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	return 0
+}
+
+func outputGeneratedPassword(
+	config client.PasswordGeneratorConfig,
+	stdout io.Writer,
+) error {
+	password, err := client.GeneratePassword(config)
+	if err != nil {
+		return errors.New("generate password failed")
+	}
+	if _, err := fmt.Fprintln(stdout, password); err != nil {
+		return errors.New("write password output failed")
+	}
+	return nil
 }
 
 func parseTOTPRequest(args []string) (totpRequest, error) {
