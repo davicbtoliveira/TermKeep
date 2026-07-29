@@ -147,6 +147,10 @@ type model struct {
 	itemsLoading        bool
 	items               []itemRecord
 	selectedItem        int
+	searchIndex         client.SearchIndex
+	searching           bool
+	searchQuery         string
+	searchMode          client.SearchMode
 	selectedConflict    int
 	itemsErr            error
 	folders             []itemRecord
@@ -541,6 +545,7 @@ func splitRecords(records []itemRecord) ([]itemRecord, []itemRecord) {
 
 func (m *model) setRecords(records []itemRecord) {
 	m.items, m.folders = splitRecords(records)
+	m.searchIndex = newSearchIndex(m.items, m.folders)
 	if m.folderFilter != "" &&
 		m.folderFilter != unfiledFolderFilter {
 		var found bool
@@ -563,9 +568,51 @@ func (m *model) setRecords(records []itemRecord) {
 	}
 }
 
+func newSearchIndex(
+	items []itemRecord,
+	folders []itemRecord,
+) client.SearchIndex {
+	nativeItems := make([]client.NativeItem, 0, len(items))
+	for _, record := range items {
+		if record.SecureNote != nil {
+			nativeItems = append(nativeItems, client.NativeItem{
+				Type:       client.NativeItemTypeSecureNote,
+				SecureNote: record.SecureNote,
+			})
+			continue
+		}
+		nativeItems = append(nativeItems, client.NativeItem{
+			Type:  client.NativeItemTypeLogin,
+			Login: &record.Login,
+		})
+	}
+	folderItems := make([]client.FolderItem, 0, len(folders))
+	for _, record := range folders {
+		if record.Folder != nil {
+			folderItems = append(folderItems, *record.Folder)
+		}
+	}
+	return client.NewSearchIndex(nativeItems, folderItems)
+}
+
 func (m model) visibleItems() []itemRecord {
-	visible := make([]itemRecord, 0, len(m.items))
-	for _, record := range m.items {
+	items := m.items
+	if strings.TrimSpace(m.searchQuery) != "" {
+		recordsByID := make(map[string]itemRecord, len(m.items))
+		for _, record := range m.items {
+			recordsByID[recordItemID(record)] = record
+		}
+		results := m.searchIndex.Search(m.searchQuery, m.searchMode)
+		items = make([]itemRecord, 0, len(results))
+		for _, result := range results {
+			record, found := recordsByID[result.ItemID]
+			if found {
+				items = append(items, record)
+			}
+		}
+	}
+	visible := make([]itemRecord, 0, len(items))
+	for _, record := range items {
 		if m.favoritesOnly && !recordIsFavorite(record) {
 			continue
 		}
@@ -722,9 +769,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.showPasswordHistory {
 			return m.updatePasswordHistory(msg)
 		}
+		if m.searching {
+			return m.updateSearch(msg)
+		}
 		switch msg.String() {
 		case "q", "esc", "ctrl+c":
 			return m, tea.Quit
+		case "/":
+			if m.vaultOpen && !m.showSessions && !m.showActivity &&
+				!m.showItem && !m.showTrash && !m.showFolders &&
+				!m.showFolderConflict {
+				m.searching = true
+				m.searchQuery = ""
+				m.searchMode = client.SearchModeMetadata
+				m.selectedItem = 0
+			}
 		case "s":
 			if m.vaultOpen && m.accessToken != "" && !m.showFolders {
 				m.showActivity = false
@@ -1053,6 +1112,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.purgeConfirm = false
 			m.folderDeleteConfirm = false
 			m.showNoteForm = false
+			m.searching = false
+			m.searchQuery = ""
 			return m, nil
 		case "j", "down":
 			if m.showSessions && m.selectedSession+1 < len(m.sessions) {
@@ -1300,6 +1361,13 @@ func (m model) View() string {
 			b.WriteString("Vault:    unlocked (empty)\n")
 		default:
 			b.WriteString("Vault:    unlocked\n")
+			if m.searching || m.searchQuery != "" {
+				b.WriteString(
+					"Search:   metadata — " +
+						m.searchQuery +
+						"\n",
+				)
+			}
 			if m.favoritesOnly {
 				b.WriteString("View:     Favorites\n")
 			}
@@ -1360,9 +1428,17 @@ func (m model) View() string {
 		}
 	}
 	if m.vaultOpen && m.itemStore != nil {
+		if m.searching {
+			b.WriteString(
+				"\n[type] search  [backspace] edit  " +
+					"[enter] keep  [esc] clear  [ctrl+c] quit\n",
+			)
+			return b.String()
+		}
 		b.WriteString(
 			"\n[c] new Login  [n] new Secure Note  " +
-				"[enter] open  [f] Favorites  [o] Folders  [t] Trash  ",
+				"[/] search  [enter] open  [f] Favorites  " +
+				"[o] Folders  [t] Trash  ",
 		)
 		if m.accessToken != "" {
 			b.WriteString("[a] Activity  [s] Active Sessions  ")
@@ -1373,6 +1449,33 @@ func (m model) View() string {
 		b.WriteString("\n[r] refresh  [q] quit\n")
 	}
 	return b.String()
+}
+
+func (m model) updateSearch(
+	msg tea.KeyMsg,
+) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "esc":
+		m.searching = false
+		m.searchQuery = ""
+		m.selectedItem = 0
+	case "enter":
+		m.searching = false
+	case "backspace":
+		query := []rune(m.searchQuery)
+		if len(query) > 0 {
+			m.searchQuery = string(query[:len(query)-1])
+			m.selectedItem = 0
+		}
+	default:
+		if msg.Type == tea.KeyRunes {
+			m.searchQuery += string(msg.Runes)
+			m.selectedItem = 0
+		}
+	}
+	return m, nil
 }
 
 func (m model) updateSecureNoteForm(
