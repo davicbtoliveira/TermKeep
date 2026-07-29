@@ -2,6 +2,8 @@ package client
 
 import (
 	"encoding/base32"
+	"errors"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -99,6 +101,166 @@ func TestGenerateTOTPMatchesRFC6238Algorithms(t *testing.T) {
 					want,
 					code.ExpiresAt,
 				)
+			}
+		})
+	}
+}
+
+func TestParseTOTPURIKeepsSupportedParameters(t *testing.T) {
+	config, err := ParseTOTPURI(
+		"otpauth://totp/Example%20Co:alice%40example.com?" +
+			"secret=JBSWY3DPEHPK3PXP&issuer=Example%20Co&" +
+			"algorithm=SHA256&digits=8&period=45",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := TOTPConfig{
+		Secret:    "JBSWY3DPEHPK3PXP",
+		Issuer:    "Example Co",
+		Account:   "alice@example.com",
+		Algorithm: TOTPAlgorithmSHA256,
+		Digits:    8,
+		Period:    45,
+	}
+	if !reflect.DeepEqual(config, want) {
+		t.Fatalf("parsed config:\nwant: %+v\ngot:  %+v", want, config)
+	}
+}
+
+func TestTOTPInputsApplyStandardDefaults(t *testing.T) {
+	fromURI, err := ParseTOTPURI(
+		"otpauth://totp/alice@example.com?secret=JBSWY3DPEHPK3PXP",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fromManual, err := NewTOTPConfig(
+		"JBSWY3DPEHPK3PXP",
+		"",
+		"alice@example.com",
+		"",
+		0,
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := TOTPConfig{
+		Secret:    "JBSWY3DPEHPK3PXP",
+		Account:   "alice@example.com",
+		Algorithm: TOTPAlgorithmSHA1,
+		Digits:    6,
+		Period:    30,
+	}
+	if !reflect.DeepEqual(fromURI, want) {
+		t.Fatalf("URI defaults:\nwant: %+v\ngot:  %+v", want, fromURI)
+	}
+	if !reflect.DeepEqual(fromManual, want) {
+		t.Fatalf("manual defaults:\nwant: %+v\ngot:  %+v", want, fromManual)
+	}
+}
+
+func TestNewTOTPConfigAcceptsManualParameters(t *testing.T) {
+	got, err := NewTOTPConfig(
+		"JBSWY3DPEHPK3PXP",
+		"Example Co",
+		"alice@example.com",
+		"sha512",
+		8,
+		60,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := TOTPConfig{
+		Secret:    "JBSWY3DPEHPK3PXP",
+		Issuer:    "Example Co",
+		Account:   "alice@example.com",
+		Algorithm: TOTPAlgorithmSHA512,
+		Digits:    8,
+		Period:    60,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("manual config:\nwant: %+v\ngot:  %+v", want, got)
+	}
+}
+
+func TestTOTPInputsRejectInvalidValues(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func() error
+	}{
+		{
+			name: "URI scheme",
+			run: func() error {
+				_, err := ParseTOTPURI(
+					"https://totp/alice?secret=JBSWY3DPEHPK3PXP",
+				)
+				return err
+			},
+		},
+		{
+			name: "HOTP URI",
+			run: func() error {
+				_, err := ParseTOTPURI(
+					"otpauth://hotp/alice?" +
+						"secret=JBSWY3DPEHPK3PXP&counter=0",
+				)
+				return err
+			},
+		},
+		{
+			name: "issuer mismatch",
+			run: func() error {
+				_, err := ParseTOTPURI(
+					"otpauth://totp/First:alice?" +
+						"secret=JBSWY3DPEHPK3PXP&issuer=Second",
+				)
+				return err
+			},
+		},
+		{
+			name: "invalid secret",
+			run: func() error {
+				_, err := NewTOTPConfig("not-base32!", "", "", "", 0, 0)
+				return err
+			},
+		},
+		{
+			name: "invalid algorithm",
+			run: func() error {
+				_, err := NewTOTPConfig(
+					"JBSWY3DPEHPK3PXP", "", "", "MD5", 6, 30,
+				)
+				return err
+			},
+		},
+		{
+			name: "invalid digits",
+			run: func() error {
+				_, err := NewTOTPConfig(
+					"JBSWY3DPEHPK3PXP", "", "", "SHA1", 7, 30,
+				)
+				return err
+			},
+		},
+		{
+			name: "invalid period",
+			run: func() error {
+				_, err := NewTOTPConfig(
+					"JBSWY3DPEHPK3PXP", "", "", "SHA1", 6, -1,
+				)
+				return err
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.run(); !errors.Is(err, ErrInvalidTOTP) {
+				t.Fatalf("want ErrInvalidTOTP, got %v", err)
 			}
 		})
 	}
