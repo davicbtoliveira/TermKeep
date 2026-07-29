@@ -78,6 +78,20 @@ through the fields and saves the final field. A successful edit writes the
 next item revision; concurrent duplicate saves are ignored while the first
 save is running.
 
+From a Login detail, press `t` to configure TOTP. Paste a standard
+`otpauth://totp/...` URI in the first field, or leave it empty and enter the
+Base32 secret, issuer, account, algorithm, digits, and period manually.
+Supported algorithms are SHA-1, SHA-256, and SHA-512; supported code lengths
+are 6 and 8 digits. Blank manual algorithm, digits, and period fields default
+to SHA-1, 6, and 30 seconds. Invalid input keeps the form open and writes no
+revision.
+
+The Login detail generates the current code locally and refreshes its
+expiration window every second. The TOTP secret and `otpauth` URI remain
+masked in the setup form. The complete supported configuration is serialized
+without dropping issuer, account, algorithm, digits, or period, then encrypted
+inside the Login payload.
+
 Changing a non-empty password stores the replaced value with its UTC change
 timestamp inside the encrypted Login, newest first, keeping at most five.
 Saving the same password does not add an entry. Historical passwords remain
@@ -116,7 +130,8 @@ session agent; its local IPC exposes only seal/open operations.
 The server stores and returns the opaque envelope plus account ownership,
 item UUID, schema version, revision number, immutable revision UUID, and
 parent revision UUIDs. It cannot inspect or index Login names, usernames,
-passwords, password history, URLs, notes, or custom fields.
+passwords, password history, URLs, notes, custom fields, or TOTP
+configuration.
 
 ## Secure Notes
 
@@ -153,6 +168,14 @@ termkeep secret --item ITEM_UUID --field password --stdout
 termkeep secret --item ITEM_UUID --field notes --stdout
 termkeep secret --item ITEM_UUID --field content --stdout
 termkeep secret --item ITEM_UUID --field 'custom:API token' --stdout
+```
+
+Current TOTP output uses the same unlocked terminal session and requires the
+same explicit stdout opt-in. The client decrypts the Login and generates the
+code locally:
+
+```sh
+termkeep totp --item ITEM_UUID --stdout
 ```
 
 Account creation also requires `--stdout-recovery-key` before the one-time

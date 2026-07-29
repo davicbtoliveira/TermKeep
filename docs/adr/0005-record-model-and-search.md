@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-07-21
-- Updated: 2026-07-28
+- Updated: 2026-07-29
 
 ## Context
 
@@ -28,7 +28,9 @@ After unlock, the client builds an in-memory fuzzy index over item name, usernam
 
 Bitwarden, 1Password, and generic CSV exports are parsed locally. Import previews never merge items automatically. Semantically identical records are retained and renamed with `(Duplicada)`, then `(Duplicada) - 2`, `(Duplicada) - 3`, and so on. Same-name records with different content are not duplicates.
 
-TOTP accepts `otpauth://` URIs or manual parameters; QR decoding is deferred. Secrets are hidden by default and can be revealed or copied. Clipboard content is cleared after 30 seconds only if unchanged.
+TOTP accepts `otpauth://totp/...` URIs or manual Base32 secret, issuer, account, algorithm, digits, and period parameters; QR decoding is deferred. SHA-1, SHA-256, and SHA-512 are supported with 6- or 8-digit codes. Manual algorithm, digits, and period default to SHA-1, 6, and 30 seconds. URI labels and supported parameters are retained in the encrypted Login payload, while malformed or unsupported input is rejected before a new revision is queued.
+
+Codes are derived locally from RFC 4226/6238 HOTP/TOTP primitives. The unlocked TUI displays the current code and refreshes its expiration window; the CLI requires an explicit `totp --item UUID --stdout` action. Neither the TOTP configuration nor generated codes enter the search index, server requests in plaintext, or audit events.
 
 The random-password generator supports 5–128 characters, uppercase, lowercase, digits, special characters, minimum digit/special counts, and ambiguous-character exclusion. Passphrases are deferred. Pwned-password checks use a configurable k-anonymity-compatible endpoint directly from the client, only from the generator or an explicit item-view action.
 
