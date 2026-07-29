@@ -152,6 +152,22 @@ queue. Concurrent organization changes remain explicit Conflicts. The Server
 sees only generic Item/revision metadata and cannot identify Folder names,
 associations, favorite status, or native record types.
 
+## Local fuzzy search
+
+Press `/` from the unlocked vault and type a partial query to search Item
+titles, Login usernames, URLs and domains, Folder names, and custom-field
+names. Results use deterministic relevance ranking and keep the `★` marker on
+favorites. Press `enter` to keep the current results or `esc` to clear the
+query.
+
+Login Notes and Secure Note content are excluded from ordinary search. Press
+`ctrl+f` to start the separate Notes-content mode. Passwords, password history,
+TOTP secrets, and custom-field values are excluded in both modes.
+
+The index is rebuilt from decrypted Items after unlock and remains only in the
+TUI process memory. It is never written to the encrypted cache, synchronized,
+or sent to the Server.
+
 ## Offline use and synchronization
 
 A successful registration or online login authorizes an encrypted local
