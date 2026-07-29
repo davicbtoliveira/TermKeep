@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/davicbtoliveira/TermKeep/internal/client"
@@ -242,4 +244,65 @@ func TestRequestedSecretSupportsExplicitNativeFields(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAccountCreationRequiresExplicitRecoveryKeyStdoutFlag(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		run  func() int
+	}{
+		{
+			name: "bootstrap",
+			run: func() int {
+				return runBootstrap(client.Config{}, []string{
+					"--email", "admin@example.com",
+				})
+			},
+		},
+		{
+			name: "register",
+			run: func() int {
+				return runRegister(client.Config{}, []string{
+					"--email", "user@example.com",
+					"--invite-token", "invite-token",
+				})
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			stderr := captureStderr(t, test.run)
+			if !strings.Contains(stderr, "--stdout-recovery-key") {
+				t.Fatalf("usage omitted explicit flag:\n%s", stderr)
+			}
+			if strings.Contains(stderr, "Master password:") {
+				t.Fatalf("command prompted before explicit flag:\n%s", stderr)
+			}
+		})
+	}
+}
+
+func captureStderr(t *testing.T, run func() int) string {
+	t.Helper()
+	read, write, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := os.Stderr
+	os.Stderr = write
+	defer func() { os.Stderr = original }()
+	code := run()
+	if err := write.Close(); err != nil {
+		t.Fatal(err)
+	}
+	output, err := io.ReadAll(read)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := read.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if code != exitUsageFailure {
+		t.Fatalf("exit code: got %d, want %d", code, exitUsageFailure)
+	}
+	return string(output)
 }
