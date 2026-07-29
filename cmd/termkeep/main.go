@@ -543,7 +543,91 @@ func runBitwardenImportAt(
 		fmt.Fprintln(stdout, "Preview only; rerun with --confirm to import.")
 		return nil
 	}
-	return errors.New("confirmed Bitwarden import unavailable")
+	if len(preview.Errors) != 0 {
+		return errors.New(
+			"Bitwarden preview contains errors; import canceled",
+		)
+	}
+	if err := queueBitwardenImport(
+		ctx,
+		cache,
+		socketPath,
+		preview.Items,
+	); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "Imported locally: %d\n", len(preview.Items))
+	return nil
+}
+
+func queueBitwardenImport(
+	ctx context.Context,
+	cache *client.Cache,
+	socketPath string,
+	items []client.NativeItem,
+) error {
+	for _, native := range items {
+		var (
+			encrypted client.EncryptedItem
+			err       error
+		)
+		switch native.Type {
+		case client.NativeItemTypeLogin:
+			if native.Login == nil {
+				return client.ErrInvalidItemEnvelope
+			}
+			encrypted, err = session.SealLogin(
+				ctx,
+				socketPath,
+				*native.Login,
+				1,
+			)
+		case client.NativeItemTypeSecureNote:
+			if native.SecureNote == nil {
+				return client.ErrInvalidItemEnvelope
+			}
+			encrypted, err = session.SealSecureNote(
+				ctx,
+				socketPath,
+				*native.SecureNote,
+				1,
+			)
+		case client.NativeItemTypeFolder:
+			if native.Folder == nil {
+				return client.ErrInvalidItemEnvelope
+			}
+			encrypted, err = session.SealFolder(
+				ctx,
+				socketPath,
+				*native.Folder,
+				1,
+			)
+		case client.NativeItemTypeGeneric:
+			if native.Generic == nil {
+				return client.ErrInvalidItemEnvelope
+			}
+			encrypted, err = session.SealGenericItem(
+				ctx,
+				socketPath,
+				*native.Generic,
+				1,
+			)
+		default:
+			return client.ErrInvalidItemEnvelope
+		}
+		if err != nil {
+			return errors.New("encrypt imported Item failed")
+		}
+		revisionID, err := client.NewItemID()
+		if err != nil {
+			return errors.New("create imported revision failed")
+		}
+		encrypted.RevisionID = revisionID
+		if _, err := cache.QueueMutation(encrypted, 0); err != nil {
+			return errors.New("queue imported Item failed")
+		}
+	}
+	return nil
 }
 
 func cachedNativeItems(
