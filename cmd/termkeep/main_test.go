@@ -140,6 +140,54 @@ func TestTOTPRequestRequiresExplicitStdoutFlag(t *testing.T) {
 	}
 }
 
+func TestPasswordGeneratorRequestRequiresExplicitValidOutput(t *testing.T) {
+	_, err := parsePasswordGeneratorRequest([]string{
+		"--length", "32",
+	})
+	if !errors.Is(err, errPasswordGeneratorUsage) {
+		t.Fatalf("missing --stdout error: got %v", err)
+	}
+	_, err = parsePasswordGeneratorRequest([]string{
+		"--length", "4",
+		"--stdout",
+	})
+	if !errors.Is(err, errPasswordGeneratorUsage) {
+		t.Fatalf("invalid config error: got %v", err)
+	}
+
+	request, err := parsePasswordGeneratorRequest([]string{
+		"--length", "32",
+		"--uppercase=true",
+		"--lowercase=true",
+		"--digits=true",
+		"--special=false",
+		"--min-digits", "4",
+		"--min-special", "0",
+		"--exclude-ambiguous",
+		"--stdout",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := client.PasswordGeneratorConfig{
+		Length:           32,
+		Uppercase:        true,
+		Lowercase:        true,
+		Digits:           true,
+		Special:          false,
+		MinimumDigits:    4,
+		MinimumSpecial:   0,
+		ExcludeAmbiguous: true,
+	}
+	if request.config != want {
+		t.Fatalf(
+			"generator config:\nwant: %+v\ngot:  %+v",
+			want,
+			request.config,
+		)
+	}
+}
+
 func TestSecretCommandWritesRequestedPassword(t *testing.T) {
 	accountID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 	itemID := "11111111-1111-4111-8111-111111111111"
