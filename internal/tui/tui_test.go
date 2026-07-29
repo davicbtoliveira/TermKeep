@@ -1182,6 +1182,71 @@ func TestBitwardenImportPreviewsLocallyAndCancelsWithoutChanges(
 	}
 }
 
+func TestBitwardenImportConfirmsAsOfflineItems(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bitwarden.json")
+	if err := os.WriteFile(path, []byte(`{
+		"encrypted": false,
+		"folders": [{
+			"id": "source-folder-id",
+			"name": "Imported Folder"
+		}],
+		"items": [{
+			"type": 1,
+			"name": "Imported account",
+			"folderId": "source-folder-id",
+			"login": {
+				"username": "imported@example.com",
+				"password": "Imported-Password-Sentinel"
+			}
+		}, {
+			"type": 3,
+			"name": "Imported card",
+			"card": {"number": "Card-Number-Sentinel"}
+		}]
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := &fakeItemStore{}
+	var current tea.Model = model{
+		loaded:    true,
+		vaultOpen: true,
+		itemStore: store,
+	}
+	current, _ = current.Update(tea.KeyMsg{
+		Type:  tea.KeyRunes,
+		Runes: []rune{'i'},
+	})
+	current, _ = current.Update(tea.KeyMsg{
+		Type:  tea.KeyRunes,
+		Runes: []rune(path),
+	})
+	current, command := current.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	current, _ = current.Update(command())
+	current, command = current.Update(tea.KeyMsg{
+		Type:  tea.KeyRunes,
+		Runes: []rune{'y'},
+	})
+	if command == nil || len(store.saved) != 0 {
+		t.Fatal("confirmation changed Vault before save command")
+	}
+	current, _ = current.Update(command())
+	if len(store.saved) != 3 ||
+		store.saved[0].Folder == nil ||
+		store.saved[1].Login.Name != "Imported account" ||
+		store.saved[1].Revision != 1 ||
+		store.saved[2].Generic == nil ||
+		store.saved[2].Generic.Title != "Imported card" ||
+		store.saved[2].Revision != 1 {
+		t.Fatalf("imported records: %+v", store.saved)
+	}
+	view := current.(model).View()
+	if !strings.Contains(view, "[Login] Imported account") ||
+		!strings.Contains(view, "[Generic] Imported card") ||
+		strings.Contains(view, "Bitwarden import preview") {
+		t.Fatalf("confirmed import not visible in Vault:\n%s", view)
+	}
+}
+
 func TestGeneratedPasswordIgnoresStalePwnedResult(t *testing.T) {
 	const password = "Password-Sentinel#2026"
 	sum := sha1.Sum([]byte(password))
