@@ -784,6 +784,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.searchMode = client.SearchModeMetadata
 				m.selectedItem = 0
 			}
+		case "ctrl+f":
+			if m.vaultOpen && !m.showSessions && !m.showActivity &&
+				!m.showItem && !m.showTrash && !m.showFolders &&
+				!m.showFolderConflict {
+				m.searching = true
+				m.searchQuery = ""
+				m.searchMode = client.SearchModeNoteContents
+				m.selectedItem = 0
+			}
 		case "s":
 			if m.vaultOpen && m.accessToken != "" && !m.showFolders {
 				m.showActivity = false
@@ -1362,8 +1371,14 @@ func (m model) View() string {
 		default:
 			b.WriteString("Vault:    unlocked\n")
 			if m.searching || m.searchQuery != "" {
+				searchMode := "metadata"
+				if m.searchMode == client.SearchModeNoteContents {
+					searchMode = "Notes"
+				}
 				b.WriteString(
-					"Search:   metadata — " +
+					"Search:   " +
+						searchMode +
+						" — " +
 						m.searchQuery +
 						"\n",
 				)
@@ -1437,7 +1452,8 @@ func (m model) View() string {
 		}
 		b.WriteString(
 			"\n[c] new Login  [n] new Secure Note  " +
-				"[/] search  [enter] open  [f] Favorites  " +
+				"[/] search  [ctrl+f] Notes search  " +
+				"[enter] open  [f] Favorites  " +
 				"[o] Folders  [t] Trash  ",
 		)
 		if m.accessToken != "" {
