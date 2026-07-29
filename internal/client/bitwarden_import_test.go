@@ -2,6 +2,8 @@ package client
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"reflect"
 	"strings"
 	"testing"
@@ -341,4 +343,65 @@ func TestPreviewBitwardenImportRenamesOnlySemanticDuplicates(
 		t.Fatalf("duplicate names:\nwant: %v\ngot:  %v",
 			want, names)
 	}
+}
+
+func TestPreviewBitwardenImportRejectsUnsafeInput(t *testing.T) {
+	tests := []struct {
+		name    string
+		reader  io.Reader
+		wantErr error
+	}{
+		{
+			name:    "malformed JSON",
+			reader:  strings.NewReader(`{"encrypted":false`),
+			wantErr: ErrInvalidBitwardenExport,
+		},
+		{
+			name: "encrypted export",
+			reader: strings.NewReader(
+				`{"encrypted":true,"folders":[],"items":[]}`,
+			),
+			wantErr: ErrInvalidBitwardenExport,
+		},
+		{
+			name: "trailing JSON",
+			reader: strings.NewReader(
+				`{"encrypted":false,"items":[]} {}`,
+			),
+			wantErr: ErrInvalidBitwardenExport,
+		},
+		{
+			name: "oversized export",
+			reader: io.MultiReader(
+				strings.NewReader(
+					`{"encrypted":false,"items":[]}`,
+				),
+				io.LimitReader(
+					repeatedByteReader{' '},
+					maxBitwardenExportSize,
+				),
+			),
+			wantErr: ErrBitwardenExportTooLarge,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := PreviewBitwardenImport(test.reader, nil)
+			if !errors.Is(err, test.wantErr) {
+				t.Fatalf("want %v, got %v", test.wantErr, err)
+			}
+		})
+	}
+}
+
+type repeatedByteReader struct {
+	value byte
+}
+
+func (reader repeatedByteReader) Read(buffer []byte) (int, error) {
+	for index := range buffer {
+		buffer[index] = reader.value
+	}
+	return len(buffer), nil
 }
