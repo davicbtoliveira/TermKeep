@@ -304,6 +304,52 @@ func TestPreviewBitwardenImportReportsUnmappedNativeFields(
 	}
 }
 
+func TestPreviewBitwardenImportReportsUnmappedSecureNoteFields(
+	t *testing.T,
+) {
+	export := `{
+		"encrypted": false,
+		"folders": [],
+		"items": [{
+			"type": 2,
+			"name": "Recovery procedure",
+			"notes": "Sensitive recovery steps",
+			"reprompt": 1,
+			"fields": [{
+				"name": "owner",
+				"value": "platform",
+				"type": 0
+			}],
+			"secureNote": {"type": 1}
+		}]
+	}`
+
+	preview, err := PreviewBitwardenImport(
+		strings.NewReader(export),
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(preview.Items) != 1 ||
+		preview.Items[0].SecureNote == nil ||
+		len(preview.Errors) != 0 {
+		t.Fatalf("preview did not retain Secure Note: %+v", preview)
+	}
+	var fields []string
+	for _, issue := range preview.UnmappedFields {
+		fields = append(fields, issue.Field)
+	}
+	want := []string{"reprompt", "fields[0]", "secureNote.type"}
+	if !reflect.DeepEqual(fields, want) {
+		t.Fatalf(
+			"unmapped Secure Note fields:\nwant: %v\ngot:  %v",
+			want,
+			fields,
+		)
+	}
+}
+
 func TestPreviewBitwardenImportRenamesOnlySemanticDuplicates(
 	t *testing.T,
 ) {
