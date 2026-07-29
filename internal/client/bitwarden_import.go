@@ -30,7 +30,7 @@ type BitwardenImportPreview struct {
 type bitwardenExport struct {
 	Encrypted bool              `json:"encrypted"`
 	Folders   []bitwardenFolder `json:"folders"`
-	Items     []bitwardenItem   `json:"items"`
+	Items     []json.RawMessage `json:"items"`
 }
 
 type bitwardenFolder struct {
@@ -97,7 +97,18 @@ func PreviewBitwardenImport(
 		})
 		preview.Counts.Folders++
 	}
-	for index, item := range source.Items {
+	for index, rawItem := range source.Items {
+		var item bitwardenItem
+		if err := json.Unmarshal(rawItem, &item); err != nil {
+			preview.Errors = append(
+				preview.Errors,
+				BitwardenImportIssue{
+					Item:    index + 1,
+					Message: "invalid Bitwarden Item",
+				},
+			)
+			continue
+		}
 		folderID := ""
 		if item.FolderID != "" {
 			var found bool
@@ -114,13 +125,13 @@ func PreviewBitwardenImport(
 				continue
 			}
 		}
-		if item.Type != 1 && item.Type != 2 {
+		if item.Type < 1 {
 			preview.Errors = append(
 				preview.Errors,
 				BitwardenImportIssue{
 					Item:    index + 1,
 					Field:   "type",
-					Message: "unsupported Bitwarden Item type",
+					Message: "invalid Bitwarden Item type",
 				},
 			)
 			continue
@@ -142,6 +153,23 @@ func PreviewBitwardenImport(
 				SecureNote: &note,
 			})
 			preview.Counts.SecureNotes++
+			continue
+		}
+		if item.Type != 1 {
+			generic := GenericItem{
+				ItemID:     itemID,
+				Title:      strings.TrimSpace(item.Name),
+				Source:     "bitwarden",
+				SourceType: bitwardenSourceType(item.Type),
+				FolderID:   folderID,
+				Favorite:   item.Favorite,
+				Data:       append([]byte(nil), rawItem...),
+			}
+			preview.Items = append(preview.Items, NativeItem{
+				Type:    NativeItemTypeGeneric,
+				Generic: &generic,
+			})
+			preview.Counts.Generic++
 			continue
 		}
 		urls := make([]string, 0, len(item.Login.URIs))
@@ -205,4 +233,17 @@ func bitwardenTOTP(raw string, username string) (TOTPConfig, error) {
 		return ParseTOTPURI(raw)
 	}
 	return NewTOTPConfig(raw, "", strings.TrimSpace(username), "", 0, 0)
+}
+
+func bitwardenSourceType(itemType int) string {
+	switch itemType {
+	case 3:
+		return "card"
+	case 4:
+		return "identity"
+	case 5:
+		return "ssh_key"
+	default:
+		return fmt.Sprintf("type_%d", itemType)
+	}
 }
