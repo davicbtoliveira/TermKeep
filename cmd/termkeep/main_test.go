@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/davicbtoliveira/TermKeep/internal/client"
 	"github.com/davicbtoliveira/TermKeep/internal/session"
@@ -119,6 +120,26 @@ func TestSecretRequestRequiresExplicitStdoutFlag(t *testing.T) {
 	}
 }
 
+func TestTOTPRequestRequiresExplicitStdoutFlag(t *testing.T) {
+	_, err := parseTOTPRequest([]string{
+		"--item", "11111111-1111-4111-8111-111111111111",
+	})
+	if !errors.Is(err, errTOTPUsage) {
+		t.Fatalf("missing --stdout error: got %v", err)
+	}
+
+	request, err := parseTOTPRequest([]string{
+		"--item", "11111111-1111-4111-8111-111111111111",
+		"--stdout",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.itemID != "11111111-1111-4111-8111-111111111111" {
+		t.Fatalf("TOTP request: %+v", request)
+	}
+}
+
 func TestSecretCommandWritesRequestedPassword(t *testing.T) {
 	accountID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 	itemID := "11111111-1111-4111-8111-111111111111"
@@ -194,6 +215,90 @@ func TestSecretCommandWritesRequestedPassword(t *testing.T) {
 	}
 	if got := stdout.String(); got != "Password-Sentinel\n" {
 		t.Fatalf("secret stdout: got %q", got)
+	}
+}
+
+func TestTOTPCommandWritesCurrentCodeFromUnlockedCache(t *testing.T) {
+	accountID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	itemID := "11111111-1111-4111-8111-111111111111"
+	password := []byte("TermKeep#2026")
+	vault, err := client.NewVault(password, accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vault.Clear()
+	cfg := client.Config{DataDir: filepath.Join(t.TempDir(), "cache")}
+	if err := client.AuthorizeCache(
+		cfg,
+		"user@example.com",
+		accountID,
+		vault.PasswordEnvelope,
+	); err != nil {
+		t.Fatal(err)
+	}
+	cache, err := client.OpenCache(cfg, "user@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := client.EncryptLogin(
+		vault.Key,
+		accountID,
+		client.LoginItem{
+			ItemID: itemID,
+			Name:   "Production database",
+			TOTP: &client.TOTPConfig{
+				Secret:    "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+				Algorithm: client.TOTPAlgorithmSHA1,
+				Digits:    6,
+				Period:    30,
+			},
+		},
+		1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item.RevisionID = "22222222-2222-4222-8222-222222222222"
+	if _, err := cache.QueueMutation(item, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	socketPath := filepath.Join(t.TempDir(), "agent.sock")
+	agent, err := session.NewAgent(session.AgentConfig{
+		SocketPath: socketPath,
+		OwnerUID:   uint32(os.Getuid()),
+		AccountID:  accountID,
+		Email:      "user@example.com",
+		VaultKey:   vault.Key,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- agent.Serve(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		_ = agent.Close()
+		if err := <-done; err != nil {
+			t.Errorf("serve agent: %v", err)
+		}
+	})
+
+	var stdout bytes.Buffer
+	err = outputTOTPAt(
+		context.Background(),
+		cfg,
+		socketPath,
+		totpRequest{itemID: itemID},
+		time.Unix(59, 0),
+		&stdout,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stdout.String(); got != "287082\n" {
+		t.Fatalf("TOTP stdout: got %q", got)
 	}
 }
 
