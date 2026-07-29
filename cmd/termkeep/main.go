@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -324,6 +325,64 @@ func parseSecretRequest(args []string) (secretRequest, error) {
 		return secretRequest{}, errSecretUsage
 	}
 	return secretRequest{itemID: *itemID, field: *field}, nil
+}
+
+func outputSecretAt(
+	ctx context.Context,
+	cfg client.Config,
+	socketPath string,
+	request secretRequest,
+	stdout io.Writer,
+) error {
+	info, err := session.Status(ctx, socketPath)
+	if err != nil {
+		return errors.New("read unlocked session failed")
+	}
+	cache, err := client.OpenCache(cfg, info.Email)
+	if err != nil {
+		return errors.New("open encrypted cache failed")
+	}
+	groups, err := cache.ItemHeads()
+	if err != nil {
+		return errors.New("read encrypted cache failed")
+	}
+	for _, group := range groups {
+		if group.ItemID != request.itemID {
+			continue
+		}
+		if len(group.Revisions) != 1 ||
+			group.Revisions[0].Deleted ||
+			group.Revisions[0].Purged {
+			return errors.New(
+				"resolve Item conflict before reading secret")
+		}
+		opened, err := session.OpenNativeItem(
+			ctx, socketPath, group.Revisions[0])
+		if err != nil {
+			return errors.New("decrypt Item failed")
+		}
+		value, err := requestedSecret(opened, request.field)
+		if err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintln(stdout, value); err != nil {
+			return errors.New("write secret output failed")
+		}
+		return nil
+	}
+	return errors.New("Item not found")
+}
+
+func requestedSecret(
+	item client.NativeItem,
+	field string,
+) (string, error) {
+	if field == "password" &&
+		item.Type == client.NativeItemTypeLogin &&
+		item.Login != nil {
+		return item.Login.Password, nil
+	}
+	return "", errors.New("secret field unavailable for Item")
 }
 
 func runVaultTUI(cfg client.Config, socketPath string) int {
