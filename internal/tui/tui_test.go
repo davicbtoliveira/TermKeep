@@ -1057,6 +1057,24 @@ func TestInvalidLoginTOTPDoesNotPersistPartialChanges(t *testing.T) {
 	}
 }
 
+func TestTOTPFormAcceptsLetterQAsInput(t *testing.T) {
+	updated, command := model{
+		showTOTPForm: true,
+		totpForm: totpForm{
+			field: 1,
+		},
+	}.Update(tea.KeyMsg{
+		Type:  tea.KeyRunes,
+		Runes: []rune{'q'},
+	})
+	if command != nil {
+		t.Fatal("letter q unexpectedly quit TOTP form")
+	}
+	if got := updated.(model).totpForm.values[1]; got != "q" {
+		t.Fatalf("TOTP form input: want q, got %q", got)
+	}
+}
+
 func TestLoginDetailShowsCurrentTOTPWindowWithoutSecret(t *testing.T) {
 	record := itemRecord{
 		Login: client.LoginItem{
