@@ -791,6 +791,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, schedulePeriodicSync()
 	case totpRefreshMsg:
+		if m.showTOTPForm &&
+			m.totpForm.record.Login.TOTP != nil {
+			return m, scheduleTOTPRefresh()
+		}
 		record, selected := m.selectedItemRecord()
 		if m.showItem && selected &&
 			len(record.ConflictVersions) == 0 &&
@@ -2056,9 +2060,6 @@ func (m model) updateTOTPForm(
 		m.showTOTPForm = false
 		m.showItem = true
 		m.itemFormErr = nil
-		if m.totpForm.record.Login.TOTP != nil {
-			return m, scheduleTOTPRefresh()
-		}
 		return m, nil
 	case "ctrl+u":
 		m.totpForm.values[m.totpForm.field] = ""
