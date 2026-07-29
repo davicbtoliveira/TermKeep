@@ -37,7 +37,9 @@ func ValidatePasswordGeneratorConfig(
 		config.MinimumSpecial < 0 ||
 		(config.MinimumDigits > 0 && !config.Digits) ||
 		(config.MinimumSpecial > 0 && !config.Special) ||
-		config.MinimumDigits+config.MinimumSpecial > config.Length ||
+		config.MinimumDigits > config.Length ||
+		config.MinimumSpecial >
+			config.Length-config.MinimumDigits ||
 		passwordCharacterSet(config) == "" {
 		return ErrInvalidPasswordGeneratorConfig
 	}
