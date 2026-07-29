@@ -1144,7 +1144,7 @@ func TestCancelingTOTPSetupResumesCodeRefresh(t *testing.T) {
 		Digits:    6,
 		Period:    30,
 	}
-	updated, command := model{
+	updated, _ := model{
 		showTOTPForm: true,
 		totpForm: totpForm{
 			record: itemRecord{
@@ -1156,8 +1156,30 @@ func TestCancelingTOTPSetupResumesCodeRefresh(t *testing.T) {
 			},
 		},
 	}.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	if !updated.(model).showItem || command == nil {
-		t.Fatal("canceling TOTP setup did not resume detail refresh")
+	if !updated.(model).showItem {
+		t.Fatal("canceling TOTP setup did not return to detail")
+	}
+}
+
+func TestTOTPRefreshContinuesWhileSetupIsOpen(t *testing.T) {
+	config := &client.TOTPConfig{
+		Secret:    "JBSWY3DPEHPK3PXP",
+		Algorithm: client.TOTPAlgorithmSHA1,
+		Digits:    6,
+		Period:    30,
+	}
+	_, command := model{
+		showTOTPForm: true,
+		totpForm: totpForm{
+			record: itemRecord{
+				Login: client.LoginItem{
+					TOTP: config,
+				},
+			},
+		},
+	}.Update(totpRefreshMsg{})
+	if command == nil {
+		t.Fatal("open TOTP setup stopped the pending refresh chain")
 	}
 }
 
