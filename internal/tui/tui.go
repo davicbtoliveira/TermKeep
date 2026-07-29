@@ -2050,7 +2050,7 @@ func (m model) updateTOTPForm(
 		return m, nil
 	}
 	switch msg.String() {
-	case "ctrl+c", "q":
+	case "ctrl+c":
 		return m, tea.Quit
 	case "esc":
 		m.showTOTPForm = false
