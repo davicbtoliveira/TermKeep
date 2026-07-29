@@ -34,7 +34,11 @@ Codes are derived locally from RFC 4226/6238 HOTP/TOTP primitives. The unlocked 
 
 The random-password generator supports 5–128 characters and independently enabled ASCII uppercase, lowercase, digit, and `!@#$%^&*()-_=+[]{};:,.?/|` special-character sets. Users may require minimum digit and special counts. Exclude-ambiguous removes `I`, `l`, `1`, `O`, `o`, `0`, and `|` from both general and minimum-required pools. Empty character pools, disabled required pools, out-of-range lengths, negative minimums, and combined minimums above length are rejected before generation.
 
-Generation and unbiased shuffling use Go's `crypto/rand`, backed by the Linux operating-system cryptographic random source. The TUI masks generated output until explicit reveal or copy; CLI output requires `generate-password ... --stdout`. Generation is local and produces no server request, synchronization, persistence, audit event, or log entry. Passphrases are deferred. Pwned-password checks use a configurable k-anonymity-compatible endpoint directly from the client, only from the generator or an explicit item-view action.
+Generation and unbiased shuffling use Go's `crypto/rand`, backed by the Linux operating-system cryptographic random source. The TUI masks generated output until explicit reveal or copy; CLI output requires `generate-password ... --stdout`. Generation is local and produces no server request, synchronization, persistence, audit event, or log entry. Passphrases are deferred.
+
+Pwned-password checks use a configurable k-anonymity-compatible range endpoint directly from the Client. They run only after an explicit action in Password Generator or a Login detail; open, type, generate, save, import, sync, and background work never start them. The Client computes SHA-1 locally, sends only its five-character prefix with response padding requested, and matches the suffix locally. Passwords, full hashes, account emails, Login URLs, and Login domains are never included in the request or logs. The result distinguishes no match, a match and occurrence count, endpoint unavailability, and an invalid response.
+
+The public Pwned Passwords range API is the default. Operators may configure a compatible self-hosted endpoint or disable the feature with `off`. Endpoints require HTTPS outside localhost, use the configured CA trust anchor, reject embedded credentials, query strings, and fragments, and do not follow redirects.
 
 Encrypted portable backup and guarded plaintext JSON/CSV export are supported. Encrypted backups use a distinct backup password.
 

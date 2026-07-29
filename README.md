@@ -69,7 +69,8 @@ compromised client host.
 An unlocked online vault lists Login names and usernames. Use `j`/`k` to
 select an item and `enter` to open it. Passwords are masked by default; press
 `p` in the detail view to reveal or hide the selected password, or `c` to
-copy it without revealing it.
+copy it without revealing it. Press `b` to explicitly check the current
+password against the configured Pwned Passwords range endpoint.
 
 Press `c` in the vault to create a Login or `e` on an existing Login to edit
 it. The form captures name, username, password, comma-separated URLs, notes,
@@ -192,8 +193,8 @@ termkeep register --email user@example.com --invite-token TOKEN \
 Press `g` from an unlocked vault to open Password Generator. Configure length,
 enabled character sets, minimum digit/special counts, and ambiguous-character
 exclusion. Generated output is masked; press `p` to reveal, `c` to copy with
-the normal 30-second conditional clipboard cleanup, or `g` to regenerate from
-the same configuration.
+the normal 30-second conditional clipboard cleanup, `b` to explicitly check
+it against Pwned Passwords, or `g` to regenerate from the same configuration.
 
 Supported length is 5–128. Character sets are:
 
@@ -222,6 +223,32 @@ Generation uses Go's `crypto/rand`, backed by the Linux operating-system
 cryptographic random source. Passwords remain in the client process and
 explicit output destination only; generation performs no server request,
 synchronization, persistence, audit event, or logging.
+
+## Pwned Passwords checks
+
+Pwned Passwords checks run only after `b` is pressed in Password Generator or
+a Login detail. Opening, typing, generating, saving, importing, synchronizing,
+or rendering never starts a check, and historical passwords are not checked.
+
+The client computes SHA-1 locally and sends a direct padded range request
+containing only the first five hexadecimal hash characters. It never sends or
+logs the password, full hash, email, Login URLs, or Login domains. The response
+is matched locally and reported as `not found`, `found` with an occurrence
+count, `unavailable`, or `invalid response`. A negative result does not prove
+that a password is safe.
+
+The default endpoint is `https://api.pwnedpasswords.com/range`. Operators may
+select a compatible self-hosted range endpoint or disable checks:
+
+```sh
+termkeep --pwned-passwords-url https://pwned.example.com/range
+TERMKEEP_PWNED_PASSWORDS_URL=https://pwned.example.com/range termkeep
+termkeep --pwned-passwords-url off
+```
+
+The endpoint must use HTTPS unless it is on localhost. Redirects, endpoint
+credentials, query strings, and fragments are refused. `TERMKEEP_CA_CERT`
+also supplies the trust anchor for a self-hosted endpoint.
 
 ## Folders and favorites
 

@@ -58,6 +58,17 @@ Client-side flags/environment:
 - `--ca-cert` / `TERMKEEP_CA_CERT` — PEM trust anchor for the deployment
   CA. TLS verification is never disabled; a validation failure is
   reported as a security error, not as offline mode.
+- `--pwned-passwords-url` / `TERMKEEP_PWNED_PASSWORDS_URL` — compatible
+  Pwned Passwords range endpoint. Defaults to
+  `https://api.pwnedpasswords.com/range`; use `off` to disable checks.
+  Self-hosted endpoints require HTTPS outside localhost and may use the
+  trust anchor configured by `--ca-cert` / `TERMKEEP_CA_CERT`.
+
+Password checks are direct client-to-endpoint requests and happen only after
+the explicit `b` action in Password Generator or a Login detail. The TermKeep
+server is not involved. Only a five-character SHA-1 prefix is sent, with
+response padding requested; the password, full hash, account email, Login
+URLs, and Login domains are neither sent nor logged.
 
 ## Secrets
 
