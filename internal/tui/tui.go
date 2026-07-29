@@ -31,6 +31,7 @@ type itemRecord struct {
 	Login             client.LoginItem
 	SecureNote        *client.SecureNoteItem
 	Folder            *client.FolderItem
+	Generic           *client.GenericItem
 	Revision          uint64
 	RevisionID        string
 	ParentRevisionIDs []string
@@ -647,6 +648,9 @@ func newSearchIndex(
 			})
 			continue
 		}
+		if record.Generic != nil {
+			continue
+		}
 		nativeItems = append(nativeItems, client.NativeItem{
 			Type:  client.NativeItemTypeLogin,
 			Login: &record.Login,
@@ -718,6 +722,9 @@ func recordFolderID(record itemRecord) string {
 	if record.SecureNote != nil {
 		return record.SecureNote.FolderID
 	}
+	if record.Generic != nil {
+		return record.Generic.FolderID
+	}
 	return record.Login.FolderID
 }
 
@@ -732,6 +739,9 @@ func recordIsFavorite(record itemRecord) bool {
 	}
 	if record.SecureNote != nil {
 		return record.SecureNote.Favorite
+	}
+	if record.Generic != nil {
+		return record.Generic.Favorite
 	}
 	return record.Login.Favorite
 }
@@ -753,6 +763,11 @@ func updateOrganization(
 		note.FolderID = folderID
 		note.Favorite = favorite
 		record.SecureNote = &note
+	} else if record.Generic != nil {
+		generic := *record.Generic
+		generic.FolderID = folderID
+		generic.Favorite = favorite
+		record.Generic = &generic
 	} else {
 		record.Login.FolderID = folderID
 		record.Login.Favorite = favorite
@@ -828,6 +843,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.showItem && selected &&
 			len(record.ConflictVersions) == 0 &&
 			record.SecureNote == nil &&
+			record.Generic == nil &&
 			record.Login.TOTP != nil {
 			return m, scheduleTOTPRefresh()
 		}
@@ -901,6 +917,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.showItem && selected &&
 				len(record.ConflictVersions) == 0 &&
 				record.SecureNote == nil &&
+				record.Generic == nil &&
 				!m.breachLoading {
 				m.breachCheckID++
 				m.breachLoading = true
@@ -921,6 +938,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						"Secure Note content",
 						record.SecureNote.Content,
 					)
+				}
+				if record.Generic != nil {
+					return m, nil
 				}
 				return m, copySecret(
 					m.clipboard,
@@ -1003,6 +1023,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				!m.showSessions && !m.showActivity &&
 				selected &&
 				len(record.ConflictVersions) == 0 {
+				if record.Generic != nil {
+					return m, nil
+				}
 				m.showItem = false
 				if record.SecureNote != nil {
 					m.showNoteForm = true
@@ -1051,14 +1074,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			record, selected := m.selectedItemRecord()
 			if m.showItem && selected &&
 				len(record.ConflictVersions) == 0 &&
-				record.SecureNote == nil {
+				record.SecureNote == nil &&
+				record.Generic == nil {
 				m.revealPassword = !m.revealPassword
 			}
 		case "h":
 			record, selected := m.selectedItemRecord()
 			if m.showItem && selected &&
 				len(record.ConflictVersions) == 0 &&
-				record.SecureNote == nil {
+				record.SecureNote == nil &&
+				record.Generic == nil {
 				m.showPasswordHistory = true
 				m.selectedHistory = 0
 				m.revealHistory = false
@@ -1130,6 +1155,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			record, selected := m.selectedItemRecord()
 			if m.showItem && selected {
 				if len(record.ConflictVersions) > 1 {
+					if record.Generic != nil {
+						return m, nil
+					}
 					m.showItem = false
 					if record.SecureNote != nil {
 						m.showNoteForm = true
@@ -1152,7 +1180,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			record, selected := m.selectedItemRecord()
 			if m.showItem && selected &&
 				len(record.ConflictVersions) == 0 &&
-				record.SecureNote == nil {
+				record.SecureNote == nil &&
+				record.Generic == nil {
 				m.showItem = false
 				m.showTOTPForm = true
 				m.totpForm = formForTOTP(record)
@@ -1221,6 +1250,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.clipboardErr = nil
 				m.clearBreachCheck()
 				if record.SecureNote == nil &&
+					record.Generic == nil &&
 					record.Login.TOTP != nil {
 					return m, scheduleTOTPRefresh()
 				}
@@ -1595,6 +1625,14 @@ func (m model) View() string {
 						cursor,
 						favoriteMarker(record),
 						record.SecureNote.Title,
+					)
+				} else if record.Generic != nil {
+					fmt.Fprintf(
+						&b,
+						"%s%s [Generic] %s\n",
+						cursor,
+						favoriteMarker(record),
+						record.Generic.Title,
 					)
 				} else {
 					fmt.Fprintf(&b, "%s%s [Login] %s — %s\n",
@@ -2781,6 +2819,11 @@ func (m model) trashView() string {
 					&b, "%s [Secure Note] %s\n",
 					cursor, record.SecureNote.Title,
 				)
+			} else if record.Generic != nil {
+				fmt.Fprintf(
+					&b, "%s [Generic] %s\n",
+					cursor, record.Generic.Title,
+				)
 			} else {
 				fmt.Fprintf(
 					&b, "%s [Login] %s — %s\n",
@@ -2942,6 +2985,28 @@ func (m model) itemView() string {
 	if len(record.ConflictVersions) > 1 {
 		return m.conflictView(record.ConflictVersions)
 	}
+	if record.Generic != nil {
+		var b strings.Builder
+		fmt.Fprintf(
+			&b,
+			"TermKeep — Generic — %s\n\n",
+			record.Generic.Title,
+		)
+		fmt.Fprintf(&b, "Source: %s\n", record.Generic.Source)
+		fmt.Fprintf(&b, "Source type: %s\n", record.Generic.SourceType)
+		fmt.Fprintf(
+			&b,
+			"Folder: %s\nFavorite: %s\n",
+			m.folderName(record.Generic.FolderID),
+			yesNo(record.Generic.Favorite),
+		)
+		fmt.Fprintf(&b, "Preserved data:\n%s\n", record.Generic.Data)
+		b.WriteString(
+			"\n[f] favorite/unfavorite  [o] move  [d] delete  " +
+				"[v] vault  [q] quit\n",
+		)
+		return b.String()
+	}
 	if record.SecureNote != nil {
 		var b strings.Builder
 		fmt.Fprintf(
@@ -3034,6 +3099,9 @@ func recordTitle(record itemRecord) string {
 	if record.SecureNote != nil {
 		return record.SecureNote.Title
 	}
+	if record.Generic != nil {
+		return record.Generic.Title
+	}
 	return record.Login.Name
 }
 
@@ -3043,6 +3111,9 @@ func recordItemID(record itemRecord) string {
 	}
 	if record.SecureNote != nil {
 		return record.SecureNote.ItemID
+	}
+	if record.Generic != nil {
+		return record.Generic.ItemID
 	}
 	return record.Login.ItemID
 }
@@ -3076,6 +3147,22 @@ func (m model) conflictView(versions []itemRecord) string {
 				"  Folder: %s\n  Favorite: %s\n\n",
 				m.folderName(version.SecureNote.FolderID),
 				yesNo(version.SecureNote.Favorite),
+			)
+			continue
+		}
+		if version.Generic != nil {
+			fmt.Fprintf(&b, "  Title: %s\n", version.Generic.Title)
+			fmt.Fprintf(&b, "  Source: %s\n", version.Generic.Source)
+			fmt.Fprintf(
+				&b,
+				"  Source type: %s\n",
+				version.Generic.SourceType,
+			)
+			fmt.Fprintf(
+				&b,
+				"  Folder: %s\n  Favorite: %s\n\n",
+				m.folderName(version.Generic.FolderID),
+				yesNo(version.Generic.Favorite),
 			)
 			continue
 		}
