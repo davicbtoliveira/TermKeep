@@ -106,6 +106,29 @@ func TestGenerateTOTPMatchesRFC6238Algorithms(t *testing.T) {
 	}
 }
 
+func TestGenerateTOTPUsesConfiguredDigitsAndPeriod(t *testing.T) {
+	config := TOTPConfig{
+		Secret:    "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+		Algorithm: TOTPAlgorithmSHA1,
+		Digits:    6,
+		Period:    45,
+	}
+	code, err := GenerateTOTP(config, time.Unix(59, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code.Value != "287082" {
+		t.Fatalf("code: want 287082, got %s", code.Value)
+	}
+	if want := time.Unix(90, 0); !code.ExpiresAt.Equal(want) {
+		t.Fatalf(
+			"expiration: want %s, got %s",
+			want,
+			code.ExpiresAt,
+		)
+	}
+}
+
 func TestParseTOTPURIKeepsSupportedParameters(t *testing.T) {
 	config, err := ParseTOTPURI(
 		"otpauth://totp/Example%20Co:alice%40example.com?" +
