@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"testing/quick"
+	"time"
 )
 
 func TestPreviewBitwardenImportNormalizesLogin(t *testing.T) {
@@ -143,6 +144,46 @@ func TestPreviewBitwardenImportPreservesNativeItems(t *testing.T) {
 		note.FolderID != folder.ItemID ||
 		!note.Favorite {
 		t.Fatalf("normalized Secure Note: %+v", note)
+	}
+}
+
+func TestPreviewBitwardenImportPreservesPasswordHistory(t *testing.T) {
+	export := `{
+		"encrypted": false,
+		"folders": [],
+		"items": [{
+			"type": 1,
+			"name": "Production database",
+			"passwordHistory": [{
+				"lastUsedDate": "2026-07-28T12:30:00Z",
+				"password": "Previous-Password-Sentinel"
+			}],
+			"login": {
+				"password": "Current-Password-Sentinel"
+			}
+		}]
+	}`
+
+	preview, err := PreviewBitwardenImport(
+		strings.NewReader(export),
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []PasswordHistoryEntry{{
+		Password: "Previous-Password-Sentinel",
+		ChangedAt: time.Date(
+			2026, time.July, 28, 12, 30, 0, 0, time.UTC,
+		),
+	}}
+	if len(preview.Items) != 1 ||
+		preview.Items[0].Login == nil ||
+		!reflect.DeepEqual(
+			preview.Items[0].Login.PasswordHistory,
+			want,
+		) {
+		t.Fatalf("password history differs: %+v", preview)
 	}
 }
 
