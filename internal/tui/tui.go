@@ -58,6 +58,7 @@ type syncResultMsg struct {
 	err     error
 }
 type periodicSyncMsg struct{}
+type totpRefreshMsg struct{}
 
 var periodicSyncInterval = 30 * time.Second
 var itemOperationTimeout = 10 * time.Second
@@ -274,6 +275,12 @@ func (m model) Init() tea.Cmd {
 func schedulePeriodicSync() tea.Cmd {
 	return tea.Tick(periodicSyncInterval, func(time.Time) tea.Msg {
 		return periodicSyncMsg{}
+	})
+}
+
+func scheduleTOTPRefresh() tea.Cmd {
+	return tea.Tick(time.Second, func(time.Time) tea.Msg {
+		return totpRefreshMsg{}
 	})
 }
 
@@ -783,6 +790,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			)
 		}
 		return m, schedulePeriodicSync()
+	case totpRefreshMsg:
+		record, selected := m.selectedItemRecord()
+		if m.showItem && selected &&
+			len(record.ConflictVersions) == 0 &&
+			record.SecureNote == nil &&
+			record.Login.TOTP != nil {
+			return m, scheduleTOTPRefresh()
+		}
+		return m, nil
 	case tea.KeyMsg:
 		if m.showTOTPForm {
 			return m.updateTOTPForm(msg)
@@ -1151,6 +1167,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.selectedConflict = 0
 				m.copiedField = ""
 				m.clipboardErr = nil
+				if record.SecureNote == nil &&
+					record.Login.TOTP != nil {
+					return m, scheduleTOTPRefresh()
+				}
 			}
 		case "g":
 			if m.showActivity && m.activityPage.CanViewAll {
