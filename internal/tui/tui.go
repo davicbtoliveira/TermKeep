@@ -47,7 +47,10 @@ type secretCopiedMsg struct {
 	field string
 	err   error
 }
-type breachCheckMsg client.PwnedPasswordResult
+type breachCheckMsg struct {
+	id     uint64
+	result client.PwnedPasswordResult
+}
 type itemSavedMsg struct {
 	items   []itemRecord
 	pending int
@@ -223,6 +226,7 @@ type model struct {
 	clipboardErr        error
 	breachLoading       bool
 	breachResult        *client.PwnedPasswordResult
+	breachCheckID       uint64
 	showPasswordHistory bool
 	selectedHistory     int
 	revealHistory       bool
@@ -898,11 +902,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				len(record.ConflictVersions) == 0 &&
 				record.SecureNote == nil &&
 				!m.breachLoading {
+				m.breachCheckID++
 				m.breachLoading = true
 				m.breachResult = nil
 				return m, checkPwnedPassword(
 					m.cfg,
 					record.Login.Password,
+					m.breachCheckID,
 				)
 			}
 		case "c":
@@ -952,8 +958,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.itemFormErr = nil
 				m.itemSaving = false
-				m.breachLoading = false
-				m.breachResult = nil
+				m.clearBreachCheck()
 			}
 		case "n":
 			if m.showActivity && m.activityPage.NextCursor != "" {
@@ -1214,8 +1219,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.selectedConflict = 0
 				m.copiedField = ""
 				m.clipboardErr = nil
-				m.breachLoading = false
-				m.breachResult = nil
+				m.clearBreachCheck()
 				if record.SecureNote == nil &&
 					record.Login.TOTP != nil {
 					return m, scheduleTOTPRefresh()
@@ -1239,8 +1243,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.generatorErr = nil
 				m.copiedField = ""
 				m.clipboardErr = nil
-				m.breachLoading = false
-				m.breachResult = nil
+				m.clearBreachCheck()
 				return m, nil
 			}
 		case "v":
@@ -1266,8 +1269,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.searchQuery = ""
 			m.copiedField = ""
 			m.clipboardErr = nil
-			m.breachLoading = false
-			m.breachResult = nil
+			m.clearBreachCheck()
 			return m, nil
 		case "j", "down":
 			if m.showSessions && m.selectedSession+1 < len(m.sessions) {
@@ -1436,7 +1438,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.copiedField = msg.field
 		}
 	case breachCheckMsg:
-		result := client.PwnedPasswordResult(msg)
+		if msg.id != m.breachCheckID {
+			break
+		}
+		result := msg.result
 		m.breachLoading = false
 		m.breachResult = &result
 	case itemSavedMsg:
@@ -1448,8 +1453,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.showPasswordHistory = false
 		m.historyClearConfirm = false
 		m.selectedConflict = 0
-		m.breachLoading = false
-		m.breachResult = nil
+		m.clearBreachCheck()
 		m.showLoginForm = false
 		m.showNoteForm = false
 		m.showFolderForm = false
@@ -1702,14 +1706,24 @@ func (m model) clipboardFeedback() string {
 func checkPwnedPassword(
 	cfg client.Config,
 	password string,
+	id uint64,
 ) tea.Cmd {
 	return func() tea.Msg {
-		return breachCheckMsg(client.CheckPwnedPassword(
-			context.Background(),
-			cfg,
-			password,
-		))
+		return breachCheckMsg{
+			id: id,
+			result: client.CheckPwnedPassword(
+				context.Background(),
+				cfg,
+				password,
+			),
+		}
 	}
+}
+
+func (m *model) clearBreachCheck() {
+	m.breachCheckID++
+	m.breachLoading = false
+	m.breachResult = nil
 }
 
 func (m model) breachFeedback() string {
@@ -1764,8 +1778,7 @@ func (m model) updatePasswordGenerator(
 			m.generatorErr = nil
 			m.copiedField = ""
 			m.clipboardErr = nil
-			m.breachLoading = false
-			m.breachResult = nil
+			m.clearBreachCheck()
 		case "p":
 			m.passwordGenerator.reveal =
 				!m.passwordGenerator.reveal
@@ -1777,11 +1790,13 @@ func (m model) updatePasswordGenerator(
 			)
 		case "b":
 			if !m.breachLoading {
+				m.breachCheckID++
 				m.breachLoading = true
 				m.breachResult = nil
 				return m, checkPwnedPassword(
 					m.cfg,
 					m.passwordGenerator.generated,
+					m.breachCheckID,
 				)
 			}
 		case "g":
@@ -1797,8 +1812,7 @@ func (m model) updatePasswordGenerator(
 			m.generatorErr = nil
 			m.copiedField = ""
 			m.clipboardErr = nil
-			m.breachLoading = false
-			m.breachResult = nil
+			m.clearBreachCheck()
 		}
 		return m, nil
 	}
@@ -1810,8 +1824,7 @@ func (m model) updatePasswordGenerator(
 		m.showGenerator = false
 		m.passwordGenerator = passwordGeneratorForm{}
 		m.generatorErr = nil
-		m.breachLoading = false
-		m.breachResult = nil
+		m.clearBreachCheck()
 		return m, nil
 	case "ctrl+u":
 		m.passwordGenerator.values[m.passwordGenerator.field] = ""
@@ -1840,8 +1853,7 @@ func (m model) updatePasswordGenerator(
 		m.passwordGenerator.generated = password
 		m.passwordGenerator.reveal = false
 		m.generatorErr = nil
-		m.breachLoading = false
-		m.breachResult = nil
+		m.clearBreachCheck()
 	default:
 		if msg.Type == tea.KeyRunes {
 			m.passwordGenerator.values[m.passwordGenerator.field] +=
