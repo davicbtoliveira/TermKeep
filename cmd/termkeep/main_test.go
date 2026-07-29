@@ -105,13 +105,49 @@ func TestBitwardenImportPreviewAndExplicitConfirmation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var (
+		syncRequests int
+		syncBody     []byte
+		synced       []client.Mutation
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(
+		w http.ResponseWriter,
+		r *http.Request,
+	) {
+		syncRequests++
+		syncBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var request struct {
+			Mutations []client.Mutation `json:"mutations"`
+		}
+		if err := json.Unmarshal(syncBody, &request); err != nil {
+			t.Fatal(err)
+		}
+		synced = request.Mutations
+		applied := make([]string, 0, len(synced))
+		changes := make([]client.EncryptedItem, 0, len(synced))
+		for _, mutation := range synced {
+			applied = append(applied, mutation.MutationID)
+			changes = append(changes, mutation.Item)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"cursor":               "1",
+			"applied_mutation_ids": applied,
+			"changes":              changes,
+		})
+	}))
+	defer server.Close()
+	cfg.ServerURL = server.URL
 	socketPath := filepath.Join(t.TempDir(), "agent.sock")
 	agent, err := session.NewAgent(session.AgentConfig{
-		SocketPath: socketPath,
-		OwnerUID:   uint32(os.Getuid()),
-		AccountID:  accountID,
-		Email:      "user@example.com",
-		VaultKey:   vault.Key,
+		SocketPath:  socketPath,
+		OwnerUID:    uint32(os.Getuid()),
+		AccountID:   accountID,
+		Email:       "user@example.com",
+		VaultKey:    vault.Key,
+		AccessToken: []byte("access-token"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -163,7 +199,7 @@ func TestBitwardenImportPreviewAndExplicitConfirmation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshot.Mutations) != 0 {
+	if len(snapshot.Mutations) != 0 || syncRequests != 0 {
 		t.Fatalf("preview queued mutations: %+v", snapshot)
 	}
 
@@ -186,23 +222,29 @@ func TestBitwardenImportPreviewAndExplicitConfirmation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshot.Mutations) != 1 {
-		t.Fatalf("confirmation mutations: %+v", snapshot)
+	if len(snapshot.Mutations) != 0 ||
+		syncRequests != 1 ||
+		len(synced) != 1 {
+		t.Fatalf(
+			"confirmation sync: snapshot=%+v requests=%d mutations=%+v",
+			snapshot,
+			syncRequests,
+			synced,
+		)
 	}
-	envelope := snapshot.Mutations[0].Item.Envelope
 	for _, forbidden := range []string{
 		"Imported account",
 		"imported@example.com",
 		"Imported-Password-Sentinel",
 	} {
-		if bytes.Contains(envelope, []byte(forbidden)) {
-			t.Fatalf("encrypted mutation exposed %q", forbidden)
+		if bytes.Contains(syncBody, []byte(forbidden)) {
+			t.Fatalf("synchronization request exposed %q", forbidden)
 		}
 	}
 	opened, err := session.OpenNativeItem(
 		context.Background(),
 		socketPath,
-		snapshot.Mutations[0].Item,
+		synced[0].Item,
 	)
 	if err != nil {
 		t.Fatal(err)
