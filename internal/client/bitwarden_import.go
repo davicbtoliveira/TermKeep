@@ -1,13 +1,24 @@
 package client
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
 	"sort"
 	"strings"
+)
+
+const maxBitwardenExportSize = 16 << 20
+
+var ErrInvalidBitwardenExport = errors.New(
+	"invalid Bitwarden export",
+)
+var ErrBitwardenExportTooLarge = errors.New(
+	"Bitwarden export exceeds 16 MiB",
 )
 
 type BitwardenImportCounts struct {
@@ -76,14 +87,39 @@ func PreviewBitwardenImport(
 	reader io.Reader,
 	existing []NativeItem,
 ) (BitwardenImportPreview, error) {
-	var source bitwardenExport
-	if err := json.NewDecoder(reader).Decode(&source); err != nil {
+	if reader == nil {
+		return BitwardenImportPreview{}, ErrInvalidBitwardenExport
+	}
+	input, err := io.ReadAll(io.LimitReader(
+		reader,
+		maxBitwardenExportSize+1,
+	))
+	if err != nil {
 		return BitwardenImportPreview{},
-			fmt.Errorf("parse Bitwarden export: %w", err)
+			fmt.Errorf("%w: read input", ErrInvalidBitwardenExport)
+	}
+	defer clearBytes(input)
+	if len(input) > maxBitwardenExportSize {
+		return BitwardenImportPreview{}, ErrBitwardenExportTooLarge
+	}
+
+	var source bitwardenExport
+	decoder := json.NewDecoder(bytes.NewReader(input))
+	if err := decoder.Decode(&source); err != nil {
+		return BitwardenImportPreview{},
+			fmt.Errorf("%w: parse JSON", ErrInvalidBitwardenExport)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return BitwardenImportPreview{},
+			fmt.Errorf("%w: trailing JSON", ErrInvalidBitwardenExport)
 	}
 	if source.Encrypted {
 		return BitwardenImportPreview{},
-			fmt.Errorf("encrypted Bitwarden exports are unsupported")
+			fmt.Errorf(
+				"%w: encrypted exports are unsupported",
+				ErrInvalidBitwardenExport,
+			)
 	}
 
 	preview := BitwardenImportPreview{}
