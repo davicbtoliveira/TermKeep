@@ -900,6 +900,200 @@ func TestCreateLoginCapturesAllNativeFields(t *testing.T) {
 	}
 }
 
+func TestLoginAcceptsTOTPURIWithoutExposingSecret(t *testing.T) {
+	record := itemRecord{
+		Login: client.LoginItem{
+			ItemID: "11111111-1111-4111-8111-111111111111",
+			Name:   "Production database",
+		},
+		Revision:   1,
+		RevisionID: "22222222-2222-4222-8222-222222222222",
+	}
+	store := &fakeItemStore{records: []itemRecord{record}}
+	var current tea.Model = model{
+		loaded:    true,
+		vaultOpen: true,
+		itemStore: store,
+		items:     store.records,
+		showItem:  true,
+	}
+	current, _ = current.Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	if !strings.Contains(current.(model).View(), "TOTP Setup") {
+		t.Fatalf("TOTP key did not open setup:\n%s", current.(model).View())
+	}
+	uri := "otpauth://totp/Example%20Co:alice%40example.com?" +
+		"secret=JBSWY3DPEHPK3PXP&issuer=Example%20Co&" +
+		"algorithm=SHA256&digits=8&period=45"
+	current, _ = current.Update(tea.KeyMsg{
+		Type: tea.KeyRunes, Runes: []rune(uri),
+	})
+	if strings.Contains(current.(model).View(), "JBSWY3DPEHPK3PXP") {
+		t.Fatalf("TOTP setup exposed URI secret:\n%s", current.(model).View())
+	}
+	var command tea.Cmd
+	for range totpFormFieldCount {
+		current, command = current.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	}
+	if command == nil {
+		t.Fatal("valid TOTP URI did not save")
+	}
+	current, _ = current.Update(command())
+
+	if len(store.saved) != 1 || store.saved[0].Login.TOTP == nil {
+		t.Fatalf("saved TOTP configs: %+v", store.saved)
+	}
+	got := store.saved[0]
+	want := client.TOTPConfig{
+		Secret:    "JBSWY3DPEHPK3PXP",
+		Issuer:    "Example Co",
+		Account:   "alice@example.com",
+		Algorithm: client.TOTPAlgorithmSHA256,
+		Digits:    8,
+		Period:    45,
+	}
+	if !reflect.DeepEqual(*got.Login.TOTP, want) ||
+		got.Revision != 2 ||
+		!reflect.DeepEqual(
+			got.ParentRevisionIDs,
+			[]string{record.RevisionID},
+		) {
+		t.Fatalf("saved TOTP differs: %+v", got)
+	}
+}
+
+func TestLoginAcceptsManualTOTPParameters(t *testing.T) {
+	record := itemRecord{
+		Login: client.LoginItem{
+			ItemID: "11111111-1111-4111-8111-111111111111",
+			Name:   "Production database",
+		},
+		Revision: 1,
+	}
+	store := &fakeItemStore{records: []itemRecord{record}}
+	var current tea.Model = model{
+		loaded:    true,
+		vaultOpen: true,
+		itemStore: store,
+		items:     store.records,
+		showItem:  true,
+	}
+	current, _ = current.Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	values := []string{
+		"",
+		"JBSWY3DPEHPK3PXP",
+		"Example Co",
+		"alice@example.com",
+		"SHA512",
+		"8",
+		"60",
+	}
+	var command tea.Cmd
+	for _, value := range values {
+		if value != "" {
+			current, _ = current.Update(tea.KeyMsg{
+				Type: tea.KeyRunes, Runes: []rune(value),
+			})
+		}
+		current, command = current.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	}
+	if command == nil {
+		t.Fatal("manual TOTP parameters did not save")
+	}
+	current, _ = current.Update(command())
+
+	if len(store.saved) != 1 || store.saved[0].Login.TOTP == nil {
+		t.Fatalf("saved TOTP configs: %+v", store.saved)
+	}
+	got := *store.saved[0].Login.TOTP
+	if got.Secret != values[1] ||
+		got.Issuer != values[2] ||
+		got.Account != values[3] ||
+		got.Algorithm != client.TOTPAlgorithmSHA512 ||
+		got.Digits != 8 ||
+		got.Period != 60 {
+		t.Fatalf("manual TOTP differs: %+v", got)
+	}
+}
+
+func TestInvalidLoginTOTPDoesNotPersistPartialChanges(t *testing.T) {
+	record := itemRecord{
+		Login: client.LoginItem{
+			ItemID: "11111111-1111-4111-8111-111111111111",
+			Name:   "Production database",
+		},
+		Revision: 1,
+	}
+	store := &fakeItemStore{records: []itemRecord{record}}
+	var current tea.Model = model{
+		loaded:    true,
+		vaultOpen: true,
+		itemStore: store,
+		items:     store.records,
+		showItem:  true,
+	}
+	current, _ = current.Update(
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	current, _ = current.Update(tea.KeyMsg{
+		Type:  tea.KeyRunes,
+		Runes: []rune("otpauth://totp/alice?secret=not-base32!"),
+	})
+	var command tea.Cmd
+	for range totpFormFieldCount {
+		current, command = current.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	}
+
+	if command != nil || len(store.saved) != 0 ||
+		store.records[0].Login.TOTP != nil {
+		t.Fatalf(
+			"invalid TOTP persisted: command=%v records=%+v",
+			command != nil,
+			store.records,
+		)
+	}
+	if !strings.Contains(current.(model).View(), "invalid TOTP") {
+		t.Fatalf("invalid TOTP error missing:\n%s", current.(model).View())
+	}
+}
+
+func TestLoginDetailShowsCurrentTOTPWindowWithoutSecret(t *testing.T) {
+	record := itemRecord{
+		Login: client.LoginItem{
+			ItemID: "11111111-1111-4111-8111-111111111111",
+			Name:   "Production database",
+			TOTP: &client.TOTPConfig{
+				Secret:    "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+				Algorithm: client.TOTPAlgorithmSHA1,
+				Digits:    6,
+				Period:    30,
+			},
+		},
+		Revision: 1,
+	}
+	view := model{
+		loaded:    true,
+		vaultOpen: true,
+		itemStore: &fakeItemStore{},
+		items:     []itemRecord{record},
+		showItem:  true,
+		now:       func() time.Time { return time.Unix(59, 0) },
+	}.View()
+
+	for _, want := range []string{
+		"TOTP: 287082",
+		"expires in 1s",
+		"[t] configure TOTP",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("Login detail missing %q:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, record.Login.TOTP.Secret) {
+		t.Fatalf("Login detail exposed TOTP secret:\n%s", view)
+	}
+}
+
 func TestCreateSecureNoteCapturesTitleAndContent(t *testing.T) {
 	store := &fakeItemStore{}
 	var current tea.Model = model{
