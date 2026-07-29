@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -113,5 +114,83 @@ func TestSecretRequestRequiresExplicitStdoutFlag(t *testing.T) {
 	if request.itemID != "11111111-1111-4111-8111-111111111111" ||
 		request.field != "password" {
 		t.Fatalf("secret request: %+v", request)
+	}
+}
+
+func TestSecretCommandWritesRequestedPassword(t *testing.T) {
+	accountID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	itemID := "11111111-1111-4111-8111-111111111111"
+	password := []byte("TermKeep#2026")
+	vault, err := client.NewVault(password, accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vault.Clear()
+	cfg := client.Config{DataDir: filepath.Join(t.TempDir(), "cache")}
+	if err := client.AuthorizeCache(
+		cfg,
+		"user@example.com",
+		accountID,
+		vault.PasswordEnvelope,
+	); err != nil {
+		t.Fatal(err)
+	}
+	cache, err := client.OpenCache(cfg, "user@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := client.EncryptLogin(
+		vault.Key,
+		accountID,
+		client.LoginItem{
+			ItemID:   itemID,
+			Name:     "Production database",
+			Password: "Password-Sentinel",
+		},
+		1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item.RevisionID = "22222222-2222-4222-8222-222222222222"
+	if _, err := cache.QueueMutation(item, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	socketPath := filepath.Join(t.TempDir(), "agent.sock")
+	agent, err := session.NewAgent(session.AgentConfig{
+		SocketPath: socketPath,
+		OwnerUID:   uint32(os.Getuid()),
+		AccountID:  accountID,
+		Email:      "user@example.com",
+		VaultKey:   vault.Key,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- agent.Serve(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		_ = agent.Close()
+		if err := <-done; err != nil {
+			t.Errorf("serve agent: %v", err)
+		}
+	})
+
+	var stdout bytes.Buffer
+	err = outputSecretAt(
+		context.Background(),
+		cfg,
+		socketPath,
+		secretRequest{itemID: itemID, field: "password"},
+		&stdout,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stdout.String(); got != "Password-Sentinel\n" {
+		t.Fatalf("secret stdout: got %q", got)
 	}
 }
