@@ -147,15 +147,52 @@ func PreviewOnePasswordImport(
 
 	preview := ImportPreview{}
 	duplicateCounts := importDuplicateCounts(existing)
+	vaultIDs := make(map[string]struct{})
 	for _, account := range source.Accounts {
-		for _, vault := range account.Vaults {
+		for vaultIndex, vault := range account.Vaults {
+			vault.Attrs.UUID = strings.TrimSpace(vault.Attrs.UUID)
+			vault.Attrs.Name = strings.TrimSpace(vault.Attrs.Name)
+			if vault.Attrs.UUID == "" || vault.Attrs.Name == "" {
+				field := fmt.Sprintf(
+					"vaults[%d].attrs.uuid",
+					vaultIndex,
+				)
+				if vault.Attrs.UUID != "" {
+					field = fmt.Sprintf(
+						"vaults[%d].attrs.name",
+						vaultIndex,
+					)
+				}
+				preview.Errors = append(
+					preview.Errors,
+					ImportIssue{
+						Field:   field,
+						Message: "Vault UUID and name are required",
+					},
+				)
+				continue
+			}
+			if _, exists := vaultIDs[vault.Attrs.UUID]; exists {
+				preview.Errors = append(
+					preview.Errors,
+					ImportIssue{
+						Field: fmt.Sprintf(
+							"vaults[%d].attrs.uuid",
+							vaultIndex,
+						),
+						Message: "duplicate 1Password Vault UUID",
+					},
+				)
+				continue
+			}
+			vaultIDs[vault.Attrs.UUID] = struct{}{}
 			folderID, err := NewItemID()
 			if err != nil {
 				return ImportPreview{}, err
 			}
 			folder := FolderItem{
 				ItemID: folderID,
-				Name:   strings.TrimSpace(vault.Attrs.Name),
+				Name:   vault.Attrs.Name,
 			}
 			preview.Items = append(preview.Items, NativeItem{
 				Type:   NativeItemTypeFolder,
@@ -163,14 +200,57 @@ func PreviewOnePasswordImport(
 			})
 			preview.Counts.Folders++
 
-			for _, rawItem := range vault.Items {
+			for itemIndex, rawItem := range vault.Items {
 				var item onePasswordItem
 				if err := json.Unmarshal(rawItem, &item); err != nil {
-					return ImportPreview{},
-						fmt.Errorf(
-							"%w: parse Item",
-							ErrInvalidOnePasswordExport,
-						)
+					preview.Errors = append(
+						preview.Errors,
+						ImportIssue{
+							Item:    itemIndex + 1,
+							Message: "invalid 1Password Item",
+						},
+					)
+					continue
+				}
+				item.UUID = strings.TrimSpace(item.UUID)
+				item.CategoryUUID = strings.TrimSpace(
+					item.CategoryUUID,
+				)
+				item.Overview.Title = strings.TrimSpace(
+					item.Overview.Title,
+				)
+				if item.UUID == "" {
+					preview.Errors = append(
+						preview.Errors,
+						ImportIssue{
+							Item:    itemIndex + 1,
+							Field:   "uuid",
+							Message: "Item UUID is required",
+						},
+					)
+					continue
+				}
+				if item.Overview.Title == "" {
+					preview.Errors = append(
+						preview.Errors,
+						ImportIssue{
+							Item:    itemIndex + 1,
+							Field:   "overview.title",
+							Message: "Item title is required",
+						},
+					)
+					continue
+				}
+				if item.CategoryUUID == "" {
+					preview.Errors = append(
+						preview.Errors,
+						ImportIssue{
+							Item:    itemIndex + 1,
+							Field:   "categoryUuid",
+							Message: "Item category is required",
+						},
+					)
+					continue
 				}
 				if item.CategoryUUID == "003" {
 					itemID, err := NewItemID()
@@ -228,20 +308,30 @@ func PreviewOnePasswordImport(
 					customFields []CustomField
 					totp         *TOTPConfig
 					unmapped     bool
+					invalidTOTP  bool
 				)
-				for _, section := range item.Details.Sections {
-					for _, field := range section.Fields {
+				for sectionIndex, section := range item.Details.Sections {
+					for fieldIndex, field := range section.Fields {
 						if value, ok := onePasswordFieldValue(
 							field.Value,
 							"totp",
 						); ok {
 							config, err := ParseTOTPURI(value)
 							if err != nil {
-								return ImportPreview{},
-									fmt.Errorf(
-										"%w: invalid TOTP",
-										ErrInvalidOnePasswordExport,
-									)
+								preview.Errors = append(
+									preview.Errors,
+									ImportIssue{
+										Item: itemIndex + 1,
+										Field: fmt.Sprintf(
+											"details.sections[%d].fields[%d].value",
+											sectionIndex,
+											fieldIndex,
+										),
+										Message: "invalid TOTP configuration",
+									},
+								)
+								invalidTOTP = true
+								break
 							}
 							totp = &config
 							continue
@@ -263,6 +353,12 @@ func PreviewOnePasswordImport(
 						}
 						unmapped = true
 					}
+					if invalidTOTP {
+						break
+					}
+				}
+				if invalidTOTP {
+					continue
 				}
 				if unmapped {
 					generic, err := onePasswordGenericItem(
