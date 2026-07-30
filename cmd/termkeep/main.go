@@ -52,12 +52,25 @@ type importFormat string
 const (
 	importFormatBitwarden   importFormat = "bitwarden"
 	importFormatOnePassword importFormat = "1password"
+	importFormatCSV         importFormat = "csv"
 )
 
 type importRequest struct {
 	format  importFormat
 	path    string
 	confirm bool
+	csv     client.CSVImportOptions
+}
+
+type repeatedFlag []string
+
+func (values *repeatedFlag) String() string {
+	return strings.Join(*values, ",")
+}
+
+func (values *repeatedFlag) Set(value string) error {
+	*values = append(*values, value)
+	return nil
 }
 
 func main() {
@@ -498,7 +511,8 @@ func parseImportRequest(
 	}
 	format := importFormat(args[0])
 	if format != importFormatBitwarden &&
-		format != importFormatOnePassword {
+		format != importFormatOnePassword &&
+		format != importFormatCSV {
 		return importRequest{}, errImportUsage
 	}
 	fs := flag.NewFlagSet(
@@ -511,16 +525,129 @@ func parseImportRequest(
 		false,
 		"confirm import after preview",
 	)
+	var (
+		itemType     string
+		mappings     repeatedFlag
+		ignored      repeatedFlag
+		delimiter    string
+		encodingName string
+	)
+	if format == importFormatCSV {
+		fs.StringVar(
+			&itemType,
+			"type",
+			"",
+			"Item type: login, secure-note, or generic",
+		)
+		fs.Var(&mappings, "map", "TARGET=COLUMN (repeatable)")
+		fs.Var(&ignored, "ignore", "COLUMN (repeatable)")
+		fs.StringVar(
+			&delimiter,
+			"delimiter",
+			"auto",
+			"auto, comma, semicolon, tab, or pipe",
+		)
+		fs.StringVar(
+			&encodingName,
+			"encoding",
+			"auto",
+			"auto, utf-8, or utf-8-bom",
+		)
+	}
 	if err := fs.Parse(args[1:]); err != nil ||
 		strings.TrimSpace(*path) == "" ||
 		fs.NArg() != 0 {
 		return importRequest{}, errImportUsage
 	}
-	return importRequest{
+	request := importRequest{
 		format:  format,
 		path:    strings.TrimSpace(*path),
 		confirm: *confirm,
-	}, nil
+	}
+	if format != importFormatCSV {
+		return request, nil
+	}
+	csvOptions, err := parseCSVImportOptions(
+		itemType,
+		mappings,
+		ignored,
+		delimiter,
+		encodingName,
+	)
+	if err != nil || (*confirm && len(mappings) == 0) {
+		return importRequest{}, errImportUsage
+	}
+	request.csv = csvOptions
+	return request, nil
+}
+
+func parseCSVImportOptions(
+	rawType string,
+	rawMappings []string,
+	ignored []string,
+	rawDelimiter string,
+	encodingName string,
+) (client.CSVImportOptions, error) {
+	options := client.CSVImportOptions{
+		Mapping:        make(map[string]string, len(rawMappings)),
+		IgnoredColumns: make([]string, 0, len(ignored)),
+		Encoding:       strings.ToLower(strings.TrimSpace(encodingName)),
+	}
+	switch strings.ToLower(strings.TrimSpace(rawType)) {
+	case "":
+	case "login":
+		options.Type = client.NativeItemTypeLogin
+	case "secure-note":
+		options.Type = client.NativeItemTypeSecureNote
+	case "generic":
+		options.Type = client.NativeItemTypeGeneric
+	default:
+		return client.CSVImportOptions{}, errImportUsage
+	}
+	if len(rawMappings) > 0 && options.Type == "" {
+		return client.CSVImportOptions{}, errImportUsage
+	}
+	for _, raw := range rawMappings {
+		target, column, found := strings.Cut(raw, "=")
+		target = strings.TrimSpace(target)
+		column = strings.TrimSpace(column)
+		if !found || target == "" || column == "" {
+			return client.CSVImportOptions{}, errImportUsage
+		}
+		if _, exists := options.Mapping[target]; exists {
+			return client.CSVImportOptions{}, errImportUsage
+		}
+		options.Mapping[target] = column
+	}
+	for _, column := range ignored {
+		column = strings.TrimSpace(column)
+		if column == "" {
+			return client.CSVImportOptions{}, errImportUsage
+		}
+		options.IgnoredColumns = append(
+			options.IgnoredColumns,
+			column,
+		)
+	}
+	switch strings.ToLower(strings.TrimSpace(rawDelimiter)) {
+	case "", "auto":
+	case "comma":
+		options.Delimiter = ','
+	case "semicolon":
+		options.Delimiter = ';'
+	case "tab":
+		options.Delimiter = '\t'
+	case "pipe":
+		options.Delimiter = '|'
+	default:
+		return client.CSVImportOptions{}, errImportUsage
+	}
+	switch options.Encoding {
+	case "", "auto", "utf-8", "utf8", "utf-8-bom":
+	default:
+		return client.CSVImportOptions{}, errImportUsage
+	}
+	return options, nil
 }
 
 func runImport(cfg client.Config, args []string) int {
@@ -528,8 +655,8 @@ func runImport(cfg client.Config, args []string) int {
 	if err != nil {
 		fmt.Fprintln(
 			os.Stderr,
-			"usage: termkeep import [bitwarden|1password] "+
-				"--file FILE [--confirm]",
+			"usage: termkeep import [bitwarden|1password|csv] "+
+				"--file FILE [CSV mapping options] [--confirm]",
 		)
 		return exitUsageFailure
 	}
@@ -565,6 +692,15 @@ func runImportAt(
 	stdout io.Writer,
 	stderr io.Writer,
 ) error {
+	name := importFormatName(request.format)
+	if name == "" {
+		return errImportUsage
+	}
+	if request.format == importFormatCSV {
+		writePlaintextImportWarning(stderr, name)
+		defer writePlaintextImportWarning(stderr, name)
+	}
+
 	info, err := session.Status(ctx, socketPath)
 	if err != nil {
 		return errors.New("read unlocked session failed")
@@ -582,16 +718,11 @@ func runImportAt(
 		return errors.New("open import file failed")
 	}
 	defer file.Close()
-	var (
-		preview client.ImportPreview
-		name    string
-	)
+	var preview client.ImportPreview
 	switch request.format {
 	case importFormatBitwarden:
-		name = "Bitwarden"
 		preview, err = client.PreviewBitwardenImport(file, existing)
 	case importFormatOnePassword:
-		name = "1Password"
 		info, statErr := file.Stat()
 		if statErr != nil {
 			return errors.New("read import file size failed")
@@ -601,17 +732,33 @@ func runImportAt(
 			info.Size(),
 			existing,
 		)
+	case importFormatCSV:
+		if len(request.csv.Mapping) == 0 {
+			inspection, inspectErr := client.InspectCSVImport(
+				file,
+				request.csv.Delimiter,
+				request.csv.Encoding,
+			)
+			if inspectErr != nil {
+				return inspectErr
+			}
+			writeCSVImportInspection(stdout, inspection)
+			return nil
+		}
+		preview, err = client.PreviewCSVImport(
+			file,
+			request.csv,
+			existing,
+		)
 	default:
 		return errImportUsage
 	}
 	if err != nil {
 		return err
 	}
-	fmt.Fprintln(
-		stderr,
-		"Warning: "+name+" export probably contains plaintext secrets; "+
-			"delete the original file after import.",
-	)
+	if request.format != importFormatCSV {
+		writePlaintextImportWarning(stderr, name)
+	}
 	writeImportPreview(stdout, name, preview)
 	if !request.confirm {
 		fmt.Fprintln(stdout, "Preview only; rerun with --confirm to import.")
@@ -648,6 +795,63 @@ func runImportAt(
 		}
 	}
 	return nil
+}
+
+func importFormatName(format importFormat) string {
+	switch format {
+	case importFormatBitwarden:
+		return "Bitwarden"
+	case importFormatOnePassword:
+		return "1Password"
+	case importFormatCSV:
+		return "CSV"
+	default:
+		return ""
+	}
+}
+
+func writePlaintextImportWarning(writer io.Writer, name string) {
+	fmt.Fprintln(
+		writer,
+		"Warning: "+name+" export probably contains plaintext secrets; "+
+			"delete the original file after import.",
+	)
+}
+
+func writeCSVImportInspection(
+	writer io.Writer,
+	inspection client.CSVImportInspection,
+) {
+	fmt.Fprintln(writer, "CSV columns (map or ignore every column):")
+	for _, column := range inspection.Columns {
+		fmt.Fprintln(writer, "- "+column)
+	}
+	fmt.Fprintf(
+		writer,
+		"Detected encoding: %s\nDetected delimiter: %s\n",
+		inspection.Encoding,
+		csvDelimiterName(inspection.Delimiter),
+	)
+	fmt.Fprintln(
+		writer,
+		"Rerun with --type, repeatable --map TARGET=COLUMN, "+
+			"and --ignore COLUMN options for the final preview.",
+	)
+}
+
+func csvDelimiterName(delimiter rune) string {
+	switch delimiter {
+	case ',':
+		return "comma"
+	case ';':
+		return "semicolon"
+	case '\t':
+		return "tab"
+	case '|':
+		return "pipe"
+	default:
+		return "unknown"
+	}
 }
 
 func queueImport(

@@ -63,6 +63,7 @@ func TestImportRequestRequiresSupportedFormatAndFile(t *testing.T) {
 		nil,
 		{"bitwarden"},
 		{"1password"},
+		{"csv"},
 		{"unknown", "--file", "vault.json"},
 	} {
 		if _, err := parseImportRequest(args); !errors.Is(
@@ -101,6 +102,47 @@ func TestImportRequestRequiresSupportedFormatAndFile(t *testing.T) {
 			!request.confirm {
 			t.Fatalf("import request: %+v", request)
 		}
+	}
+
+	request, err := parseImportRequest([]string{
+		"csv",
+		"--file",
+		"/tmp/account.csv",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.format != importFormatCSV ||
+		request.path != "/tmp/account.csv" ||
+		request.confirm {
+		t.Fatalf("CSV inspection request: %+v", request)
+	}
+}
+
+func TestCSVImportRequestRequiresExplicitMappingDecisions(t *testing.T) {
+	request, err := parseImportRequest([]string{
+		"csv",
+		"--file", "/tmp/account.csv",
+		"--type", "login",
+		"--map", "name=Title",
+		"--map", "username=User",
+		"--ignore", "Legacy ID",
+		"--delimiter", "semicolon",
+		"--encoding", "utf-8",
+		"--confirm",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.csv.Type != client.NativeItemTypeLogin ||
+		request.csv.Mapping["name"] != "Title" ||
+		request.csv.Mapping["username"] != "User" ||
+		len(request.csv.IgnoredColumns) != 1 ||
+		request.csv.IgnoredColumns[0] != "Legacy ID" ||
+		request.csv.Delimiter != ';' ||
+		request.csv.Encoding != "utf-8" ||
+		!request.confirm {
+		t.Fatalf("CSV import request: %+v", request)
 	}
 }
 
@@ -147,6 +189,25 @@ func TestOnePasswordImportPreviewAndExplicitConfirmation(t *testing.T) {
 			Name:     "Production database",
 			Username: "operator@example.com",
 			Password: "Current-Password-Sentinel",
+		},
+	)
+}
+
+func TestCSVImportPreviewAndExplicitConfirmation(t *testing.T) {
+	testImportPreviewAndExplicitConfirmation(
+		t,
+		importFormatCSV,
+		"account.csv",
+		[]byte(
+			"Title,User,Password,Ignored\n"+
+				"Imported CSV,imported@example.com,"+
+				"CSV-Password-Sentinel,legacy\n",
+		),
+		1,
+		client.LoginItem{
+			Name:     "Imported CSV",
+			Username: "imported@example.com",
+			Password: "CSV-Password-Sentinel",
 		},
 	)
 }
@@ -242,11 +303,23 @@ func testImportPreviewAndExplicitConfirmation(
 	}
 
 	var stdout, stderr bytes.Buffer
+	request := importRequest{format: format, path: path}
+	if format == importFormatCSV {
+		request.csv = client.CSVImportOptions{
+			Type: client.NativeItemTypeLogin,
+			Mapping: map[string]string{
+				"name":     "Title",
+				"username": "User",
+				"password": "Password",
+			},
+			IgnoredColumns: []string{"Ignored"},
+		}
+	}
 	if err := runImportAt(
 		context.Background(),
 		cfg,
 		socketPath,
-		importRequest{format: format, path: path},
+		request,
 		&stdout,
 		&stderr,
 	); err != nil {
@@ -254,7 +327,8 @@ func testImportPreviewAndExplicitConfirmation(
 	}
 	if !strings.Contains(stdout.String(), "Logins: 1") ||
 		!strings.Contains(stdout.String(), "Preview only") ||
-		!strings.Contains(stderr.String(), "plaintext") {
+		strings.Count(stderr.String(), "plaintext") !=
+			expectedPlaintextWarnings(format) {
 		t.Fatalf("preview output:\nstdout=%s\nstderr=%s",
 			stdout.String(), stderr.String())
 	}
@@ -268,15 +342,12 @@ func testImportPreviewAndExplicitConfirmation(
 
 	stdout.Reset()
 	stderr.Reset()
+	request.confirm = true
 	if err := runImportAt(
 		context.Background(),
 		cfg,
 		socketPath,
-		importRequest{
-			format:  format,
-			path:    path,
-			confirm: true,
-		},
+		request,
 		&stdout,
 		&stderr,
 	); err != nil {
@@ -285,7 +356,8 @@ func testImportPreviewAndExplicitConfirmation(
 	if !strings.Contains(
 		stdout.String(),
 		fmt.Sprintf("Imported locally: %d", expectedItems),
-	) {
+	) || strings.Count(stderr.String(), "plaintext") !=
+		expectedPlaintextWarnings(format) {
 		t.Fatalf("confirmation output:\n%s", stdout.String())
 	}
 	snapshot, err = cache.SyncSnapshot()
@@ -331,6 +403,102 @@ func testImportPreviewAndExplicitConfirmation(
 		openedLogin.Username != expectedLogin.Username ||
 		openedLogin.Password != expectedLogin.Password {
 		t.Fatalf("confirmed Login differs: %+v", openedLogin)
+	}
+}
+
+func expectedPlaintextWarnings(format importFormat) int {
+	if format == importFormatCSV {
+		return 2
+	}
+	return 1
+}
+
+func TestCSVImportWithInvalidRowQueuesNothing(t *testing.T) {
+	accountID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	vault, err := client.NewVault([]byte("TermKeep#2026"), accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vault.Clear()
+	cfg := client.Config{DataDir: filepath.Join(t.TempDir(), "cache")}
+	if err := client.AuthorizeCache(
+		cfg,
+		"user@example.com",
+		accountID,
+		vault.PasswordEnvelope,
+	); err != nil {
+		t.Fatal(err)
+	}
+	cache, err := client.OpenCache(cfg, "user@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	socketPath := filepath.Join(t.TempDir(), "agent.sock")
+	agent, err := session.NewAgent(session.AgentConfig{
+		SocketPath: socketPath,
+		OwnerUID:   uint32(os.Getuid()),
+		AccountID:  accountID,
+		Email:      "user@example.com",
+		VaultKey:   vault.Key,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- agent.Serve(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		_ = agent.Close()
+		if err := <-done; err != nil {
+			t.Errorf("serve agent: %v", err)
+		}
+	})
+	path := filepath.Join(t.TempDir(), "invalid.csv")
+	if err := os.WriteFile(
+		path,
+		[]byte("Title,User\nValid,user@example.com\nBroken\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	err = runImportAt(
+		context.Background(),
+		cfg,
+		socketPath,
+		importRequest{
+			format:  importFormatCSV,
+			path:    path,
+			confirm: true,
+			csv: client.CSVImportOptions{
+				Type: client.NativeItemTypeLogin,
+				Mapping: map[string]string{
+					"name":     "Title",
+					"username": "User",
+				},
+			},
+		},
+		&stdout,
+		&stderr,
+	)
+	if err == nil ||
+		!strings.Contains(err.Error(), "preview contains errors") ||
+		!strings.Contains(stdout.String(), "Error Item 2") ||
+		strings.Count(stderr.String(), "plaintext") != 2 {
+		t.Fatalf(
+			"error=%v\nstdout=%s\nstderr=%s",
+			err,
+			stdout.String(),
+			stderr.String(),
+		)
+	}
+	snapshot, err := cache.SyncSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Mutations) != 0 {
+		t.Fatalf("invalid CSV queued mutations: %+v", snapshot.Mutations)
 	}
 }
 

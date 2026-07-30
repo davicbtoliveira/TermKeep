@@ -354,6 +354,47 @@ and idempotent synchronization are shared with the Bitwarden importer.
 verifying the import; see
 [1Password's 1PUX format documentation](https://support.1password.com/1pux-format/).
 
+## Generic CSV import
+
+Generic CSV imports use a two-step, local-only CLI flow. First inspect the
+header and the detected UTF-8 encoding and delimiter:
+
+```sh
+termkeep import csv --file ./vault.csv
+```
+
+If detection is ambiguous, choose `--delimiter comma`, `semicolon`, `tab`, or
+`pipe`. Supported encodings are UTF-8 with or without a BOM and can be selected
+with `--encoding utf-8` or `utf-8-bom`.
+
+Rerun with an Item type and an explicit decision for every column. Mapping uses
+`TARGET=COLUMN`; columns that should not be imported must be named with
+`--ignore`:
+
+```sh
+termkeep import csv --file ./vault.csv --type login \
+  --map name=Title --map username=User --map password=Password \
+  --map url=URL --map notes=Notes --ignore "Legacy ID"
+```
+
+Login targets are `name`, `username`, `password`, `url` (or repeatable
+`url.LABEL` targets), `notes`, `totp`, `favorite`, and `custom.FIELD`. Secure
+Note targets are `title`, `content`, and `favorite`. Generic Item targets are
+`title`, `favorite`, and `field.FIELD`.
+The name/title mapping is required. The final preview reports malformed or
+invalid rows by row and blocks confirmation when any error exists:
+
+```sh
+termkeep import csv --file ./vault.csv --type login \
+  --map name=Title --map username=User --map password=Password \
+  --map url=URL --map notes=Notes --ignore "Legacy ID" --confirm
+```
+
+Quoting, embedded newlines, Unicode, duplicate naming, cancellation, encrypted
+offline mutation queuing, and synchronization follow the same import pipeline
+as Bitwarden and 1Password. The Client warns about plaintext before and after
+the flow; the CSV contents are never sent to the Server.
+
 ## Offline use and synchronization
 
 A successful registration or online login authorizes an encrypted local

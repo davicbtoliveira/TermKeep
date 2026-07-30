@@ -116,12 +116,13 @@ heads. A resolution references every conflicting head and becomes the sole
 head. Reusing a mutation UUID with different content or referencing an unknown
 base remains a conflict response; retrying identical content is idempotent.
 
-Bitwarden and 1Password imports need no Server-side configuration. The Client
-reads the unencrypted JSON or `.1pux` source locally, previews it without
-mutation, and uploads only encrypted revision envelopes after explicit
-confirmation. Operators should handle source exports as plaintext secrets and
-delete them when the import has been verified. 1Password attachment binaries
-are reported but not imported.
+Bitwarden, 1Password, and generic CSV imports need no Server-side
+configuration. The Client reads the unencrypted JSON, `.1pux`, or UTF-8 CSV
+source locally, previews it without mutation, and uploads only encrypted
+revision envelopes after explicit confirmation. CSV imports require an
+explicit mapping or ignore decision for every column. Operators should handle
+source exports as plaintext secrets and delete them when the import has been
+verified. 1Password attachment binaries are reported but not imported.
 
 ## Testing
 
