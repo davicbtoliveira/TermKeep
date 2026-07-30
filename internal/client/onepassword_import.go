@@ -160,36 +160,17 @@ func PreviewOnePasswordImport(
 					continue
 				}
 				if item.CategoryUUID != "001" {
-					itemID, err := NewItemID()
+					generic, err := onePasswordGenericItem(
+						rawItem,
+						item,
+						folderID,
+					)
 					if err != nil {
 						return ImportPreview{}, err
 					}
-					generic := GenericItem{
-						ItemID: itemID,
-						Title: strings.TrimSpace(
-							item.Overview.Title,
-						),
-						Source: "1password",
-						SourceType: onePasswordSourceType(
-							item.CategoryUUID,
-						),
-						FolderID: folderID,
-						Favorite: item.Favorite > 0,
-						Data: append(
-							[]byte(nil),
-							rawItem...,
-						),
-					}
-					preview.Items = append(preview.Items, NativeItem{
-						Type:    NativeItemTypeGeneric,
-						Generic: &generic,
-					})
+					preview.Items = append(preview.Items, generic)
 					preview.Counts.Generic++
 					continue
-				}
-				itemID, err := NewItemID()
-				if err != nil {
-					return ImportPreview{}, err
 				}
 				var username, password string
 				for _, field := range item.Details.LoginFields {
@@ -203,6 +184,7 @@ func PreviewOnePasswordImport(
 				var (
 					customFields []CustomField
 					totp         *TOTPConfig
+					unmapped     bool
 				)
 				for _, section := range item.Details.Sections {
 					for _, field := range section.Fields {
@@ -234,8 +216,27 @@ func PreviewOnePasswordImport(
 									Value: value,
 								},
 							)
+							continue
 						}
+						unmapped = true
 					}
+				}
+				if unmapped {
+					generic, err := onePasswordGenericItem(
+						rawItem,
+						item,
+						folderID,
+					)
+					if err != nil {
+						return ImportPreview{}, err
+					}
+					preview.Items = append(preview.Items, generic)
+					preview.Counts.Generic++
+					continue
+				}
+				itemID, err := NewItemID()
+				if err != nil {
+					return ImportPreview{}, err
 				}
 				urls := make([]string, 0, len(item.Overview.URLs))
 				for _, sourceURL := range item.Overview.URLs {
@@ -266,10 +267,45 @@ func PreviewOnePasswordImport(
 	return preview, nil
 }
 
+func onePasswordGenericItem(
+	rawItem json.RawMessage,
+	item onePasswordItem,
+	folderID string,
+) (NativeItem, error) {
+	itemID, err := NewItemID()
+	if err != nil {
+		return NativeItem{}, err
+	}
+	generic := GenericItem{
+		ItemID: itemID,
+		Title: strings.TrimSpace(
+			item.Overview.Title,
+		),
+		Source: "1password",
+		SourceType: onePasswordSourceType(
+			item.CategoryUUID,
+		),
+		FolderID: folderID,
+		Favorite: item.Favorite > 0,
+		Data: append(
+			[]byte(nil),
+			rawItem...,
+		),
+	}
+	return NativeItem{
+		Type:    NativeItemTypeGeneric,
+		Generic: &generic,
+	}, nil
+}
+
 func onePasswordSourceType(categoryUUID string) string {
 	switch categoryUUID {
+	case "001":
+		return "login"
 	case "002":
 		return "credit_card"
+	case "003":
+		return "secure_note"
 	default:
 		return "category_" + categoryUUID
 	}
