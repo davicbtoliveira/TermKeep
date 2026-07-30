@@ -1145,6 +1145,29 @@ func TestBitwardenImportPreviewsLocallyAndCancelsWithoutChanges(
 	}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	testImportPreviewsLocallyAndCancels(
+		t,
+		path,
+		"Bitwarden import preview",
+	)
+}
+
+func TestOnePasswordImportPreviewsLocallyAndCancelsWithoutChanges(
+	t *testing.T,
+) {
+	testImportPreviewsLocallyAndCancels(
+		t,
+		"../client/testdata/onepassword-export.1pux",
+		"1Password import preview",
+	)
+}
+
+func testImportPreviewsLocallyAndCancels(
+	t *testing.T,
+	path string,
+	previewTitle string,
+) {
+	t.Helper()
 	store := &fakeItemStore{}
 	var current tea.Model = model{
 		loaded:    true,
@@ -1166,7 +1189,7 @@ func TestBitwardenImportPreviewsLocallyAndCancelsWithoutChanges(
 	current, _ = current.Update(command())
 	view := current.(model).View()
 	for _, want := range []string{
-		"Bitwarden import preview",
+		previewTitle,
 		"Logins:      1",
 		"plaintext",
 		"delete the original file",
@@ -1177,7 +1200,7 @@ func TestBitwardenImportPreviewsLocallyAndCancelsWithoutChanges(
 	}
 	current, _ = current.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	if len(store.saved) != 0 ||
-		strings.Contains(current.(model).View(), "Bitwarden import") {
+		strings.Contains(current.(model).View(), previewTitle) {
 		t.Fatalf("cancel changed Vault:\n%s", current.(model).View())
 	}
 }
