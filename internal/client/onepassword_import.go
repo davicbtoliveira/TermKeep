@@ -78,6 +78,7 @@ type onePasswordItemDetails struct {
 }
 
 type onePasswordLoginField struct {
+	Name        string `json:"name"`
 	Value       string `json:"value"`
 	Designation string `json:"designation"`
 }
@@ -460,6 +461,20 @@ func onePasswordLoginFields(
 		totp         *TOTPConfig
 		unmapped     bool
 	)
+	for _, field := range item.Details.LoginFields {
+		if field.Designation != "" || field.Value == "" {
+			continue
+		}
+		name := strings.TrimSpace(field.Name)
+		if name == "" {
+			unmapped = true
+			continue
+		}
+		customFields = append(customFields, CustomField{
+			Name:  name,
+			Value: field.Value,
+		})
+	}
 	for sectionIndex, section := range item.Details.Sections {
 		for fieldIndex, field := range section.Fields {
 			if value, ok := onePasswordFieldValue(
