@@ -490,6 +490,79 @@ func TestPreviewOnePasswordImportRenamesOnlySemanticDuplicates(
 	}
 }
 
+func TestPreviewOnePasswordImportIgnoresGenericSourceMetadataForDuplicates(
+	t *testing.T,
+) {
+	archive := onePasswordArchive(t, `{
+		"accounts": [{
+			"attrs": {"uuid": "account-id"},
+			"vaults": [{
+				"attrs": {
+					"uuid": "vault-id",
+					"name": "Finance"
+				},
+				"items": [{
+					"uuid": "first-card-id",
+					"favIndex": 0,
+					"createdAt": 1785240000,
+					"updatedAt": 1785243600,
+					"state": "active",
+					"categoryUuid": "002",
+					"overview": {
+						"title": "Corporate card",
+						"subtitle": "First source subtitle"
+					},
+					"details": {
+						"sections": [{
+							"fields": [{
+								"title": "card number",
+								"value": {
+									"creditCardNumber": "4111111111111111"
+								}
+							}]
+						}]
+					}
+				}, {
+					"uuid": "second-card-id",
+					"favIndex": 1,
+					"createdAt": 1785326400,
+					"updatedAt": 1785330000,
+					"state": "active",
+					"categoryUuid": "002",
+					"overview": {
+						"title": "Backup card",
+						"subtitle": "Second source subtitle"
+					},
+					"details": {
+						"sections": [{
+							"fields": [{
+								"title": "card number",
+								"value": {
+									"creditCardNumber": "4111111111111111"
+								}
+							}]
+						}]
+					}
+				}]
+			}]
+		}]
+	}`)
+
+	preview, err := PreviewOnePasswordImport(
+		archive,
+		archive.Size(),
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(preview.Items) != 3 ||
+		preview.Items[2].Generic == nil ||
+		preview.Items[2].Generic.Title != "Backup card (Duplicada)" {
+		t.Fatalf("Generic duplicate names differ: %+v", preview)
+	}
+}
+
 func TestPreviewOnePasswordImportRejectsUnsafeInput(t *testing.T) {
 	malformed := bytes.NewReader([]byte("not a ZIP archive"))
 	missingData := onePasswordArchiveWithFiles(t, map[string]string{
