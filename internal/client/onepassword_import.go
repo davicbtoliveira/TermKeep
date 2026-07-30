@@ -261,6 +261,26 @@ func PreviewOnePasswordImport(
 					continue
 				}
 				if item.CategoryUUID == "003" {
+					if len(item.Details.Sections) != 0 {
+						generic, err := onePasswordGenericItem(
+							rawItem,
+							item,
+							folderID,
+						)
+						if err != nil {
+							return ImportPreview{}, err
+						}
+						nameImportDuplicate(
+							&generic,
+							duplicateCounts,
+						)
+						preview.Items = append(
+							preview.Items,
+							generic,
+						)
+						preview.Counts.Generic++
+						continue
+					}
 					itemID, err := NewItemID()
 					if err != nil {
 						return ImportPreview{}, err
