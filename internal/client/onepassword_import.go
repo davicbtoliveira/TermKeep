@@ -59,6 +59,7 @@ type onePasswordItem struct {
 
 type onePasswordItemOverview struct {
 	Title string               `json:"title"`
+	URL   string               `json:"url"`
 	URLs  []onePasswordItemURL `json:"urls"`
 }
 
@@ -385,10 +386,25 @@ func PreviewOnePasswordImport(
 				if err != nil {
 					return ImportPreview{}, err
 				}
-				urls := make([]string, 0, len(item.Overview.URLs))
+				urls := make(
+					[]string,
+					0,
+					len(item.Overview.URLs)+1,
+				)
+				seenURLs := make(map[string]struct{})
+				if value := strings.TrimSpace(
+					item.Overview.URL,
+				); value != "" {
+					urls = append(urls, value)
+					seenURLs[value] = struct{}{}
+				}
 				for _, sourceURL := range item.Overview.URLs {
 					if value := strings.TrimSpace(sourceURL.URL); value != "" {
+						if _, exists := seenURLs[value]; exists {
+							continue
+						}
 						urls = append(urls, value)
+						seenURLs[value] = struct{}{}
 					}
 				}
 				historyCount := min(
