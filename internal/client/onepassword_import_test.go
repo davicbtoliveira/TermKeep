@@ -678,6 +678,76 @@ func TestPreviewOnePasswordImportPreservesPasswordHistory(t *testing.T) {
 	}
 }
 
+func TestPreviewOnePasswordImportPreservesEquivalentCustomFields(
+	t *testing.T,
+) {
+	archive := onePasswordArchive(t, `{
+		"accounts": [{
+			"attrs": {"uuid": "account-id"},
+			"vaults": [{
+				"attrs": {
+					"uuid": "vault-id",
+					"name": "Infrastructure"
+				},
+				"items": [{
+					"uuid": "login-id",
+					"categoryUuid": "001",
+					"overview": {"title": "Production database"},
+					"details": {
+						"sections": [{
+							"title": "Operations",
+							"name": "operations",
+							"fields": [{
+								"title": "recovery code",
+								"id": "recovery",
+								"value": {"concealed": "Recovery-Sentinel"}
+							}, {
+								"title": "owner",
+								"id": "owner",
+								"value": {"email": "operator@example.com"}
+							}, {
+								"title": "dashboard",
+								"id": "dashboard",
+								"value": {"url": "https://db.example.com/admin"}
+							}]
+						}]
+					}
+				}]
+			}]
+		}]
+	}`)
+
+	preview, err := PreviewOnePasswordImport(
+		archive,
+		archive.Size(),
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(preview.Items) != 2 ||
+		preview.Items[1].Login == nil ||
+		!reflect.DeepEqual(
+			preview.Items[1].Login.CustomFields,
+			[]CustomField{
+				{
+					Name:  "recovery code",
+					Value: "Recovery-Sentinel",
+				},
+				{
+					Name:  "owner",
+					Value: "operator@example.com",
+				},
+				{
+					Name:  "dashboard",
+					Value: "https://db.example.com/admin",
+				},
+			},
+		) {
+		t.Fatalf("custom fields differ: %+v", preview)
+	}
+}
+
 func onePasswordArchive(t *testing.T, data string) *bytes.Reader {
 	t.Helper()
 	return onePasswordArchiveWithFiles(t, map[string]string{
