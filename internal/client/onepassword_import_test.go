@@ -330,6 +330,62 @@ func TestPreviewOnePasswordImportKeepsUnmappedFieldInGenericItem(
 	}
 }
 
+func TestPreviewOnePasswordImportKeepsUnmappedSecureNoteFieldInGenericItem(
+	t *testing.T,
+) {
+	archive := onePasswordArchive(t, `{
+		"accounts": [{
+			"attrs": {"uuid": "account-id"},
+			"vaults": [{
+				"attrs": {
+					"uuid": "vault-id",
+					"name": "Personal"
+				},
+				"items": [{
+					"uuid": "note-id",
+					"favIndex": 0,
+					"state": "active",
+					"categoryUuid": "003",
+					"overview": {"title": "Recovery procedure"},
+					"details": {
+						"notesPlain": "Recovery steps",
+						"sections": [{
+							"title": "Ownership",
+							"name": "ownership",
+							"fields": [{
+								"title": "owner",
+								"id": "owner",
+								"value": {"string": "platform"}
+							}]
+						}]
+					}
+				}]
+			}]
+		}]
+	}`)
+
+	preview, err := PreviewOnePasswordImport(
+		archive,
+		archive.Size(),
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Counts != (ImportCounts{
+		Folders: 1,
+		Generic: 1,
+	}) || len(preview.Items) != 2 {
+		t.Fatalf("preview summary: %+v", preview)
+	}
+	generic := preview.Items[1].Generic
+	if generic == nil ||
+		generic.SourceType != "secure_note" ||
+		!bytes.Contains(generic.Data, []byte(`"platform"`)) {
+		t.Fatalf("Generic Secure Note differs: %+v", generic)
+	}
+}
+
 func TestPreviewOnePasswordImportRenamesOnlySemanticDuplicates(
 	t *testing.T,
 ) {
