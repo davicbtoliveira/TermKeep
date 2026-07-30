@@ -57,11 +57,21 @@ type onePasswordItemURL struct {
 type onePasswordItemDetails struct {
 	LoginFields []onePasswordLoginField `json:"loginFields"`
 	Notes       string                  `json:"notesPlain"`
+	Sections    []onePasswordSection    `json:"sections"`
 }
 
 type onePasswordLoginField struct {
 	Value       string `json:"value"`
 	Designation string `json:"designation"`
+}
+
+type onePasswordSection struct {
+	Fields []onePasswordSectionField `json:"fields"`
+}
+
+type onePasswordSectionField struct {
+	Title string          `json:"title"`
+	Value json.RawMessage `json:"value"`
 }
 
 func PreviewOnePasswordImport(
@@ -120,6 +130,27 @@ func PreviewOnePasswordImport(
 			preview.Counts.Folders++
 
 			for _, item := range vault.Items {
+				if item.CategoryUUID == "003" {
+					itemID, err := NewItemID()
+					if err != nil {
+						return ImportPreview{}, err
+					}
+					note := SecureNoteItem{
+						ItemID: itemID,
+						Title: strings.TrimSpace(
+							item.Overview.Title,
+						),
+						Content:  item.Details.Notes,
+						FolderID: folderID,
+						Favorite: item.Favorite > 0,
+					}
+					preview.Items = append(preview.Items, NativeItem{
+						Type:       NativeItemTypeSecureNote,
+						SecureNote: &note,
+					})
+					preview.Counts.SecureNotes++
+					continue
+				}
 				if item.CategoryUUID != "001" {
 					continue
 				}
@@ -136,6 +167,43 @@ func PreviewOnePasswordImport(
 						password = field.Value
 					}
 				}
+				var (
+					customFields []CustomField
+					totp         *TOTPConfig
+				)
+				for _, section := range item.Details.Sections {
+					for _, field := range section.Fields {
+						if value, ok := onePasswordFieldValue(
+							field.Value,
+							"totp",
+						); ok {
+							config, err := ParseTOTPURI(value)
+							if err != nil {
+								return ImportPreview{},
+									fmt.Errorf(
+										"%w: invalid TOTP",
+										ErrInvalidOnePasswordExport,
+									)
+							}
+							totp = &config
+							continue
+						}
+						if value, ok := onePasswordFieldValue(
+							field.Value,
+							"string",
+						); ok {
+							customFields = append(
+								customFields,
+								CustomField{
+									Name: strings.TrimSpace(
+										field.Title,
+									),
+									Value: value,
+								},
+							)
+						}
+					}
+				}
 				urls := make([]string, 0, len(item.Overview.URLs))
 				for _, sourceURL := range item.Overview.URLs {
 					if value := strings.TrimSpace(sourceURL.URL); value != "" {
@@ -143,14 +211,16 @@ func PreviewOnePasswordImport(
 					}
 				}
 				login := LoginItem{
-					ItemID:   itemID,
-					Name:     strings.TrimSpace(item.Overview.Title),
-					Username: username,
-					Password: password,
-					FolderID: folderID,
-					Favorite: item.Favorite > 0,
-					URLs:     urls,
-					Notes:    item.Details.Notes,
+					ItemID:       itemID,
+					Name:         strings.TrimSpace(item.Overview.Title),
+					Username:     username,
+					Password:     password,
+					FolderID:     folderID,
+					Favorite:     item.Favorite > 0,
+					URLs:         urls,
+					Notes:        item.Details.Notes,
+					CustomFields: customFields,
+					TOTP:         totp,
 				}
 				preview.Items = append(preview.Items, NativeItem{
 					Type:  NativeItemTypeLogin,
@@ -161,6 +231,25 @@ func PreviewOnePasswordImport(
 		}
 	}
 	return preview, nil
+}
+
+func onePasswordFieldValue(
+	raw json.RawMessage,
+	name string,
+) (string, bool) {
+	var values map[string]json.RawMessage
+	if json.Unmarshal(raw, &values) != nil {
+		return "", false
+	}
+	value, ok := values[name]
+	if !ok {
+		return "", false
+	}
+	var text string
+	if json.Unmarshal(value, &text) != nil {
+		return "", false
+	}
+	return text, true
 }
 
 func onePasswordArchiveFile(
