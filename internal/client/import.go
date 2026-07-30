@@ -156,17 +156,37 @@ func importSemanticKey(
 		if json.Unmarshal(item.Generic.Data, &data) != nil {
 			return [sha256.Size]byte{}, false
 		}
-		for _, field := range []string{
-			"id",
-			"name",
-			"folderId",
-			"favorite",
-			"organizationId",
-			"collectionIds",
-			"creationDate",
-			"revisionDate",
-			"deletedDate",
-		} {
+		metadataFields := []string{
+			"id", "name", "folderId", "favorite",
+		}
+		switch item.Generic.Source {
+		case "bitwarden":
+			metadataFields = append(
+				metadataFields,
+				"organizationId",
+				"collectionIds",
+				"creationDate",
+				"revisionDate",
+				"deletedDate",
+			)
+		case "1password":
+			metadataFields = append(
+				metadataFields,
+				"uuid",
+				"favIndex",
+				"createdAt",
+				"updatedAt",
+				"state",
+			)
+			if overview, ok := data["overview"].(map[string]any); ok {
+				delete(overview, "title")
+				delete(overview, "subtitle")
+				delete(overview, "ps")
+				delete(overview, "pbe")
+				delete(overview, "pgrng")
+			}
+		}
+		for _, field := range metadataFields {
 			delete(data, field)
 		}
 		semantic = struct {
