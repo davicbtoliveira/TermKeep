@@ -3,6 +3,7 @@ package client
 import (
 	"archive/zip"
 	"bytes"
+	"encoding/json"
 	"reflect"
 	"testing"
 )
@@ -174,6 +175,90 @@ func TestPreviewOnePasswordImportPreservesNativeItems(t *testing.T) {
 		note.FolderID != folder.ItemID ||
 		!note.Favorite {
 		t.Fatalf("normalized Secure Note: %+v", note)
+	}
+}
+
+func TestPreviewOnePasswordImportPreservesUnsupportedItemAsGeneric(
+	t *testing.T,
+) {
+	archive := onePasswordArchive(t, `{
+		"accounts": [{
+			"attrs": {"uuid": "account-id"},
+			"vaults": [{
+				"attrs": {
+					"uuid": "vault-id",
+					"name": "Finance"
+				},
+				"items": [{
+					"uuid": "card-id",
+					"favIndex": 1,
+					"state": "active",
+					"categoryUuid": "002",
+					"overview": {"title": "Corporate card"},
+					"details": {
+						"notesPlain": "Travel only",
+						"sections": [{
+							"title": "Card Details",
+							"name": "card_details",
+							"fields": [{
+								"title": "card number",
+								"id": "ccnum",
+								"value": {
+									"creditCardNumber": "4111111111111111"
+								}
+							}, {
+								"title": "verification number",
+								"id": "cvv",
+								"value": {"concealed": "Security-Code-Sentinel"}
+							}]
+						}]
+					}
+				}]
+			}]
+		}]
+	}`)
+
+	preview, err := PreviewOnePasswordImport(
+		archive,
+		archive.Size(),
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Counts != (ImportCounts{
+		Folders: 1,
+		Generic: 1,
+	}) || len(preview.Items) != 2 || len(preview.Errors) != 0 {
+		t.Fatalf("preview summary: %+v", preview)
+	}
+	folder := preview.Items[0].Folder
+	generic := preview.Items[1].Generic
+	if folder == nil ||
+		generic == nil ||
+		generic.ItemID == "" ||
+		generic.Title != "Corporate card" ||
+		generic.Source != "1password" ||
+		generic.SourceType != "credit_card" ||
+		generic.FolderID != folder.ItemID ||
+		!generic.Favorite {
+		t.Fatalf("normalized Generic Item: %+v", generic)
+	}
+	var preserved map[string]any
+	if err := json.Unmarshal(generic.Data, &preserved); err != nil {
+		t.Fatal(err)
+	}
+	details, ok := preserved["details"].(map[string]any)
+	if !ok {
+		t.Fatalf("Generic Item lost details: %+v", preserved)
+	}
+	sections, ok := details["sections"].([]any)
+	if !ok || len(sections) != 1 {
+		t.Fatalf("Generic Item lost sections: %+v", preserved)
+	}
+	fields, ok := sections[0].(map[string]any)["fields"].([]any)
+	if !ok || len(fields) != 2 {
+		t.Fatalf("Generic Item lost fields: %+v", preserved)
 	}
 }
 
