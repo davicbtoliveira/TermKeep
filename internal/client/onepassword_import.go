@@ -2,6 +2,7 @@ package client
 
 import (
 	"archive/zip"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,8 +10,14 @@ import (
 	"strings"
 )
 
+const maxOnePasswordExportAttributesSize = 64 << 10
+const maxOnePasswordExportDataSize = 16 << 20
+
 var ErrInvalidOnePasswordExport = errors.New(
 	"invalid 1Password export",
+)
+var ErrOnePasswordExportTooLarge = errors.New(
+	"1Password export data exceeds 16 MiB",
 )
 
 type onePasswordExportAttributes struct {
@@ -98,7 +105,12 @@ func PreviewOnePasswordImport(
 	}
 
 	var attributes onePasswordExportAttributes
-	if err := decodeOnePasswordJSON(attributesFile, &attributes); err != nil {
+	if err := decodeOnePasswordJSON(
+		attributesFile,
+		maxOnePasswordExportAttributesSize,
+		ErrInvalidOnePasswordExport,
+		&attributes,
+	); err != nil {
 		return ImportPreview{}, err
 	}
 	if attributes.Version != 3 ||
@@ -108,7 +120,12 @@ func PreviewOnePasswordImport(
 	}
 
 	var source onePasswordExport
-	if err := decodeOnePasswordJSON(dataFile, &source); err != nil {
+	if err := decodeOnePasswordJSON(
+		dataFile,
+		maxOnePasswordExportDataSize,
+		ErrOnePasswordExportTooLarge,
+		&source,
+	); err != nil {
 		return ImportPreview{}, err
 	}
 
@@ -361,7 +378,15 @@ func onePasswordArchiveFile(
 	return nil
 }
 
-func decodeOnePasswordJSON(file *zip.File, destination any) error {
+func decodeOnePasswordJSON(
+	file *zip.File,
+	maxSize int64,
+	tooLarge error,
+	destination any,
+) error {
+	if file.UncompressedSize64 > uint64(maxSize) {
+		return tooLarge
+	}
 	reader, err := file.Open()
 	if err != nil {
 		return fmt.Errorf(
@@ -371,7 +396,19 @@ func decodeOnePasswordJSON(file *zip.File, destination any) error {
 		)
 	}
 	defer reader.Close()
-	decoder := json.NewDecoder(reader)
+	input, err := io.ReadAll(io.LimitReader(reader, maxSize+1))
+	if err != nil {
+		return fmt.Errorf(
+			"%w: read %s",
+			ErrInvalidOnePasswordExport,
+			file.Name,
+		)
+	}
+	defer clearBytes(input)
+	if int64(len(input)) > maxSize {
+		return tooLarge
+	}
+	decoder := json.NewDecoder(bytes.NewReader(input))
 	if err := decoder.Decode(destination); err != nil {
 		return fmt.Errorf(
 			"%w: parse %s",
