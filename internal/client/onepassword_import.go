@@ -55,6 +55,7 @@ type onePasswordItem struct {
 	CategoryUUID string                  `json:"categoryUuid"`
 	Overview     onePasswordItemOverview `json:"overview"`
 	Details      onePasswordItemDetails  `json:"details"`
+	File         json.RawMessage         `json:"file"`
 }
 
 type onePasswordItemOverview struct {
@@ -68,10 +69,11 @@ type onePasswordItemURL struct {
 }
 
 type onePasswordItemDetails struct {
-	LoginFields     []onePasswordLoginField      `json:"loginFields"`
-	Notes           string                       `json:"notesPlain"`
-	Sections        []onePasswordSection         `json:"sections"`
-	PasswordHistory []onePasswordPasswordHistory `json:"passwordHistory"`
+	LoginFields        []onePasswordLoginField      `json:"loginFields"`
+	Notes              string                       `json:"notesPlain"`
+	Sections           []onePasswordSection         `json:"sections"`
+	PasswordHistory    []onePasswordPasswordHistory `json:"passwordHistory"`
+	DocumentAttributes json.RawMessage              `json:"documentAttributes"`
 }
 
 type onePasswordLoginField struct {
@@ -154,6 +156,18 @@ func PreviewOnePasswordImport(
 	}
 
 	preview := ImportPreview{}
+	for _, file := range archive.File {
+		if strings.HasPrefix(file.Name, "files/") &&
+			!strings.HasSuffix(file.Name, "/") {
+			preview.UnmappedFields = append(
+				preview.UnmappedFields,
+				ImportIssue{
+					Field:   file.Name,
+					Message: "attachment binary is not imported",
+				},
+			)
+		}
+	}
 	duplicateCounts := importDuplicateCounts(existing)
 	vaultIDs := make(map[string]struct{})
 	for _, account := range source.Accounts {
@@ -258,6 +272,22 @@ func PreviewOnePasswordImport(
 							Message: "Item category is required",
 						},
 					)
+					continue
+				}
+				if onePasswordJSONValuePresent(
+					item.Details.DocumentAttributes,
+				) || onePasswordJSONValuePresent(item.File) {
+					generic, err := onePasswordGenericItem(
+						rawItem,
+						item,
+						folderID,
+					)
+					if err != nil {
+						return ImportPreview{}, err
+					}
+					nameImportDuplicate(&generic, duplicateCounts)
+					preview.Items = append(preview.Items, generic)
+					preview.Counts.Generic++
 					continue
 				}
 				if item.CategoryUUID == "003" {
@@ -479,6 +509,14 @@ func PreviewOnePasswordImport(
 		}
 	}
 	return preview, nil
+}
+
+func onePasswordJSONValuePresent(raw json.RawMessage) bool {
+	value := strings.TrimSpace(string(raw))
+	return value != "" &&
+		value != "null" &&
+		value != "{}" &&
+		value != "[]"
 }
 
 func onePasswordCustomFieldValue(
