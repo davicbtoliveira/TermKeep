@@ -28,7 +28,7 @@ type onePasswordAccount struct {
 
 type onePasswordVault struct {
 	Attrs onePasswordVaultAttributes `json:"attrs"`
-	Items []onePasswordItem          `json:"items"`
+	Items []json.RawMessage          `json:"items"`
 }
 
 type onePasswordVaultAttributes struct {
@@ -129,7 +129,15 @@ func PreviewOnePasswordImport(
 			})
 			preview.Counts.Folders++
 
-			for _, item := range vault.Items {
+			for _, rawItem := range vault.Items {
+				var item onePasswordItem
+				if err := json.Unmarshal(rawItem, &item); err != nil {
+					return ImportPreview{},
+						fmt.Errorf(
+							"%w: parse Item",
+							ErrInvalidOnePasswordExport,
+						)
+				}
 				if item.CategoryUUID == "003" {
 					itemID, err := NewItemID()
 					if err != nil {
@@ -152,6 +160,31 @@ func PreviewOnePasswordImport(
 					continue
 				}
 				if item.CategoryUUID != "001" {
+					itemID, err := NewItemID()
+					if err != nil {
+						return ImportPreview{}, err
+					}
+					generic := GenericItem{
+						ItemID: itemID,
+						Title: strings.TrimSpace(
+							item.Overview.Title,
+						),
+						Source: "1password",
+						SourceType: onePasswordSourceType(
+							item.CategoryUUID,
+						),
+						FolderID: folderID,
+						Favorite: item.Favorite > 0,
+						Data: append(
+							[]byte(nil),
+							rawItem...,
+						),
+					}
+					preview.Items = append(preview.Items, NativeItem{
+						Type:    NativeItemTypeGeneric,
+						Generic: &generic,
+					})
+					preview.Counts.Generic++
 					continue
 				}
 				itemID, err := NewItemID()
@@ -231,6 +264,15 @@ func PreviewOnePasswordImport(
 		}
 	}
 	return preview, nil
+}
+
+func onePasswordSourceType(categoryUUID string) string {
+	switch categoryUUID {
+	case "002":
+		return "credit_card"
+	default:
+		return "category_" + categoryUUID
+	}
 }
 
 func onePasswordFieldValue(
