@@ -113,6 +113,7 @@ func PreviewOnePasswordImport(
 	}
 
 	preview := ImportPreview{}
+	duplicateCounts := importDuplicateCounts(existing)
 	for _, account := range source.Accounts {
 		for _, vault := range account.Vaults {
 			folderID, err := NewItemID()
@@ -152,10 +153,18 @@ func PreviewOnePasswordImport(
 						FolderID: folderID,
 						Favorite: item.Favorite > 0,
 					}
-					preview.Items = append(preview.Items, NativeItem{
+					normalizedItem := NativeItem{
 						Type:       NativeItemTypeSecureNote,
 						SecureNote: &note,
-					})
+					}
+					nameImportDuplicate(
+						&normalizedItem,
+						duplicateCounts,
+					)
+					preview.Items = append(
+						preview.Items,
+						normalizedItem,
+					)
 					preview.Counts.SecureNotes++
 					continue
 				}
@@ -168,6 +177,7 @@ func PreviewOnePasswordImport(
 					if err != nil {
 						return ImportPreview{}, err
 					}
+					nameImportDuplicate(&generic, duplicateCounts)
 					preview.Items = append(preview.Items, generic)
 					preview.Counts.Generic++
 					continue
@@ -230,6 +240,7 @@ func PreviewOnePasswordImport(
 					if err != nil {
 						return ImportPreview{}, err
 					}
+					nameImportDuplicate(&generic, duplicateCounts)
 					preview.Items = append(preview.Items, generic)
 					preview.Counts.Generic++
 					continue
@@ -256,10 +267,18 @@ func PreviewOnePasswordImport(
 					CustomFields: customFields,
 					TOTP:         totp,
 				}
-				preview.Items = append(preview.Items, NativeItem{
+				normalizedItem := NativeItem{
 					Type:  NativeItemTypeLogin,
 					Login: &login,
-				})
+				}
+				nameImportDuplicate(
+					&normalizedItem,
+					duplicateCounts,
+				)
+				preview.Items = append(
+					preview.Items,
+					normalizedItem,
+				)
 				preview.Counts.Logins++
 			}
 		}
