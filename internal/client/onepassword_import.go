@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 )
 
 const maxOnePasswordExportAttributesSize = 64 << 10
@@ -66,9 +67,10 @@ type onePasswordItemURL struct {
 }
 
 type onePasswordItemDetails struct {
-	LoginFields []onePasswordLoginField `json:"loginFields"`
-	Notes       string                  `json:"notesPlain"`
-	Sections    []onePasswordSection    `json:"sections"`
+	LoginFields     []onePasswordLoginField      `json:"loginFields"`
+	Notes           string                       `json:"notesPlain"`
+	Sections        []onePasswordSection         `json:"sections"`
+	PasswordHistory []onePasswordPasswordHistory `json:"passwordHistory"`
 }
 
 type onePasswordLoginField struct {
@@ -83,6 +85,11 @@ type onePasswordSection struct {
 type onePasswordSectionField struct {
 	Title string          `json:"title"`
 	Value json.RawMessage `json:"value"`
+}
+
+type onePasswordPasswordHistory struct {
+	Value string `json:"value"`
+	Time  int64  `json:"time"`
 }
 
 func PreviewOnePasswordImport(
@@ -384,17 +391,40 @@ func PreviewOnePasswordImport(
 						urls = append(urls, value)
 					}
 				}
+				historyCount := min(
+					len(item.Details.PasswordHistory),
+					maxPasswordHistoryEntries,
+				)
+				passwordHistory := make(
+					[]PasswordHistoryEntry,
+					0,
+					historyCount,
+				)
+				for index := 0; index < historyCount; index++ {
+					entry := item.Details.PasswordHistory[index]
+					passwordHistory = append(
+						passwordHistory,
+						PasswordHistoryEntry{
+							Password: entry.Value,
+							ChangedAt: time.Unix(
+								entry.Time,
+								0,
+							).UTC(),
+						},
+					)
+				}
 				login := LoginItem{
-					ItemID:       itemID,
-					Name:         strings.TrimSpace(item.Overview.Title),
-					Username:     username,
-					Password:     password,
-					FolderID:     folderID,
-					Favorite:     item.Favorite > 0,
-					URLs:         urls,
-					Notes:        item.Details.Notes,
-					CustomFields: customFields,
-					TOTP:         totp,
+					ItemID:          itemID,
+					Name:            strings.TrimSpace(item.Overview.Title),
+					Username:        username,
+					Password:        password,
+					PasswordHistory: passwordHistory,
+					FolderID:        folderID,
+					Favorite:        item.Favorite > 0,
+					URLs:            urls,
+					Notes:           item.Details.Notes,
+					CustomFields:    customFields,
+					TOTP:            totp,
 				}
 				normalizedItem := NativeItem{
 					Type:  NativeItemTypeLogin,
