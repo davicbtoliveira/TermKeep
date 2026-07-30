@@ -343,10 +343,10 @@ func PreviewOnePasswordImport(
 							totp = &config
 							continue
 						}
-						if value, ok := onePasswordFieldValue(
-							field.Value,
-							"string",
-						); ok {
+						if value, ok :=
+							onePasswordCustomFieldValue(
+								field.Value,
+							); ok {
 							customFields = append(
 								customFields,
 								CustomField{
@@ -443,6 +443,28 @@ func PreviewOnePasswordImport(
 		}
 	}
 	return preview, nil
+}
+
+func onePasswordCustomFieldValue(
+	raw json.RawMessage,
+) (string, bool) {
+	for _, name := range []string{
+		"string",
+		"concealed",
+		"email",
+		"url",
+		"phone",
+		"menu",
+		"creditCardNumber",
+		"creditCardType",
+		"gender",
+		"reference",
+	} {
+		if value, ok := onePasswordFieldValue(raw, name); ok {
+			return value, true
+		}
+	}
+	return "", false
 }
 
 func onePasswordGenericItem(
