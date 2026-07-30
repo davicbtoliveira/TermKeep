@@ -262,6 +262,73 @@ func TestPreviewOnePasswordImportPreservesUnsupportedItemAsGeneric(
 	}
 }
 
+func TestPreviewOnePasswordImportKeepsUnmappedFieldInGenericItem(
+	t *testing.T,
+) {
+	archive := onePasswordArchive(t, `{
+		"accounts": [{
+			"attrs": {"uuid": "account-id"},
+			"vaults": [{
+				"attrs": {
+					"uuid": "vault-id",
+					"name": "Personal"
+				},
+				"items": [{
+					"uuid": "identity-login-id",
+					"favIndex": 0,
+					"state": "active",
+					"categoryUuid": "001",
+					"overview": {"title": "Account with address"},
+					"details": {
+						"loginFields": [{
+							"value": "user@example.com",
+							"designation": "username"
+						}],
+						"sections": [{
+							"title": "Contact",
+							"name": "contact",
+							"fields": [{
+								"title": "address",
+								"id": "address",
+								"value": {
+									"address": {
+										"street": "Main Street",
+										"city": "Example City"
+									}
+								}
+							}]
+						}]
+					}
+				}]
+			}]
+		}]
+	}`)
+
+	preview, err := PreviewOnePasswordImport(
+		archive,
+		archive.Size(),
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Counts != (ImportCounts{
+		Folders: 1,
+		Generic: 1,
+	}) || len(preview.Items) != 2 {
+		t.Fatalf("preview summary: %+v", preview)
+	}
+	generic := preview.Items[1].Generic
+	if generic == nil ||
+		generic.SourceType != "login" ||
+		generic.Title != "Account with address" {
+		t.Fatalf("Generic Login differs: %+v", generic)
+	}
+	if !bytes.Contains(generic.Data, []byte(`"Main Street"`)) {
+		t.Fatalf("Generic Login lost address: %s", generic.Data)
+	}
+}
+
 func onePasswordArchive(t *testing.T, data string) *bytes.Reader {
 	t.Helper()
 	var buffer bytes.Buffer
