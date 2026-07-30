@@ -4,7 +4,9 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -433,12 +435,106 @@ func TestPreviewOnePasswordImportRenamesOnlySemanticDuplicates(
 	}
 }
 
+func TestPreviewOnePasswordImportRejectsUnsafeInput(t *testing.T) {
+	malformed := bytes.NewReader([]byte("not a ZIP archive"))
+	missingData := onePasswordArchiveWithFiles(t, map[string]string{
+		"export.attributes": `{
+			"version": 3,
+			"description": "1Password Unencrypted Export"
+		}`,
+	})
+	unsupportedVersion := onePasswordArchiveWithFiles(
+		t,
+		map[string]string{
+			"export.attributes": `{
+				"version": 99,
+				"description": "1Password Unencrypted Export"
+			}`,
+			"export.data": `{"accounts":[]}`,
+		},
+	)
+	trailingJSON := onePasswordArchive(
+		t,
+		`{"accounts":[]} {}`,
+	)
+	oversized := onePasswordArchive(
+		t,
+		`{"accounts":[]}`+
+			strings.Repeat(" ", maxOnePasswordExportDataSize),
+	)
+	tests := []struct {
+		name    string
+		archive *bytes.Reader
+		wantErr error
+	}{
+		{
+			name:    "nil reader",
+			wantErr: ErrInvalidOnePasswordExport,
+		},
+		{
+			name:    "malformed archive",
+			archive: malformed,
+			wantErr: ErrInvalidOnePasswordExport,
+		},
+		{
+			name:    "missing export data",
+			archive: missingData,
+			wantErr: ErrInvalidOnePasswordExport,
+		},
+		{
+			name:    "unsupported version",
+			archive: unsupportedVersion,
+			wantErr: ErrInvalidOnePasswordExport,
+		},
+		{
+			name:    "trailing JSON",
+			archive: trailingJSON,
+			wantErr: ErrInvalidOnePasswordExport,
+		},
+		{
+			name:    "oversized export data",
+			archive: oversized,
+			wantErr: ErrOnePasswordExportTooLarge,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var size int64
+			if test.archive != nil {
+				size = test.archive.Size()
+			}
+			_, err := PreviewOnePasswordImport(
+				test.archive,
+				size,
+				nil,
+			)
+			if !errors.Is(err, test.wantErr) {
+				t.Fatalf("want %v, got %v", test.wantErr, err)
+			}
+		})
+	}
+}
+
 func onePasswordArchive(t *testing.T, data string) *bytes.Reader {
+	t.Helper()
+	return onePasswordArchiveWithFiles(t, map[string]string{
+		"export.attributes": `{
+			"version": 3,
+			"description": "1Password Unencrypted Export",
+			"createdAt": 1785412800
+		}`,
+		"export.data": data,
+	})
+}
+
+func onePasswordArchiveWithFiles(
+	t *testing.T,
+	files map[string]string,
+) *bytes.Reader {
 	t.Helper()
 	var buffer bytes.Buffer
 	writer := zip.NewWriter(&buffer)
-	writeArchiveFile := func(name string, content string) {
-		t.Helper()
+	for name, content := range files {
 		file, err := writer.Create(name)
 		if err != nil {
 			t.Fatal(err)
@@ -447,12 +543,6 @@ func onePasswordArchive(t *testing.T, data string) *bytes.Reader {
 			t.Fatal(err)
 		}
 	}
-	writeArchiveFile("export.attributes", `{
-		"version": 3,
-		"description": "1Password Unencrypted Export",
-		"createdAt": 1785412800
-	}`)
-	writeArchiveFile("export.data", data)
 	if err := writer.Close(); err != nil {
 		t.Fatal(err)
 	}
