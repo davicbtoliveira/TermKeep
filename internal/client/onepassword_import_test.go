@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -746,6 +747,74 @@ func TestPreviewOnePasswordImportPreservesEquivalentCustomFields(
 		) {
 		t.Fatalf("custom fields differ: %+v", preview)
 	}
+}
+
+func TestPreviewOnePasswordImportFixture(t *testing.T) {
+	file, err := os.Open("testdata/onepassword-export.1pux")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview, err := PreviewOnePasswordImport(
+		file,
+		info.Size(),
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Counts != (ImportCounts{
+		Logins:      1,
+		SecureNotes: 1,
+		Folders:     1,
+		Generic:     1,
+	}) || len(preview.Items) != 4 || len(preview.Errors) != 0 {
+		t.Fatalf("fixture preview: %+v", preview)
+	}
+}
+
+func FuzzPreviewOnePasswordImport(f *testing.F) {
+	fixture, err := os.ReadFile("testdata/onepassword-export.1pux")
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(fixture)
+	f.Add([]byte("not a ZIP archive"))
+	f.Add([]byte{})
+
+	f.Fuzz(func(t *testing.T, input []byte) {
+		reader := bytes.NewReader(input)
+		preview, err := PreviewOnePasswordImport(
+			reader,
+			reader.Size(),
+			nil,
+		)
+		if err != nil {
+			return
+		}
+		for _, item := range preview.Items {
+			valid := 0
+			if item.Login != nil {
+				valid++
+			}
+			if item.SecureNote != nil {
+				valid++
+			}
+			if item.Folder != nil {
+				valid++
+			}
+			if item.Generic != nil {
+				valid++
+			}
+			if valid != 1 {
+				t.Fatalf("invalid normalized Item: %+v", item)
+			}
+		}
+	})
 }
 
 func onePasswordArchive(t *testing.T, data string) *bytes.Reader {
