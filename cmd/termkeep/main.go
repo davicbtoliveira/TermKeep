@@ -53,6 +53,7 @@ const (
 	importFormatBitwarden   importFormat = "bitwarden"
 	importFormatOnePassword importFormat = "1password"
 	importFormatCSV         importFormat = "csv"
+	importFormatJSON        importFormat = "json"
 )
 
 type importRequest struct {
@@ -134,6 +135,8 @@ func run(args []string) int {
 		return runGeneratePassword(commandArgs[1:])
 	case "import":
 		return runImport(cfg, commandArgs[1:])
+	case "export":
+		return runExport(cfg, commandArgs[1:])
 	case "backup":
 		return runBackup(cfg, commandArgs[1:])
 	case "__session-agent":
@@ -141,7 +144,7 @@ func run(args []string) int {
 	case "":
 		return runTUI(cfg)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n\nusage: termkeep [--server URL] [--ca-cert FILE] [--pwned-passwords-url URL|off] [status|bootstrap|register|login|logout|sync|secret|totp|generate-password|import|backup]\n", command)
+		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n\nusage: termkeep [--server URL] [--ca-cert FILE] [--pwned-passwords-url URL|off] [status|bootstrap|register|login|logout|sync|secret|totp|generate-password|import|export|backup]\n", command)
 		return exitUsageFailure
 	}
 }
@@ -514,7 +517,8 @@ func parseImportRequest(
 	format := importFormat(args[0])
 	if format != importFormatBitwarden &&
 		format != importFormatOnePassword &&
-		format != importFormatCSV {
+		format != importFormatCSV &&
+		format != importFormatJSON {
 		return importRequest{}, errImportUsage
 	}
 	fs := flag.NewFlagSet(
@@ -566,7 +570,10 @@ func parseImportRequest(
 		path:    strings.TrimSpace(*path),
 		confirm: *confirm,
 	}
-	if format != importFormatCSV {
+	if format != importFormatCSV && format != importFormatJSON {
+		return request, nil
+	}
+	if format == importFormatJSON {
 		return request, nil
 	}
 	csvOptions, err := parseCSVImportOptions(
@@ -698,7 +705,7 @@ func runImportAt(
 	if name == "" {
 		return errImportUsage
 	}
-	if request.format == importFormatCSV {
+	if request.format == importFormatCSV || request.format == importFormatJSON {
 		writePlaintextImportWarning(stderr, name)
 		defer writePlaintextImportWarning(stderr, name)
 	}
@@ -752,13 +759,15 @@ func runImportAt(
 			request.csv,
 			existing,
 		)
+	case importFormatJSON:
+		preview, err = client.PreviewJSONImport(file, existing)
 	default:
 		return errImportUsage
 	}
 	if err != nil {
 		return err
 	}
-	if request.format != importFormatCSV {
+	if request.format != importFormatCSV && request.format != importFormatJSON {
 		writePlaintextImportWarning(stderr, name)
 	}
 	writeImportPreview(stdout, name, preview)
@@ -807,6 +816,8 @@ func importFormatName(format importFormat) string {
 		return "1Password"
 	case importFormatCSV:
 		return "CSV"
+	case importFormatJSON:
+		return "TermKeep JSON"
 	default:
 		return ""
 	}

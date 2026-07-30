@@ -14,6 +14,7 @@ It combines a Go CLI/TUI, offline-first encrypted storage, and a multi-account G
 - Offline unlock, editing, fuzzy search, and eventual synchronization
 - Login items, secure notes, folders, favorites, custom fields, and TOTP generation
 - Bitwarden, 1Password, and generic CSV imports
+- Deliberate plaintext JSON/CSV exports with local-only, atomic writes
 - Password generation and optional Pwned Passwords checks
 - Multi-account self-hosting with PostgreSQL, Traefik, and Docker Compose
 
@@ -394,6 +395,41 @@ Quoting, embedded newlines, Unicode, duplicate naming, cancellation, encrypted
 offline mutation queuing, and synchronization follow the same import pipeline
 as Bitwarden and 1Password. The Client warns about plaintext before and after
 the flow; the CSV contents are never sent to the Server.
+
+## Plaintext JSON and CSV export
+
+Plaintext export is a deliberate, local-only action. The unlocked TUI uses
+`[w] export plaintext`; the CLI requires an explicit format, destination, and
+confirmation:
+
+```sh
+termkeep export json --file ./termkeep.json --confirm
+termkeep export csv --file ./termkeep.csv --type all --confirm
+```
+
+The Client decrypts the local cache through the terminal session agent and
+never sends exported values to the Server. JSON preserves Login, Secure Note,
+Folder, and Generic Item fields. Generic `data` is emitted as JSON rather than
+base64, so the complete original Generic object remains inspectable. The
+matching local import path is explicit:
+
+```sh
+termkeep import json --file ./termkeep.json --confirm
+```
+
+CSV is a tabular projection with a `type` column. Arrays, password history,
+TOTP, custom fields, and Generic `data` are JSON cells; they are not silently
+flattened. Use `--type login`, `secure-note`, `folder`, or `generic` when a
+spreadsheet cannot handle heterogeneous rows, and map or ignore every column
+when importing. The export preview states these limitations before writing.
+
+The destination is created with mode `0600` and replaced atomically after the
+file and parent directory are flushed. A failed encode, cancellation, or
+permission error leaves the previous destination untouched when the
+filesystem supports rename. Plaintext may still survive in backups,
+journaling, copy-on-write snapshots, filesystem caches, or editor history;
+TermKeep never promises secure erase. Verify the destination, then remove it
+using the host's normal data-retention policy.
 
 ## Portable encrypted backup
 

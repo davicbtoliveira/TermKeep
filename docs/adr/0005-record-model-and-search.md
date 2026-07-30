@@ -48,7 +48,14 @@ Pwned-password checks use a configurable k-anonymity-compatible range endpoint d
 
 The public Pwned Passwords range API is the default. Operators may configure a compatible self-hosted endpoint or disable the feature with `off`. Endpoints require HTTPS outside localhost, use the configured CA trust anchor, reject embedded credentials, query strings, and fragments, and do not follow redirects.
 
-Encrypted portable backup and guarded plaintext JSON/CSV export are supported. Encrypted backups use a distinct backup password.
+Encrypted portable backup and guarded plaintext JSON/CSV export are supported.
+Readable exports are explicit local-only actions: JSON preserves every native
+field and emits Generic `data` as JSON, while CSV uses a documented `type`
+column and JSON cells for non-tabular values. Export files are mode `0600` and
+written through an atomic temporary-file replacement; the Client never sends
+their contents to the Server. Backups, journaling, copy-on-write snapshots,
+and filesystem caches can retain plaintext, so secure erase is not promised.
+Encrypted backups use a distinct backup password.
 
 ## Consequences
 

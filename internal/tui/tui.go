@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -50,6 +51,10 @@ type importPreviewMsg struct {
 	preview client.ImportPreview
 }
 type importPreviewErrMsg error
+type exportDoneMsg struct {
+	count int
+	err   error
+}
 type secretCopiedMsg struct {
 	field string
 	err   error
@@ -252,6 +257,12 @@ type model struct {
 	importPreview       *client.ImportPreview
 	importErr           error
 	importLoading       bool
+	showExport          bool
+	exportPath          string
+	exportFormat        string
+	exportReady         bool
+	exportErr           error
+	exportLoading       bool
 	showNoteForm        bool
 	noteForm            secureNoteForm
 	itemFormErr         error
@@ -429,10 +440,20 @@ func previewImport(
 				existing,
 			)
 		} else {
-			preview, err = client.PreviewBitwardenImport(
-				file,
-				existing,
-			)
+			preview, err = client.PreviewJSONImport(file, existing)
+			if err == nil {
+				name = "TermKeep JSON"
+			} else {
+				if _, seekErr := file.Seek(0, 0); seekErr != nil {
+					return importPreviewErrMsg(errors.New(
+						"rewind import file failed",
+					))
+				}
+				preview, err = client.PreviewBitwardenImport(
+					file,
+					existing,
+				)
+			}
 		}
 		if err != nil {
 			return importPreviewErrMsg(err)
@@ -442,6 +463,50 @@ func previewImport(
 			preview: preview,
 		}
 	}
+}
+
+func writeReadableExport(store itemStore, path, format string) tea.Cmd {
+	return func() tea.Msg {
+		if cached, ok := store.(cachedItemStore); ok &&
+			exportPathOverwritesCache(path, cached.cache.Path()) {
+			return exportDoneMsg{
+				err: errors.New("export path must differ from the encrypted cache"),
+			}
+		}
+		ctx, cancel := context.WithTimeout(
+			context.Background(), itemOperationTimeout)
+		defer cancel()
+		records, err := store.List(ctx)
+		if err != nil {
+			return exportDoneMsg{err: errors.New("read encrypted cache failed")}
+		}
+		items := nativeItemsForImport(records)
+		if format == "csv" {
+			err = client.WriteCSVExportFileContext(
+				ctx,
+				path,
+				items,
+				client.CSVExportOptions{},
+			)
+		} else {
+			err = client.WriteJSONExportFileContext(ctx, path, items)
+		}
+		if err != nil {
+			return exportDoneMsg{err: errors.New("write plaintext export failed")}
+		}
+		return exportDoneMsg{count: len(items)}
+	}
+}
+
+func exportPathOverwritesCache(exportPath, cachePath string) bool {
+	exportAbsolute, exportErr := filepath.Abs(exportPath)
+	cacheAbsolute, cacheErr := filepath.Abs(cachePath)
+	if exportErr == nil && cacheErr == nil && exportAbsolute == cacheAbsolute {
+		return true
+	}
+	exportInfo, exportErr := os.Stat(exportPath)
+	cacheInfo, cacheErr := os.Stat(cachePath)
+	return exportErr == nil && cacheErr == nil && os.SameFile(exportInfo, cacheInfo)
 }
 
 func nativeItemsForImport(records []itemRecord) []client.NativeItem {
@@ -995,6 +1060,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.showImport {
 			return m.updateImport(msg)
 		}
+		if m.showExport {
+			return m.updateExport(msg)
+		}
 		if m.showTOTPForm {
 			return m.updateTOTPForm(msg)
 		}
@@ -1245,6 +1313,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.importLoading = false
 				return m, nil
 			}
+		case "w":
+			if m.vaultOpen && m.itemStore != nil &&
+				!m.showSessions && !m.showActivity &&
+				!m.showItem && !m.showTrash &&
+				!m.showFolders && !m.showFolderConflict {
+				m.showExport = true
+				m.exportPath = ""
+				m.exportFormat = "json"
+				m.exportReady = false
+				m.exportErr = nil
+				m.exportLoading = false
+				return m, nil
+			}
 		case "f":
 			record, selected := m.selectedItemRecord()
 			if m.showItem && selected &&
@@ -1443,6 +1524,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showFolderForm = false
 			m.showTOTPForm = false
 			m.showGenerator = false
+			m.showExport = false
+			m.exportPath = ""
+			m.exportReady = false
+			m.exportErr = nil
+			m.exportLoading = false
 			m.showPasswordHistory = false
 			m.historyClearConfirm = false
 			m.revealPassword = false
@@ -1594,6 +1680,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.importPreview = nil
 		m.importErr = msg
 		m.importLoading = false
+	case exportDoneMsg:
+		m.exportLoading = false
+		if msg.err != nil {
+			m.exportErr = msg.err
+			break
+		}
+		m.showExport = false
+		m.exportPath = ""
+		m.exportReady = false
+		m.exportErr = nil
 	case itemsMsg:
 		m.itemsLoading = false
 		m.setRecords([]itemRecord(msg))
@@ -1664,6 +1760,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.importPreview = nil
 		m.importErr = nil
 		m.importLoading = false
+		m.showExport = false
+		m.exportPath = ""
+		m.exportReady = false
+		m.exportErr = nil
+		m.exportLoading = false
 		m.itemFormErr = nil
 		m.folderActionErr = nil
 		m.folderDeleteConfirm = false
@@ -1692,6 +1793,9 @@ func (m model) View() string {
 	}
 	if m.showImport {
 		return m.importView()
+	}
+	if m.showExport {
+		return m.exportView()
 	}
 	if m.showTOTPForm {
 		return m.totpFormView()
@@ -1845,6 +1949,7 @@ func (m model) View() string {
 		b.WriteString(
 			"\n[c] new Login  [n] new Secure Note  " +
 				"[g] generate password  [i] import password manager  " +
+				"[w] export plaintext  " +
 				"[f] Favorites  [/] search  [ctrl+f] Notes  " +
 				"[enter] open  " +
 				"[o] Folders  [t] Trash  ",
@@ -2041,6 +2146,65 @@ func (m model) updateImport(
 	return m, nil
 }
 
+func (m model) updateExport(
+	msg tea.KeyMsg,
+) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "esc":
+		m.showExport = false
+		m.exportPath = ""
+		m.exportReady = false
+		m.exportErr = nil
+		m.exportLoading = false
+		return m, nil
+	}
+	if m.exportLoading {
+		return m, nil
+	}
+	if m.exportReady {
+		if msg.String() != "y" {
+			return m, nil
+		}
+		m.exportLoading = true
+		m.exportErr = nil
+		return m, writeReadableExport(
+			m.itemStore,
+			strings.TrimSpace(m.exportPath),
+			m.exportFormat,
+		)
+	}
+	switch msg.String() {
+	case "j":
+		m.exportFormat = "json"
+		m.exportErr = nil
+	case "c":
+		m.exportFormat = "csv"
+		m.exportErr = nil
+	case "ctrl+u":
+		m.exportPath = ""
+	case "backspace":
+		value := []rune(m.exportPath)
+		if len(value) > 0 {
+			m.exportPath = string(value[:len(value)-1])
+		}
+	case "enter":
+		if strings.TrimSpace(m.exportPath) == "" {
+			m.exportErr = errors.New("export path is required")
+			return m, nil
+		}
+		m.exportReady = true
+		m.exportErr = nil
+	default:
+		if msg.Type == tea.KeyRunes {
+			m.exportPath += string(msg.Runes)
+			m.exportErr = nil
+		}
+	}
+	return m, nil
+}
+
 func (m model) importView() string {
 	var b strings.Builder
 	b.WriteString("TermKeep — password manager import\n\n")
@@ -2101,6 +2265,44 @@ func (m model) importView() string {
 		len(m.importPreview.Errors) == 0 &&
 		!m.itemSaving {
 		b.WriteString("\n[y] confirm import  ")
+	}
+	b.WriteString("[esc] cancel  [ctrl+c] quit\n")
+	return b.String()
+}
+
+func (m model) exportView() string {
+	var b strings.Builder
+	b.WriteString("TermKeep — plaintext export\n\n")
+	b.WriteString(
+		"Warning: exported secrets are plaintext. Backups, journaling, " +
+			"copy-on-write snapshots, and filesystem caches may retain them; " +
+			"secure erase is not guaranteed.\n\n",
+	)
+	switch {
+	case m.exportLoading:
+		b.WriteString("Writing export atomically…\n")
+	case m.exportReady:
+		fmt.Fprintf(&b, "Format: %s\n", strings.ToUpper(m.exportFormat))
+		fmt.Fprintf(&b, "Destination: %s\n", m.exportPath)
+		fmt.Fprintf(&b, "Items: %d\n", len(m.items)+len(m.folders))
+		b.WriteString(
+			"The destination will contain plaintext secrets. Confirm with [y].\n",
+		)
+		if m.exportFormat == "csv" {
+			b.WriteString(
+				"CSV limitation: arrays, TOTP, history, custom fields, and Generic data are JSON cells.\n",
+			)
+		}
+	default:
+		fmt.Fprintf(&b, "Format: %s (press [j] JSON or [c] CSV)\n", strings.ToUpper(m.exportFormat))
+		fmt.Fprintf(&b, "Destination: %s\n", m.exportPath)
+		b.WriteString("Press [enter] to review before writing.\n")
+	}
+	if m.exportErr != nil {
+		fmt.Fprintf(&b, "\nError: %s\n", m.exportErr)
+	}
+	if m.exportReady {
+		b.WriteString("[y] confirm export  ")
 	}
 	b.WriteString("[esc] cancel  [ctrl+c] quit\n")
 	return b.String()

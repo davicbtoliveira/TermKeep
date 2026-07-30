@@ -183,6 +183,145 @@ func TestCSVImportRequestRequiresExplicitMappingDecisions(t *testing.T) {
 	}
 }
 
+func TestExportRequestRequiresExplicitFormatAndDestination(t *testing.T) {
+	for _, args := range [][]string{
+		nil,
+		{"--file", "vault.json"},
+		{"xml", "--file", "vault.xml"},
+		{"json"},
+		{"csv", "--file", "vault.csv", "--type", "unknown"},
+		{"json", "--file", "vault.json", "--type", "login"},
+	} {
+		if _, err := parseExportRequest(args); !errors.Is(
+			err,
+			errExportUsage,
+		) {
+			t.Fatalf("args %v: got %v", args, err)
+		}
+	}
+	request, err := parseExportRequest([]string{
+		"csv", "--file", "/tmp/vault.csv", "--type", "generic",
+		"--delimiter", "semicolon", "--confirm-plaintext",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.format != exportFormatCSV || request.path != "/tmp/vault.csv" ||
+		request.csvType != client.NativeItemTypeGeneric ||
+		request.delimiter != ';' || !request.confirm {
+		t.Fatalf("export request: %+v", request)
+	}
+}
+
+func TestPlaintextExportPreviewsAndWritesLocally(t *testing.T) {
+	accountID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	vault, err := client.NewVault([]byte("TermKeep#2026"), accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vault.Clear()
+	cfg := client.Config{DataDir: filepath.Join(t.TempDir(), "cache")}
+	if err := client.AuthorizeCache(
+		cfg,
+		"user@example.com",
+		accountID,
+		vault.PasswordEnvelope,
+	); err != nil {
+		t.Fatal(err)
+	}
+	cache, err := client.OpenCache(cfg, "user@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	login := client.LoginItem{
+		ItemID:   "11111111-1111-4111-8111-111111111111",
+		Name:     "Export sentinel",
+		Username: "export@example.com",
+		Password: "Export-password-sentinel",
+	}
+	socketPath := filepath.Join(t.TempDir(), "agent.sock")
+	agent, err := session.NewAgent(session.AgentConfig{
+		SocketPath: socketPath,
+		OwnerUID:   uint32(os.Getuid()),
+		AccountID:  accountID,
+		Email:      "user@example.com",
+		VaultKey:   vault.Key,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- agent.Serve(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		_ = agent.Close()
+		if err := <-done; err != nil {
+			t.Errorf("serve agent: %v", err)
+		}
+	})
+	encrypted, err := session.SealLogin(context.Background(), socketPath, login, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cache.QueueMutation(encrypted, 0); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "vault.json")
+	if err := os.WriteFile(path, []byte("previous"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	request := exportRequest{format: exportFormatJSON, path: path}
+	if err := runExportAt(
+		context.Background(), cfg, socketPath, request, &stdout, &stderr,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), "Preview only") ||
+		!strings.Contains(stderr.String(), "plaintext") ||
+		strings.Contains(stdout.String(), login.Password) ||
+		strings.Contains(stderr.String(), login.Password) {
+		t.Fatalf("export preview leaked or failed:\nstdout=%s\nstderr=%s",
+			stdout.String(), stderr.String())
+	}
+	unchanged, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(unchanged) != "previous" {
+		t.Fatalf("preview changed destination: %q", unchanged)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	request.confirm = true
+	if err := runExportAt(
+		context.Background(), cfg, socketPath, request, &stdout, &stderr,
+	); err != nil {
+		t.Fatal(err)
+	}
+	items, err := client.ReadJSONExportFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Login == nil ||
+		items[0].Login.Password != login.Password {
+		t.Fatalf("exported items: %+v", items)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("export mode = %o", info.Mode().Perm())
+	}
+	if strings.Contains(stdout.String(), login.Password) ||
+		strings.Contains(stderr.String(), login.Password) {
+		t.Fatalf("confirmed export logged plaintext:\nstdout=%s\nstderr=%s",
+			stdout.String(), stderr.String())
+	}
+}
+
 func TestBitwardenImportPreviewAndExplicitConfirmation(t *testing.T) {
 	testImportPreviewAndExplicitConfirmation(
 		t,

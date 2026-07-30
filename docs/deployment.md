@@ -130,6 +130,13 @@ Server receives only the ordinary encrypted mutations created by a confirmed
 restore. Backup passwords are independent of master passwords, and restores
 remain local and queued when the Server is unavailable.
 
+Readable JSON and CSV exports also require no Server-side endpoint. They are
+explicit plaintext actions from an unlocked Client (`termkeep export ...` or
+the TUI export screen); decrypted values are written locally through an
+atomic mode-0600 replacement and are never included in synchronization or
+audit requests. Operators must account for backups, journaling, copy-on-write
+snapshots, filesystem caches, and the lack of any guaranteed secure erase.
+
 ## Testing
 
 ```sh
