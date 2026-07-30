@@ -329,6 +329,110 @@ func TestPreviewOnePasswordImportKeepsUnmappedFieldInGenericItem(
 	}
 }
 
+func TestPreviewOnePasswordImportRenamesOnlySemanticDuplicates(
+	t *testing.T,
+) {
+	existing := []NativeItem{{
+		Type: NativeItemTypeLogin,
+		Login: &LoginItem{
+			ItemID:   "11111111-1111-4111-8111-111111111111",
+			Name:     "Existing database",
+			Username: "operator@example.com",
+			Password: "Password-Sentinel",
+			URLs:     []string{"https://db.example.com/"},
+			Notes:    "Primary credentials",
+		},
+	}}
+	archive := onePasswordArchive(t, `{
+		"accounts": [{
+			"attrs": {"uuid": "account-id"},
+			"vaults": [{
+				"attrs": {
+					"uuid": "vault-id",
+					"name": "Infrastructure"
+				},
+				"items": [{
+					"uuid": "first-login-id",
+					"categoryUuid": "001",
+					"overview": {
+						"title": "Production database",
+						"urls": [{"url": "https://DB.example.com"}]
+					},
+					"details": {
+						"notesPlain": " Primary credentials ",
+						"loginFields": [{
+							"value": " OPERATOR@example.com ",
+							"designation": "username"
+						}, {
+							"value": "Password-Sentinel",
+							"designation": "password"
+						}]
+					}
+				}, {
+					"uuid": "second-login-id",
+					"categoryUuid": "001",
+					"overview": {
+						"title": "Production database",
+						"urls": [{"url": "https://db.example.com/"}]
+					},
+					"details": {
+						"notesPlain": "Primary credentials",
+						"loginFields": [{
+							"value": "operator@example.com",
+							"designation": "username"
+						}, {
+							"value": "Password-Sentinel",
+							"designation": "password"
+						}]
+					}
+				}, {
+					"uuid": "different-login-id",
+					"categoryUuid": "001",
+					"overview": {
+						"title": "Production database",
+						"urls": [{"url": "https://db.example.com"}]
+					},
+					"details": {
+						"notesPlain": "Primary credentials",
+						"loginFields": [{
+							"value": "different@example.com",
+							"designation": "username"
+						}, {
+							"value": "Different-Password-Sentinel",
+							"designation": "password"
+						}]
+					}
+				}]
+			}]
+		}]
+	}`)
+
+	preview, err := PreviewOnePasswordImport(
+		archive,
+		archive.Size(),
+		existing,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(preview.Items) != 4 || len(preview.Errors) != 0 {
+		t.Fatalf("preview summary: %+v", preview)
+	}
+	var names []string
+	for _, item := range preview.Items[1:] {
+		names = append(names, item.Login.Name)
+	}
+	want := []string{
+		"Production database (Duplicada)",
+		"Production database (Duplicada) - 2",
+		"Production database",
+	}
+	if !reflect.DeepEqual(names, want) {
+		t.Fatalf("duplicate names:\nwant: %v\ngot:  %v",
+			want, names)
+	}
+}
+
 func onePasswordArchive(t *testing.T, data string) *bytes.Reader {
 	t.Helper()
 	var buffer bytes.Buffer
