@@ -63,6 +63,7 @@ type onePasswordItemOverview struct {
 	Title string               `json:"title"`
 	URL   string               `json:"url"`
 	URLs  []onePasswordItemURL `json:"urls"`
+	Tags  []string             `json:"tags"`
 }
 
 type onePasswordItemURL struct {
@@ -268,7 +269,8 @@ func normalizeOnePasswordExport(
 				}
 				if onePasswordJSONValuePresent(
 					item.Details.DocumentAttributes,
-				) || onePasswordJSONValuePresent(item.File) {
+				) || onePasswordJSONValuePresent(item.File) ||
+					len(item.Overview.Tags) != 0 {
 					if err := state.addGeneric(
 						rawItem,
 						item,
