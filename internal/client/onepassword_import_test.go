@@ -643,6 +643,68 @@ func TestPreviewOnePasswordImportRejectsUnsafeInput(t *testing.T) {
 	}
 }
 
+func TestPreviewOnePasswordImportReportsUnmappedAttachments(
+	t *testing.T,
+) {
+	archive := onePasswordArchiveWithFiles(t, map[string]string{
+		"export.attributes": `{
+			"version": 3,
+			"description": "1Password Unencrypted Export"
+		}`,
+		"export.data": `{
+			"accounts": [{
+				"attrs": {"uuid": "account-id"},
+				"vaults": [{
+					"attrs": {
+						"uuid": "vault-id",
+						"name": "Infrastructure"
+					},
+					"items": [{
+						"uuid": "document-login-id",
+						"categoryUuid": "001",
+						"overview": {"title": "Database runbook"},
+						"details": {
+							"documentAttributes": {
+								"fileName": "runbook.txt",
+								"documentId": "document-id",
+								"decryptedSize": 19
+							}
+						}
+					}]
+				}]
+			}]
+		}`,
+		"files/document-id___runbook.txt": "Attachment-Sentinel",
+	})
+
+	preview, err := PreviewOnePasswordImport(
+		archive,
+		archive.Size(),
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Counts != (ImportCounts{
+		Folders: 1,
+		Generic: 1,
+	}) || len(preview.Items) != 2 ||
+		len(preview.UnmappedFields) != 1 {
+		t.Fatalf("attachment preview: %+v", preview)
+	}
+	issue := preview.UnmappedFields[0]
+	if issue.Field != "files/document-id___runbook.txt" ||
+		issue.Message != "attachment binary is not imported" {
+		t.Fatalf("attachment warning differs: %+v", issue)
+	}
+	generic := preview.Items[1].Generic
+	if generic == nil ||
+		!bytes.Contains(generic.Data, []byte(`"runbook.txt"`)) ||
+		bytes.Contains(generic.Data, []byte("Attachment-Sentinel")) {
+		t.Fatalf("Generic attachment metadata differs: %+v", generic)
+	}
+}
+
 func TestPreviewOnePasswordImportRejectsTooManyRecords(t *testing.T) {
 	var data strings.Builder
 	data.WriteString(`{
