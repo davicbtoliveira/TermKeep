@@ -45,8 +45,11 @@ type itemsErrMsg error
 type trashMsg []itemRecord
 type trashErrMsg error
 type itemSaveErrMsg error
-type bitwardenPreviewMsg client.BitwardenImportPreview
-type bitwardenPreviewErrMsg error
+type importPreviewMsg struct {
+	name    string
+	preview client.ImportPreview
+}
+type importPreviewErrMsg error
 type secretCopiedMsg struct {
 	field string
 	err   error
@@ -245,7 +248,8 @@ type model struct {
 	generatorErr        error
 	showImport          bool
 	importPath          string
-	importPreview       *client.BitwardenImportPreview
+	importName          string
+	importPreview       *client.ImportPreview
 	importErr           error
 	importLoading       bool
 	showNoteForm        bool
@@ -393,23 +397,50 @@ func loadTrash(store itemStore) tea.Cmd {
 	}
 }
 
-func previewBitwardenImport(
+func previewImport(
 	path string,
 	existing []client.NativeItem,
 ) tea.Cmd {
 	return func() tea.Msg {
 		file, err := os.Open(path)
 		if err != nil {
-			return bitwardenPreviewErrMsg(errors.New(
-				"open Bitwarden export failed",
+			return importPreviewErrMsg(errors.New(
+				"open import file failed",
 			))
 		}
 		defer file.Close()
-		preview, err := client.PreviewBitwardenImport(file, existing)
-		if err != nil {
-			return bitwardenPreviewErrMsg(err)
+		signature := make([]byte, 2)
+		_, signatureErr := file.ReadAt(signature, 0)
+		var (
+			name    = "Bitwarden"
+			preview client.ImportPreview
+		)
+		if signatureErr == nil && string(signature) == "PK" {
+			name = "1Password"
+			info, statErr := file.Stat()
+			if statErr != nil {
+				return importPreviewErrMsg(errors.New(
+					"read import file size failed",
+				))
+			}
+			preview, err = client.PreviewOnePasswordImport(
+				file,
+				info.Size(),
+				existing,
+			)
+		} else {
+			preview, err = client.PreviewBitwardenImport(
+				file,
+				existing,
+			)
 		}
-		return bitwardenPreviewMsg(preview)
+		if err != nil {
+			return importPreviewErrMsg(err)
+		}
+		return importPreviewMsg{
+			name:    name,
+			preview: preview,
+		}
 	}
 }
 
@@ -443,7 +474,7 @@ func nativeItemsForImport(records []itemRecord) []client.NativeItem {
 	return items
 }
 
-func recordsForBitwardenImport(
+func recordsForImport(
 	items []client.NativeItem,
 ) ([]itemRecord, error) {
 	records := make([]itemRecord, 0, len(items))
@@ -962,7 +993,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updatePasswordGenerator(msg)
 		}
 		if m.showImport {
-			return m.updateBitwardenImport(msg)
+			return m.updateImport(msg)
 		}
 		if m.showTOTPForm {
 			return m.updateTOTPForm(msg)
@@ -1208,6 +1239,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				!m.showFolders && !m.showFolderConflict {
 				m.showImport = true
 				m.importPath = ""
+				m.importName = ""
 				m.importPreview = nil
 				m.importErr = nil
 				m.importLoading = false
@@ -1551,12 +1583,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case activityErrMsg:
 		m.activityLoading = false
 		m.activityErr = msg
-	case bitwardenPreviewMsg:
-		preview := client.BitwardenImportPreview(msg)
+	case importPreviewMsg:
+		preview := msg.preview
+		m.importName = msg.name
 		m.importPreview = &preview
 		m.importErr = nil
 		m.importLoading = false
-	case bitwardenPreviewErrMsg:
+	case importPreviewErrMsg:
+		m.importName = ""
 		m.importPreview = nil
 		m.importErr = msg
 		m.importLoading = false
@@ -1626,6 +1660,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.showFolderForm = false
 		m.showImport = false
 		m.importPath = ""
+		m.importName = ""
 		m.importPreview = nil
 		m.importErr = nil
 		m.importLoading = false
@@ -1656,7 +1691,7 @@ func (m model) View() string {
 		return m.passwordGeneratorView()
 	}
 	if m.showImport {
-		return m.bitwardenImportView()
+		return m.importView()
 	}
 	if m.showTOTPForm {
 		return m.totpFormView()
@@ -1809,7 +1844,7 @@ func (m model) View() string {
 		}
 		b.WriteString(
 			"\n[c] new Login  [n] new Secure Note  " +
-				"[g] generate password  [i] import Bitwarden  " +
+				"[g] generate password  [i] import password manager  " +
 				"[f] Favorites  [/] search  [ctrl+f] Notes  " +
 				"[enter] open  " +
 				"[o] Folders  [t] Trash  ",
@@ -1933,7 +1968,7 @@ func (m model) breachFeedback() string {
 	}
 }
 
-func (m model) updateBitwardenImport(
+func (m model) updateImport(
 	msg tea.KeyMsg,
 ) (tea.Model, tea.Cmd) {
 	switch msg.String() {
@@ -1942,6 +1977,7 @@ func (m model) updateBitwardenImport(
 	case "esc":
 		m.showImport = false
 		m.importPath = ""
+		m.importName = ""
 		m.importPreview = nil
 		m.importErr = nil
 		m.importLoading = false
@@ -1960,7 +1996,7 @@ func (m model) updateBitwardenImport(
 			)
 			return m, nil
 		}
-		records, err := recordsForBitwardenImport(
+		records, err := recordsForImport(
 			m.importPreview.Items,
 		)
 		if err != nil {
@@ -1983,13 +2019,13 @@ func (m model) updateBitwardenImport(
 		path := strings.TrimSpace(m.importPath)
 		if path == "" {
 			m.importErr = errors.New(
-				"Bitwarden export path is required",
+				"export path is required",
 			)
 			return m, nil
 		}
 		m.importLoading = true
 		m.importErr = nil
-		return m, previewBitwardenImport(
+		return m, previewImport(
 			path,
 			nativeItemsForImport(append(
 				append([]itemRecord(nil), m.folders...),
@@ -2005,9 +2041,9 @@ func (m model) updateBitwardenImport(
 	return m, nil
 }
 
-func (m model) bitwardenImportView() string {
+func (m model) importView() string {
 	var b strings.Builder
-	b.WriteString("TermKeep — Bitwarden import\n\n")
+	b.WriteString("TermKeep — password manager import\n\n")
 	b.WriteString(
 		"Warning: this export probably contains plaintext secrets; " +
 			"delete the original file after import.\n\n",
@@ -2019,7 +2055,7 @@ func (m model) bitwardenImportView() string {
 		b.WriteString("Reading and validating locally…\n")
 	case m.importPreview != nil:
 		preview := m.importPreview
-		b.WriteString("Bitwarden import preview\n\n")
+		fmt.Fprintf(&b, "%s import preview\n\n", m.importName)
 		fmt.Fprintf(&b, "Logins:      %d\n", preview.Counts.Logins)
 		fmt.Fprintf(&b, "Secure Notes: %d\n", preview.Counts.SecureNotes)
 		fmt.Fprintf(&b, "Folders:     %d\n", preview.Counts.Folders)
@@ -2054,7 +2090,7 @@ func (m model) bitwardenImportView() string {
 	default:
 		fmt.Fprintf(
 			&b,
-			"Bitwarden JSON path: %s\n",
+			"Export path: %s\n",
 			m.importPath,
 		)
 		if m.importErr != nil {
