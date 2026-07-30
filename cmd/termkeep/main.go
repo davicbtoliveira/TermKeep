@@ -47,10 +47,20 @@ type passwordGeneratorRequest struct {
 	config client.PasswordGeneratorConfig
 }
 
-type bitwardenImportRequest struct {
+type importFormat string
+
+const (
+	importFormatBitwarden   importFormat = "bitwarden"
+	importFormatOnePassword importFormat = "1password"
+)
+
+type importRequest struct {
+	format  importFormat
 	path    string
 	confirm bool
 }
+
+type bitwardenImportRequest = importRequest
 
 func main() {
 	os.Exit(run(os.Args[1:]))
@@ -482,14 +492,22 @@ func runGeneratePassword(args []string) int {
 	return 0
 }
 
-func parseBitwardenImportRequest(
+func parseImportRequest(
 	args []string,
-) (bitwardenImportRequest, error) {
-	if len(args) == 0 || args[0] != "bitwarden" {
-		return bitwardenImportRequest{}, errImportUsage
+) (importRequest, error) {
+	if len(args) == 0 {
+		return importRequest{}, errImportUsage
 	}
-	fs := flag.NewFlagSet("import bitwarden", flag.ContinueOnError)
-	path := fs.String("file", "", "Bitwarden JSON export")
+	format := importFormat(args[0])
+	if format != importFormatBitwarden &&
+		format != importFormatOnePassword {
+		return importRequest{}, errImportUsage
+	}
+	fs := flag.NewFlagSet(
+		"import "+string(format),
+		flag.ContinueOnError,
+	)
+	path := fs.String("file", "", "password manager export")
 	confirm := fs.Bool(
 		"confirm",
 		false,
@@ -498,20 +516,21 @@ func parseBitwardenImportRequest(
 	if err := fs.Parse(args[1:]); err != nil ||
 		strings.TrimSpace(*path) == "" ||
 		fs.NArg() != 0 {
-		return bitwardenImportRequest{}, errImportUsage
+		return importRequest{}, errImportUsage
 	}
-	return bitwardenImportRequest{
+	return importRequest{
+		format:  format,
 		path:    strings.TrimSpace(*path),
 		confirm: *confirm,
 	}, nil
 }
 
 func runImport(cfg client.Config, args []string) int {
-	request, err := parseBitwardenImportRequest(args)
+	request, err := parseImportRequest(args)
 	if err != nil {
 		fmt.Fprintln(
 			os.Stderr,
-			"usage: termkeep import bitwarden "+
+			"usage: termkeep import [bitwarden|1password] "+
 				"--file FILE [--confirm]",
 		)
 		return exitUsageFailure
