@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestPreviewOnePasswordImportNormalizesLogin(t *testing.T) {
@@ -622,6 +623,58 @@ func TestPreviewOnePasswordImportReportsInvalidRecords(t *testing.T) {
 	if !reflect.DeepEqual(fields, want) {
 		t.Fatalf("error fields:\nwant: %v\ngot:  %v",
 			want, fields)
+	}
+}
+
+func TestPreviewOnePasswordImportPreservesPasswordHistory(t *testing.T) {
+	archive := onePasswordArchive(t, `{
+		"accounts": [{
+			"attrs": {"uuid": "account-id"},
+			"vaults": [{
+				"attrs": {
+					"uuid": "vault-id",
+					"name": "Infrastructure"
+				},
+				"items": [{
+					"uuid": "login-id",
+					"categoryUuid": "001",
+					"overview": {"title": "Production database"},
+					"details": {
+						"loginFields": [{
+							"value": "Current-Password-Sentinel",
+							"designation": "password"
+						}],
+						"passwordHistory": [{
+							"value": "Previous-Password-Sentinel",
+							"time": 1785241800
+						}]
+					}
+				}]
+			}]
+		}]
+	}`)
+
+	preview, err := PreviewOnePasswordImport(
+		archive,
+		archive.Size(),
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []PasswordHistoryEntry{{
+		Password: "Previous-Password-Sentinel",
+		ChangedAt: time.Date(
+			2026, time.July, 28, 12, 30, 0, 0, time.UTC,
+		),
+	}}
+	if len(preview.Items) != 2 ||
+		preview.Items[1].Login == nil ||
+		!reflect.DeepEqual(
+			preview.Items[1].Login.PasswordHistory,
+			want,
+		) {
+		t.Fatalf("password history differs: %+v", preview)
 	}
 }
 
