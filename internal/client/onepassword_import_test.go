@@ -435,6 +435,54 @@ func TestPreviewOnePasswordImportKeepsTagsInGenericItem(t *testing.T) {
 	}
 }
 
+func TestPreviewOnePasswordImportKeepsArchivedItemInGenericItem(
+	t *testing.T,
+) {
+	archive := onePasswordArchive(t, `{
+		"accounts": [{
+			"attrs": {"uuid": "account-id"},
+			"vaults": [{
+				"attrs": {
+					"uuid": "vault-id",
+					"name": "Archive"
+				},
+				"items": [{
+					"uuid": "archived-login-id",
+					"state": "archived",
+					"categoryUuid": "001",
+					"overview": {"title": "Former account"},
+					"details": {
+						"loginFields": [{
+							"value": "former@example.com",
+							"designation": "username"
+						}]
+					}
+				}]
+			}]
+		}]
+	}`)
+
+	preview, err := PreviewOnePasswordImport(
+		archive,
+		archive.Size(),
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Counts != (ImportCounts{
+		Folders: 1,
+		Generic: 1,
+	}) || len(preview.Items) != 2 {
+		t.Fatalf("archived item preview: %+v", preview)
+	}
+	generic := preview.Items[1].Generic
+	if generic == nil ||
+		!bytes.Contains(generic.Data, []byte(`"archived"`)) {
+		t.Fatalf("Generic Item lost archived state: %+v", generic)
+	}
+}
+
 func TestPreviewOnePasswordImportRenamesOnlySemanticDuplicates(
 	t *testing.T,
 ) {
