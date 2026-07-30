@@ -937,6 +937,58 @@ func TestPreviewOnePasswordImportPreservesEquivalentCustomFields(
 	}
 }
 
+func TestPreviewOnePasswordImportPreservesUndesignatedLoginField(
+	t *testing.T,
+) {
+	archive := onePasswordArchive(t, `{
+		"accounts": [{
+			"attrs": {"uuid": "account-id"},
+			"vaults": [{
+				"attrs": {
+					"uuid": "vault-id",
+					"name": "Infrastructure"
+				},
+				"items": [{
+					"uuid": "login-id",
+					"categoryUuid": "001",
+					"overview": {"title": "Production database"},
+					"details": {
+						"loginFields": [{
+							"value": "operator@example.com",
+							"name": "username",
+							"designation": "username"
+						}, {
+							"value": "Security-Answer-Sentinel",
+							"name": "security_answer",
+							"fieldType": "T"
+						}]
+					}
+				}]
+			}]
+		}]
+	}`)
+
+	preview, err := PreviewOnePasswordImport(
+		archive,
+		archive.Size(),
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(preview.Items) != 2 ||
+		preview.Items[1].Login == nil ||
+		!reflect.DeepEqual(
+			preview.Items[1].Login.CustomFields,
+			[]CustomField{{
+				Name:  "security_answer",
+				Value: "Security-Answer-Sentinel",
+			}},
+		) {
+		t.Fatalf("undesignated Login field differs: %+v", preview)
+	}
+}
+
 func TestPreviewOnePasswordImportFixture(t *testing.T) {
 	file, err := os.Open("testdata/onepassword-export.1pux")
 	if err != nil {
