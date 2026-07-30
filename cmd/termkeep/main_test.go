@@ -57,13 +57,14 @@ func TestGlobalConfiguresPwnedPasswordsEndpoint(t *testing.T) {
 	}
 }
 
-func TestBitwardenImportRequestRequiresFormatAndFile(t *testing.T) {
+func TestImportRequestRequiresSupportedFormatAndFile(t *testing.T) {
 	for _, args := range [][]string{
 		nil,
 		{"bitwarden"},
+		{"1password"},
 		{"unknown", "--file", "vault.json"},
 	} {
-		if _, err := parseBitwardenImportRequest(args); !errors.Is(
+		if _, err := parseImportRequest(args); !errors.Is(
 			err,
 			errImportUsage,
 		) {
@@ -71,17 +72,34 @@ func TestBitwardenImportRequestRequiresFormatAndFile(t *testing.T) {
 		}
 	}
 
-	request, err := parseBitwardenImportRequest([]string{
-		"bitwarden",
-		"--file",
-		"/tmp/bitwarden.json",
-		"--confirm",
-	})
-	if err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		format importFormat
+		path   string
+	}{
+		{
+			format: importFormatBitwarden,
+			path:   "/tmp/bitwarden.json",
+		},
+		{
+			format: importFormatOnePassword,
+			path:   "/tmp/account.1pux",
+		},
 	}
-	if request.path != "/tmp/bitwarden.json" || !request.confirm {
-		t.Fatalf("import request: %+v", request)
+	for _, test := range tests {
+		request, err := parseImportRequest([]string{
+			string(test.format),
+			"--file",
+			test.path,
+			"--confirm",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if request.format != test.format ||
+			request.path != test.path ||
+			!request.confirm {
+			t.Fatalf("import request: %+v", request)
+		}
 	}
 }
 
