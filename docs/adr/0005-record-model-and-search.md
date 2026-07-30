@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-07-21
-- Updated: 2026-07-29
+- Updated: 2026-07-30
 
 ## Context
 
@@ -27,6 +27,8 @@ When a Login password changes, the Client prepends the replaced non-empty value 
 After unlock, the client builds an in-memory fuzzy index over item name, username, domain/URL, folder, and custom-field names. Passwords, TOTP secrets, and hidden values are never indexed. Notes enter search only through an explicit content-search action. No semantic search index is stored by the server.
 
 Bitwarden, 1Password, and generic CSV exports are parsed locally. The Bitwarden path accepts an unencrypted JSON export bounded to 16 MiB and 10,000 combined records. It maps supported Login fields, Login password history, Login text custom fields, Secure Notes, Folders, favorites, and TOTP to native records. Unsupported item types retain their complete original JSON inside the encrypted Generic Item schema; native Login and Secure Note fields that cannot be represented are listed in the preview.
+
+The 1Password path accepts a version 3 1Password Unencrypted Export (`.1pux`) ZIP archive. It bounds `export.data` to 16 MiB and 10,000 combined Vaults and Items, maps each Vault to a Folder, and maps lossless Login (`001`) and Secure Note (`003`) fields to native records. Unsupported categories and native records with unsupported structured fields retain their complete original Item JSON as Generic Items. Attachment metadata remains in that JSON, while binary `files/` entries are reported in the preview and not imported because attachments remain deferred.
 
 Import previews never mutate the cache or contact the Server. Confirmation encrypts every normalized record through the terminal session agent and queues ordinary offline-first mutations before optional synchronization. Cancellation leaves both cache and Server unchanged. Semantically identical records are retained and renamed with `(Duplicada)`, then `(Duplicada) - 2`, `(Duplicada) - 3`, and so on. Same-name records with different content are not duplicates.
 

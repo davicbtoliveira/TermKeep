@@ -323,6 +323,37 @@ Bitwarden documents JSON exports as plaintext files that contain unencrypted
 Vault data. Delete the source securely as soon as it is no longer needed; see
 [Bitwarden's export guidance](https://bitwarden.com/help/export-your-data/).
 
+## 1Password import
+
+TermKeep accepts a version 3 1Password Unencrypted Export (`.1pux`) from the
+same local preview and confirmation pipeline. Press `i` in the unlocked TUI
+and enter the archive path; the Client detects the ZIP archive without sending
+it to the Server. For scripts, preview and confirm explicitly:
+
+```sh
+termkeep import 1password --file ./account.1pux
+termkeep import 1password --file ./account.1pux --confirm
+```
+
+Each 1Password Vault becomes an encrypted Folder. Login (`001`) and Secure
+Note (`003`) categories become native records when their source fields have
+lossless native equivalents. Favorites, URLs, notes, password history, TOTP,
+and string-like custom fields are preserved. Other categories and native
+records containing unsupported structured fields become encrypted Generic
+Items containing the complete original Item JSON.
+
+The Client reads only `export.attributes` and `export.data`, accepts at most
+16 MiB of export data and 10,000 combined Vaults and Items, and reports
+invalid or incomplete records in the preview. Attachment metadata remains in
+its Generic Item, but binary entries under `files/` are not imported and
+produce preview warnings because attachments are outside the current record
+model. Duplicate naming, read-only cancellation, offline mutation queuing,
+and idempotent synchronization are shared with the Bitwarden importer.
+
+1Password exports are unencrypted ZIP archives. Delete the source after
+verifying the import; see
+[1Password's 1PUX format documentation](https://support.1password.com/1pux-format/).
+
 ## Offline use and synchronization
 
 A successful registration or online login authorizes an encrypted local
