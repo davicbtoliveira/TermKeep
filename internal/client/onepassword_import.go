@@ -12,12 +12,16 @@ import (
 
 const maxOnePasswordExportAttributesSize = 64 << 10
 const maxOnePasswordExportDataSize = 16 << 20
+const maxOnePasswordImportRecords = 10_000
 
 var ErrInvalidOnePasswordExport = errors.New(
 	"invalid 1Password export",
 )
 var ErrOnePasswordExportTooLarge = errors.New(
 	"1Password export data exceeds 16 MiB",
+)
+var ErrOnePasswordExportTooManyRecords = errors.New(
+	"1Password export exceeds 10000 records",
 )
 
 type onePasswordExportAttributes struct {
@@ -127,6 +131,18 @@ func PreviewOnePasswordImport(
 		&source,
 	); err != nil {
 		return ImportPreview{}, err
+	}
+	recordCount := 0
+	for _, account := range source.Accounts {
+		for _, vault := range account.Vaults {
+			if recordCount >= maxOnePasswordImportRecords ||
+				len(vault.Items) >
+					maxOnePasswordImportRecords-recordCount-1 {
+				return ImportPreview{},
+					ErrOnePasswordExportTooManyRecords
+			}
+			recordCount += 1 + len(vault.Items)
+		}
 	}
 
 	preview := ImportPreview{}
