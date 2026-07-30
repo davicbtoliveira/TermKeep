@@ -547,6 +547,84 @@ func TestPreviewOnePasswordImportRejectsTooManyRecords(t *testing.T) {
 	}
 }
 
+func TestPreviewOnePasswordImportReportsInvalidRecords(t *testing.T) {
+	archive := onePasswordArchive(t, `{
+		"accounts": [{
+			"attrs": {"uuid": "account-id"},
+			"vaults": [{
+				"attrs": {
+					"uuid": "duplicate-vault-id",
+					"name": "Personal"
+				},
+				"items": [{
+					"uuid": "missing-title-id",
+					"categoryUuid": "001",
+					"overview": {"title": "   "}
+				}, {
+					"uuid": "missing-category-id",
+					"overview": {"title": "Missing category"}
+				}, {
+					"uuid": "invalid-totp-id",
+					"categoryUuid": "001",
+					"overview": {"title": "Invalid TOTP"},
+					"details": {
+						"sections": [{
+							"fields": [{
+								"title": "one-time password",
+								"value": {"totp": "not-an-otpauth-uri"}
+							}]
+						}]
+					}
+				}, {
+					"uuid": "valid-note-id",
+					"categoryUuid": "003",
+					"overview": {"title": "Recovery procedure"},
+					"details": {"notesPlain": "Recovery steps"}
+				}]
+			}, {
+				"attrs": {
+					"uuid": "duplicate-vault-id",
+					"name": "Duplicate vault"
+				},
+				"items": [{
+					"uuid": "skipped-login-id",
+					"categoryUuid": "001",
+					"overview": {"title": "Skipped Login"}
+				}]
+			}]
+		}]
+	}`)
+
+	preview, err := PreviewOnePasswordImport(
+		archive,
+		archive.Size(),
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Counts != (ImportCounts{
+		SecureNotes: 1,
+		Folders:     1,
+	}) || len(preview.Items) != 2 {
+		t.Fatalf("invalid records changed preview: %+v", preview)
+	}
+	var fields []string
+	for _, issue := range preview.Errors {
+		fields = append(fields, issue.Field)
+	}
+	want := []string{
+		"overview.title",
+		"categoryUuid",
+		"details.sections[0].fields[0].value",
+		"vaults[1].attrs.uuid",
+	}
+	if !reflect.DeepEqual(fields, want) {
+		t.Fatalf("error fields:\nwant: %v\ngot:  %v",
+			want, fields)
+	}
+}
+
 func onePasswordArchive(t *testing.T, data string) *bytes.Reader {
 	t.Helper()
 	return onePasswordArchiveWithFiles(t, map[string]string{
