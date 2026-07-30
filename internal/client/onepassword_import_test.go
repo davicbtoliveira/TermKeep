@@ -386,6 +386,55 @@ func TestPreviewOnePasswordImportKeepsUnmappedSecureNoteFieldInGenericItem(
 	}
 }
 
+func TestPreviewOnePasswordImportKeepsTagsInGenericItem(t *testing.T) {
+	archive := onePasswordArchive(t, `{
+		"accounts": [{
+			"attrs": {"uuid": "account-id"},
+			"vaults": [{
+				"attrs": {
+					"uuid": "vault-id",
+					"name": "Personal"
+				},
+				"items": [{
+					"uuid": "tagged-login-id",
+					"categoryUuid": "001",
+					"overview": {
+						"title": "Tagged account",
+						"tags": ["production", "database"]
+					},
+					"details": {
+						"loginFields": [{
+							"value": "operator@example.com",
+							"designation": "username"
+						}]
+					}
+				}]
+			}]
+		}]
+	}`)
+
+	preview, err := PreviewOnePasswordImport(
+		archive,
+		archive.Size(),
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Counts != (ImportCounts{
+		Folders: 1,
+		Generic: 1,
+	}) || len(preview.Items) != 2 {
+		t.Fatalf("tagged item preview: %+v", preview)
+	}
+	generic := preview.Items[1].Generic
+	if generic == nil ||
+		!bytes.Contains(generic.Data, []byte(`"production"`)) ||
+		!bytes.Contains(generic.Data, []byte(`"database"`)) {
+		t.Fatalf("Generic Item lost tags: %+v", generic)
+	}
+}
+
 func TestPreviewOnePasswordImportRenamesOnlySemanticDuplicates(
 	t *testing.T,
 ) {
