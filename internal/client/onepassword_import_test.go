@@ -515,6 +515,38 @@ func TestPreviewOnePasswordImportRejectsUnsafeInput(t *testing.T) {
 	}
 }
 
+func TestPreviewOnePasswordImportRejectsTooManyRecords(t *testing.T) {
+	var data strings.Builder
+	data.WriteString(`{
+		"accounts": [{
+			"vaults": [{
+				"attrs": {"uuid": "vault-id", "name": "Personal"},
+				"items": [`)
+	for index := 0; index < maxOnePasswordImportRecords; index++ {
+		if index > 0 {
+			data.WriteByte(',')
+		}
+		data.WriteString(
+			`{"categoryUuid":"001","overview":{"title":"x"}}`,
+		)
+	}
+	data.WriteString(`]}]}]}`)
+	archive := onePasswordArchive(t, data.String())
+
+	_, err := PreviewOnePasswordImport(
+		archive,
+		archive.Size(),
+		nil,
+	)
+	if !errors.Is(err, ErrOnePasswordExportTooManyRecords) {
+		t.Fatalf(
+			"want %v, got %v",
+			ErrOnePasswordExportTooManyRecords,
+			err,
+		)
+	}
+}
+
 func onePasswordArchive(t *testing.T, data string) *bytes.Reader {
 	t.Helper()
 	return onePasswordArchiveWithFiles(t, map[string]string{
