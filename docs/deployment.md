@@ -124,6 +124,12 @@ explicit mapping or ignore decision for every column. Operators should handle
 source exports as plaintext secrets and delete them when the import has been
 verified. 1Password attachment binaries are reported but not imported.
 
+Portable backups require no Server-side endpoint. The Client writes a mode
+0600 file with a versioned Argon2id header and authenticated ciphertext; the
+Server receives only the ordinary encrypted mutations created by a confirmed
+restore. Backup passwords are independent of master passwords, and restores
+remain local and queued when the Server is unavailable.
+
 ## Testing
 
 ```sh

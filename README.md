@@ -395,6 +395,38 @@ offline mutation queuing, and synchronization follow the same import pipeline
 as Bitwarden and 1Password. The Client warns about plaintext before and after
 the flow; the CSV contents are never sent to the Server.
 
+## Portable encrypted backup
+
+Backups are self-contained encrypted files. The backup password is requested
+and confirmed separately from the master-password flow and must not be the
+master password:
+
+```sh
+termkeep backup create --file ./termkeep-backup.tkb
+```
+
+The header contains only the versioned format and Argon2id parameters; semantic
+Vault data, encrypted Item envelopes, pending mutations, revisions, cursor, and
+the password envelope are inside authenticated XChaCha20-Poly1305 ciphertext.
+Restore always previews first and preserves source conflict heads as separate
+records. A same-account restore into an empty cache can retain the complete
+encrypted graph; semantic restores give records fresh deterministic IDs,
+retain folder links, favorites, password history, TOTP, and Generic Item data,
+then queue ordinary
+offline-first mutations:
+
+```sh
+termkeep backup restore --file ./termkeep-backup.tkb
+termkeep backup restore --file ./termkeep-backup.tkb --confirm
+```
+
+The destination Vault must already be authorized and unlocked locally; an
+empty destination means a provisioned Vault with no cached Items.
+
+Wrong passwords, truncation, tampering, and unsupported format versions fail
+before any cache mutation. If synchronization is unavailable, the restored
+mutations remain queued locally for a later retry.
+
 ## Offline use and synchronization
 
 A successful registration or online login authorizes an encrypted local

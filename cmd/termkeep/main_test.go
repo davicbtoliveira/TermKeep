@@ -58,6 +58,43 @@ func TestGlobalConfiguresPwnedPasswordsEndpoint(t *testing.T) {
 	}
 }
 
+func TestBackupRequestRequiresActionAndFile(t *testing.T) {
+	for _, args := range [][]string{
+		nil,
+		{"create"},
+		{"restore", "--file", "backup.tkb", "--unknown"},
+		{"unknown", "--file", "backup.tkb"},
+		{"create", "--file", "backup.tkb", "--confirm"},
+	} {
+		if _, err := parseBackupRequest(args); !errors.Is(
+			err,
+			errBackupUsage,
+		) {
+			t.Fatalf("args %v: got %v", args, err)
+		}
+	}
+	create, err := parseBackupRequest([]string{
+		"create", "--file", "/tmp/backup.tkb",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if create.action != backupActionCreate ||
+		create.path != "/tmp/backup.tkb" || create.confirm {
+		t.Fatalf("create request: %+v", create)
+	}
+	restore, err := parseBackupRequest([]string{
+		"restore", "--file", "/tmp/backup.tkb", "--confirm",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restore.action != backupActionRestore ||
+		restore.path != "/tmp/backup.tkb" || !restore.confirm {
+		t.Fatalf("restore request: %+v", restore)
+	}
+}
+
 func TestImportRequestRequiresSupportedFormatAndFile(t *testing.T) {
 	for _, args := range [][]string{
 		nil,

@@ -134,12 +134,14 @@ func run(args []string) int {
 		return runGeneratePassword(commandArgs[1:])
 	case "import":
 		return runImport(cfg, commandArgs[1:])
+	case "backup":
+		return runBackup(cfg, commandArgs[1:])
 	case "__session-agent":
 		return runSessionAgent(commandArgs[1:])
 	case "":
 		return runTUI(cfg)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n\nusage: termkeep [--server URL] [--ca-cert FILE] [--pwned-passwords-url URL|off] [status|bootstrap|register|login|logout|sync|secret|totp|generate-password|import]\n", command)
+		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n\nusage: termkeep [--server URL] [--ca-cert FILE] [--pwned-passwords-url URL|off] [status|bootstrap|register|login|logout|sync|secret|totp|generate-password|import|backup]\n", command)
 		return exitUsageFailure
 	}
 }
@@ -860,7 +862,18 @@ func queueImport(
 	socketPath string,
 	items []client.NativeItem,
 ) error {
-	for _, native := range items {
+	return queueImportWithNamespace(ctx, cache, socketPath, items, "")
+}
+
+func queueImportWithNamespace(
+	ctx context.Context,
+	cache *client.Cache,
+	socketPath string,
+	items []client.NativeItem,
+	namespace string,
+) error {
+	encryptedItems := make([]client.EncryptedItem, 0, len(items))
+	for index, native := range items {
 		var (
 			encrypted client.EncryptedItem
 			err       error
@@ -912,27 +925,41 @@ func queueImport(
 		if err != nil {
 			return errors.New("encrypt imported Item failed")
 		}
-		revisionID, err := client.NewItemID()
-		if err != nil {
-			return errors.New("create imported revision failed")
+		if namespace == "" {
+			revisionID, revisionErr := client.NewItemID()
+			if revisionErr != nil {
+				return errors.New("create imported revision failed")
+			}
+			encrypted.RevisionID = revisionID
+		} else {
+			encrypted.RevisionID = client.DeterministicItemID(
+				namespace,
+				fmt.Sprintf("revision\x00%s\x00%d", encrypted.ItemID, index),
+			)
 		}
-		encrypted.RevisionID = revisionID
-		if _, err := cache.QueueMutation(encrypted, 0); err != nil {
-			return errors.New("queue imported Item failed")
-		}
+		encryptedItems = append(encryptedItems, encrypted)
+	}
+	var queueErr error
+	if namespace == "" {
+		_, queueErr = cache.QueueMutations(encryptedItems)
+	} else {
+		_, queueErr = cache.QueuePortableBackupMutations(
+			encryptedItems,
+			namespace,
+		)
+	}
+	if queueErr != nil {
+		return errors.New("queue imported Item failed")
 	}
 	return nil
 }
 
-func cachedNativeItems(
+func nativeItemsFromHeads(
 	ctx context.Context,
-	cache *client.Cache,
 	socketPath string,
+	groups []client.ItemHead,
+	errorMessage string,
 ) ([]client.NativeItem, error) {
-	groups, err := cache.ItemHeads()
-	if err != nil {
-		return nil, errors.New("read encrypted cache failed")
-	}
 	var items []client.NativeItem
 	for _, group := range groups {
 		for _, revision := range group.Revisions {
@@ -945,12 +972,29 @@ func cachedNativeItems(
 				revision,
 			)
 			if err != nil {
-				return nil, errors.New("decrypt cached Item failed")
+				return nil, errors.New(errorMessage)
 			}
 			items = append(items, opened)
 		}
 	}
 	return items, nil
+}
+
+func cachedNativeItems(
+	ctx context.Context,
+	cache *client.Cache,
+	socketPath string,
+) ([]client.NativeItem, error) {
+	groups, err := cache.ItemHeads()
+	if err != nil {
+		return nil, errors.New("read encrypted cache failed")
+	}
+	return nativeItemsFromHeads(
+		ctx,
+		socketPath,
+		groups,
+		"decrypt cached Item failed",
+	)
 }
 
 func writeImportPreview(

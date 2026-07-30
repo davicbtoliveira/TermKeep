@@ -17,12 +17,14 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const cacheFormatVersion = 2
+const cacheFormatVersion = 3
 const legacyCacheFormatVersion = 1
+const previousCacheFormatVersion = 2
 const maximumCacheFileSize = 64 << 20
 
 var ErrCacheNotFound = errors.New("authorized cache not found")
 var ErrInvalidCache = errors.New("invalid encrypted cache")
+var ErrCacheNotEmpty = errors.New("encrypted cache is not empty")
 
 type cacheFile struct {
 	Version               int                                 `json:"version"`
@@ -33,6 +35,7 @@ type cacheFile struct {
 	Revisions             map[string]map[string]EncryptedItem `json:"revisions"`
 	Mutations             []Mutation                          `json:"mutations"`
 	Cursor                string                              `json:"cursor"`
+	RestoredBackups       []string                            `json:"restored_backups,omitempty"`
 }
 
 type Mutation struct {
@@ -212,6 +215,229 @@ func (c *Cache) QueueMutation(
 		return Mutation{}, err
 	}
 	return mutation, nil
+}
+
+// QueueMutations queues a batch of new local revisions in one atomic cache
+// update. It is intentionally limited to base revision zero because imports
+// create new destination item IDs. Existing identical revisions are skipped,
+// making retries of a deterministic import idempotent.
+func (c *Cache) QueueMutations(items []EncryptedItem) ([]Mutation, error) {
+	return c.queueMutations(items, "")
+}
+
+// QueuePortableBackupMutations queues a semantic backup restore and records
+// its fingerprint in the same atomic cache write.
+func (c *Cache) QueuePortableBackupMutations(
+	items []EncryptedItem,
+	fingerprint string,
+) ([]Mutation, error) {
+	if fingerprint == "" {
+		return c.QueueMutations(items)
+	}
+	return c.queueMutations(items, fingerprint)
+}
+
+func (c *Cache) queueMutations(
+	items []EncryptedItem,
+	fingerprint string,
+) ([]Mutation, error) {
+	if c == nil {
+		return nil, ErrInvalidCache
+	}
+	if len(items) == 0 && fingerprint == "" {
+		return nil, nil
+	}
+	prepared := make([]EncryptedItem, len(items))
+	for index, item := range items {
+		if item.ItemID == "" || item.SchemaVersion < 1 ||
+			item.Revision != 1 || len(item.ParentRevisionIDs) != 0 ||
+			!validEncryptedItemContent(item) {
+			return nil, ErrInvalidItemEnvelope
+		}
+		if item.RevisionID == "" {
+			revisionID, err := NewItemID()
+			if err != nil {
+				return nil, err
+			}
+			item.RevisionID = revisionID
+		}
+		prepared[index] = cloneEncryptedItem(item)
+	}
+	queued := make([]Mutation, 0, len(prepared))
+	err := withCacheLock(c.path, true, func() error {
+		data, err := readCacheFile(c.path)
+		if err != nil {
+			return err
+		}
+		for _, item := range prepared {
+			revisions := data.Revisions[item.ItemID]
+			if existing, exists := revisions[item.RevisionID]; exists {
+				if sameEncryptedItem(existing, item) {
+					continue
+				}
+				return errors.New("local revision ID already exists")
+			}
+			if len(revisions) != 0 {
+				return errors.New("local item revision conflict")
+			}
+			if revisions == nil {
+				revisions = make(map[string]EncryptedItem)
+				data.Revisions[item.ItemID] = revisions
+			}
+			revisions[item.RevisionID] = cloneEncryptedItem(item)
+			mutation := Mutation{
+				MutationID:   item.RevisionID,
+				BaseRevision: 0,
+				Item:         cloneEncryptedItem(item),
+			}
+			data.Mutations = append(data.Mutations, mutation)
+			queued = append(queued, mutation)
+		}
+		if fingerprint != "" && !containsRestoredBackup(
+			data.RestoredBackups,
+			fingerprint,
+		) {
+			data.RestoredBackups = append(data.RestoredBackups, fingerprint)
+		}
+		if len(queued) == 0 && fingerprint == "" {
+			return nil
+		}
+		return writeCacheFile(c.path, data)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return queued, nil
+}
+
+// IsEmpty reports whether a cache has no local graph, pending mutations, or
+// synchronization cursor. It is used to decide whether a same-account backup
+// can restore its complete encrypted graph without semantic re-encryption.
+func (c *Cache) IsEmpty() (bool, error) {
+	if c == nil {
+		return false, ErrInvalidCache
+	}
+	data, err := c.read()
+	if err != nil {
+		return false, err
+	}
+	return len(data.Revisions) == 0 && len(data.Mutations) == 0 &&
+		data.Cursor == "", nil
+}
+
+// PortableStateMatches reports whether the cache already contains the exact
+// encrypted graph and reconciliation state from backup.
+func (c *Cache) PortableStateMatches(backup PortableBackup) (bool, error) {
+	if c == nil {
+		return false, ErrInvalidCache
+	}
+	data, err := c.read()
+	if err != nil {
+		return false, err
+	}
+	if data.AccountID != backup.AccountID {
+		return false, nil
+	}
+	if len(data.Revisions) != len(backup.Revisions) {
+		return false, nil
+	}
+	for itemID, revisions := range backup.Revisions {
+		cached := data.Revisions[itemID]
+		if len(cached) != len(revisions) {
+			return false, nil
+		}
+		for revisionID, item := range revisions {
+			cachedItem, ok := cached[revisionID]
+			if !ok || !sameEncryptedItem(cachedItem, item) {
+				return false, nil
+			}
+		}
+	}
+	if backup.Fingerprint != "" &&
+		(len(data.Revisions) != 0 || len(data.Mutations) != 0 ||
+			data.Cursor != "") &&
+		containsRestoredBackup(data.RestoredBackups, backup.Fingerprint) {
+		return true, nil
+	}
+	if data.Cursor != backup.Cursor || len(data.Mutations) != len(backup.Mutations) {
+		return false, nil
+	}
+	for index, mutation := range backup.Mutations {
+		if index >= len(data.Mutations) ||
+			data.Mutations[index].MutationID != mutation.MutationID ||
+			data.Mutations[index].BaseRevision != mutation.BaseRevision ||
+			!sameEncryptedItem(data.Mutations[index].Item, mutation.Item) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// PortableRestoreMarker reports whether this account has already restored the
+// exact backup file, even if local synchronization later changed its cursor.
+func (c *Cache) PortableRestoreMarker(backup PortableBackup) (bool, error) {
+	if c == nil {
+		return false, ErrInvalidCache
+	}
+	if backup.AccountID == "" || backup.Fingerprint == "" {
+		return false, nil
+	}
+	data, err := c.read()
+	if err != nil {
+		return false, err
+	}
+	return data.AccountID == backup.AccountID && containsRestoredBackup(
+		data.RestoredBackups,
+		backup.Fingerprint,
+	), nil
+}
+
+// RestorePortableState atomically restores the complete encrypted graph into
+// an empty cache for the same account. The destination password envelope is
+// retained so the existing master-password flow remains valid.
+func (c *Cache) RestorePortableState(backup PortableBackup) error {
+	if c == nil {
+		return ErrInvalidCache
+	}
+	if backup.AccountID == "" || backup.Revisions == nil {
+		return ErrInvalidPortableBackup
+	}
+	return withCacheLock(c.path, true, func() error {
+		data, err := readCacheFile(c.path)
+		if err != nil {
+			return err
+		}
+		if data.AccountID != backup.AccountID {
+			return errors.New("portable backup account mismatch")
+		}
+		if len(data.Revisions) != 0 || len(data.Mutations) != 0 ||
+			data.Cursor != "" {
+			return ErrCacheNotEmpty
+		}
+		replacement := cacheFile{
+			Version:               cacheFormatVersion,
+			AccountID:             data.AccountID,
+			Email:                 data.Email,
+			PasswordVaultEnvelope: append([]byte(nil), data.PasswordVaultEnvelope...),
+			Revisions:             cloneEncryptedRevisions(backup.Revisions),
+			Mutations:             cloneMutations(backup.Mutations),
+			Cursor:                backup.Cursor,
+			RestoredBackups:       append([]string(nil), data.RestoredBackups...),
+		}
+		if backup.Fingerprint != "" && !containsRestoredBackup(
+			replacement.RestoredBackups,
+			backup.Fingerprint,
+		) {
+			replacement.RestoredBackups = append(
+				replacement.RestoredBackups,
+				backup.Fingerprint,
+			)
+		}
+		if !validPortableBackupCacheData(replacement) {
+			return ErrInvalidPortableBackup
+		}
+		return writeCacheFile(c.path, replacement)
+	})
 }
 
 func (c *Cache) Items() ([]EncryptedItem, error) {
@@ -482,6 +708,7 @@ func readCacheFile(path string) (cacheFile, error) {
 		return cacheFile{}, ErrInvalidCache
 	}
 	if (data.Version != cacheFormatVersion &&
+		data.Version != previousCacheFormatVersion &&
 		data.Version != legacyCacheFormatVersion) ||
 		data.AccountID == "" ||
 		data.Email == "" ||
@@ -497,17 +724,27 @@ func readCacheFile(path string) (cacheFile, error) {
 		data.Revisions = make(
 			map[string]map[string]EncryptedItem)
 	}
+	if err := validateCacheData(data); err != nil {
+		return cacheFile{}, ErrInvalidCache
+	}
+	return data, nil
+}
+
+func validateCacheData(data cacheFile) error {
+	if data.AccountID == "" || data.Email == "" ||
+		len(data.PasswordVaultEnvelope) == 0 || data.Revisions == nil {
+		return ErrInvalidCache
+	}
 	for itemID, revisions := range data.Revisions {
 		if itemID == "" || revisions == nil {
-			return cacheFile{}, ErrInvalidCache
+			return ErrInvalidCache
 		}
 		for revisionID, item := range revisions {
 			if revisionID == "" || item.RevisionID != revisionID ||
 				item.ItemID != itemID || item.SchemaVersion < 1 ||
-				item.Revision < 1 ||
-				!validEncryptedItemContent(item) ||
+				item.Revision < 1 || !validEncryptedItemContent(item) ||
 				hasInvalidParentIDs(item.ParentRevisionIDs) {
-				return cacheFile{}, ErrInvalidCache
+				return ErrInvalidCache
 			}
 		}
 	}
@@ -522,10 +759,24 @@ func readCacheFile(path string) (cacheFile, error) {
 			(mutation.BaseRevision > 0 &&
 				len(mutation.Item.ParentRevisionIDs) == 0) ||
 			hasInvalidParentIDs(mutation.Item.ParentRevisionIDs) {
-			return cacheFile{}, ErrInvalidCache
+			return ErrInvalidCache
 		}
 	}
-	return data, nil
+	for _, fingerprint := range data.RestoredBackups {
+		if fingerprint == "" {
+			return ErrInvalidCache
+		}
+	}
+	return nil
+}
+
+func containsRestoredBackup(fingerprints []string, fingerprint string) bool {
+	for _, value := range fingerprints {
+		if value == fingerprint {
+			return true
+		}
+	}
+	return false
 }
 
 func migrateLegacyCache(data *cacheFile) error {
