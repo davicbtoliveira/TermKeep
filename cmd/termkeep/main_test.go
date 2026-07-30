@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -104,6 +105,61 @@ func TestImportRequestRequiresSupportedFormatAndFile(t *testing.T) {
 }
 
 func TestBitwardenImportPreviewAndExplicitConfirmation(t *testing.T) {
+	testImportPreviewAndExplicitConfirmation(
+		t,
+		importFormatBitwarden,
+		"bitwarden.json",
+		[]byte(`{
+			"encrypted": false,
+			"folders": [],
+			"items": [{
+				"type": 1,
+				"name": "Imported account",
+				"login": {
+					"username": "imported@example.com",
+					"password": "Imported-Password-Sentinel"
+				}
+			}]
+		}`),
+		1,
+		client.LoginItem{
+			Name:     "Imported account",
+			Username: "imported@example.com",
+			Password: "Imported-Password-Sentinel",
+		},
+	)
+}
+
+func TestOnePasswordImportPreviewAndExplicitConfirmation(t *testing.T) {
+	source, err := os.ReadFile(
+		"../../internal/client/testdata/onepassword-export.1pux",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testImportPreviewAndExplicitConfirmation(
+		t,
+		importFormatOnePassword,
+		"account.1pux",
+		source,
+		4,
+		client.LoginItem{
+			Name:     "Production database",
+			Username: "operator@example.com",
+			Password: "Current-Password-Sentinel",
+		},
+	)
+}
+
+func testImportPreviewAndExplicitConfirmation(
+	t *testing.T,
+	format importFormat,
+	fileName string,
+	source []byte,
+	expectedItems int,
+	expectedLogin client.LoginItem,
+) {
+	t.Helper()
 	accountID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 	vault, err := client.NewVault([]byte("TermKeep#2026"), accountID)
 	if err != nil {
@@ -180,28 +236,17 @@ func TestBitwardenImportPreviewAndExplicitConfirmation(t *testing.T) {
 			t.Errorf("serve agent: %v", err)
 		}
 	})
-	path := filepath.Join(t.TempDir(), "bitwarden.json")
-	if err := os.WriteFile(path, []byte(`{
-		"encrypted": false,
-		"folders": [],
-		"items": [{
-			"type": 1,
-			"name": "Imported account",
-			"login": {
-				"username": "imported@example.com",
-				"password": "Imported-Password-Sentinel"
-			}
-		}]
-	}`), 0o600); err != nil {
+	path := filepath.Join(t.TempDir(), fileName)
+	if err := os.WriteFile(path, source, 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	var stdout, stderr bytes.Buffer
-	if err := runBitwardenImportAt(
+	if err := runImportAt(
 		context.Background(),
 		cfg,
 		socketPath,
-		bitwardenImportRequest{path: path},
+		importRequest{format: format, path: path},
 		&stdout,
 		&stderr,
 	); err != nil {
@@ -223,17 +268,24 @@ func TestBitwardenImportPreviewAndExplicitConfirmation(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	if err := runBitwardenImportAt(
+	if err := runImportAt(
 		context.Background(),
 		cfg,
 		socketPath,
-		bitwardenImportRequest{path: path, confirm: true},
+		importRequest{
+			format:  format,
+			path:    path,
+			confirm: true,
+		},
 		&stdout,
 		&stderr,
 	); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(stdout.String(), "Imported locally: 1") {
+	if !strings.Contains(
+		stdout.String(),
+		fmt.Sprintf("Imported locally: %d", expectedItems),
+	) {
 		t.Fatalf("confirmation output:\n%s", stdout.String())
 	}
 	snapshot, err = cache.SyncSnapshot()
@@ -242,7 +294,7 @@ func TestBitwardenImportPreviewAndExplicitConfirmation(t *testing.T) {
 	}
 	if len(snapshot.Mutations) != 0 ||
 		syncRequests != 1 ||
-		len(synced) != 1 {
+		len(synced) != expectedItems {
 		t.Fatalf(
 			"confirmation sync: snapshot=%+v requests=%d mutations=%+v",
 			snapshot,
@@ -251,26 +303,34 @@ func TestBitwardenImportPreviewAndExplicitConfirmation(t *testing.T) {
 		)
 	}
 	for _, forbidden := range []string{
-		"Imported account",
-		"imported@example.com",
-		"Imported-Password-Sentinel",
+		expectedLogin.Name,
+		expectedLogin.Username,
+		expectedLogin.Password,
 	} {
 		if bytes.Contains(syncBody, []byte(forbidden)) {
 			t.Fatalf("synchronization request exposed %q", forbidden)
 		}
 	}
-	opened, err := session.OpenNativeItem(
-		context.Background(),
-		socketPath,
-		synced[0].Item,
-	)
-	if err != nil {
-		t.Fatal(err)
+	var openedLogin *client.LoginItem
+	for _, mutation := range synced {
+		opened, err := session.OpenNativeItem(
+			context.Background(),
+			socketPath,
+			mutation.Item,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if opened.Login != nil {
+			openedLogin = opened.Login
+			break
+		}
 	}
-	if opened.Login == nil ||
-		opened.Login.Name != "Imported account" ||
-		opened.Login.Password != "Imported-Password-Sentinel" {
-		t.Fatalf("confirmed Login differs: %+v", opened)
+	if openedLogin == nil ||
+		openedLogin.Name != expectedLogin.Name ||
+		openedLogin.Username != expectedLogin.Username ||
+		openedLogin.Password != expectedLogin.Password {
+		t.Fatalf("confirmed Login differs: %+v", openedLogin)
 	}
 }
 
