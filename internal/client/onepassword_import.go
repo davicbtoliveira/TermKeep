@@ -270,7 +270,11 @@ func normalizeOnePasswordExport(
 				if onePasswordJSONValuePresent(
 					item.Details.DocumentAttributes,
 				) || onePasswordJSONValuePresent(item.File) ||
-					len(item.Overview.Tags) != 0 {
+					len(item.Overview.Tags) != 0 ||
+					strings.EqualFold(
+						strings.TrimSpace(item.State),
+						"archived",
+					) {
 					if err := state.addGeneric(
 						rawItem,
 						item,
