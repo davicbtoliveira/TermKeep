@@ -1,0 +1,205 @@
+package client
+
+import (
+	"archive/zip"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"strings"
+)
+
+var ErrInvalidOnePasswordExport = errors.New(
+	"invalid 1Password export",
+)
+
+type onePasswordExportAttributes struct {
+	Version     int    `json:"version"`
+	Description string `json:"description"`
+}
+
+type onePasswordExport struct {
+	Accounts []onePasswordAccount `json:"accounts"`
+}
+
+type onePasswordAccount struct {
+	Vaults []onePasswordVault `json:"vaults"`
+}
+
+type onePasswordVault struct {
+	Attrs onePasswordVaultAttributes `json:"attrs"`
+	Items []onePasswordItem          `json:"items"`
+}
+
+type onePasswordVaultAttributes struct {
+	UUID string `json:"uuid"`
+	Name string `json:"name"`
+}
+
+type onePasswordItem struct {
+	UUID         string                  `json:"uuid"`
+	Favorite     int                     `json:"favIndex"`
+	State        string                  `json:"state"`
+	CategoryUUID string                  `json:"categoryUuid"`
+	Overview     onePasswordItemOverview `json:"overview"`
+	Details      onePasswordItemDetails  `json:"details"`
+}
+
+type onePasswordItemOverview struct {
+	Title string               `json:"title"`
+	URLs  []onePasswordItemURL `json:"urls"`
+}
+
+type onePasswordItemURL struct {
+	URL string `json:"url"`
+}
+
+type onePasswordItemDetails struct {
+	LoginFields []onePasswordLoginField `json:"loginFields"`
+	Notes       string                  `json:"notesPlain"`
+}
+
+type onePasswordLoginField struct {
+	Value       string `json:"value"`
+	Designation string `json:"designation"`
+}
+
+func PreviewOnePasswordImport(
+	reader io.ReaderAt,
+	size int64,
+	existing []NativeItem,
+) (ImportPreview, error) {
+	if reader == nil || size <= 0 {
+		return ImportPreview{}, ErrInvalidOnePasswordExport
+	}
+	archive, err := zip.NewReader(reader, size)
+	if err != nil {
+		return ImportPreview{},
+			fmt.Errorf("%w: open archive", ErrInvalidOnePasswordExport)
+	}
+	attributesFile := onePasswordArchiveFile(
+		archive,
+		"export.attributes",
+	)
+	dataFile := onePasswordArchiveFile(archive, "export.data")
+	if attributesFile == nil || dataFile == nil {
+		return ImportPreview{},
+			fmt.Errorf("%w: missing export files", ErrInvalidOnePasswordExport)
+	}
+
+	var attributes onePasswordExportAttributes
+	if err := decodeOnePasswordJSON(attributesFile, &attributes); err != nil {
+		return ImportPreview{}, err
+	}
+	if attributes.Version != 3 ||
+		attributes.Description != "1Password Unencrypted Export" {
+		return ImportPreview{},
+			fmt.Errorf("%w: unsupported format", ErrInvalidOnePasswordExport)
+	}
+
+	var source onePasswordExport
+	if err := decodeOnePasswordJSON(dataFile, &source); err != nil {
+		return ImportPreview{}, err
+	}
+
+	preview := ImportPreview{}
+	for _, account := range source.Accounts {
+		for _, vault := range account.Vaults {
+			folderID, err := NewItemID()
+			if err != nil {
+				return ImportPreview{}, err
+			}
+			folder := FolderItem{
+				ItemID: folderID,
+				Name:   strings.TrimSpace(vault.Attrs.Name),
+			}
+			preview.Items = append(preview.Items, NativeItem{
+				Type:   NativeItemTypeFolder,
+				Folder: &folder,
+			})
+			preview.Counts.Folders++
+
+			for _, item := range vault.Items {
+				if item.CategoryUUID != "001" {
+					continue
+				}
+				itemID, err := NewItemID()
+				if err != nil {
+					return ImportPreview{}, err
+				}
+				var username, password string
+				for _, field := range item.Details.LoginFields {
+					switch field.Designation {
+					case "username":
+						username = strings.TrimSpace(field.Value)
+					case "password":
+						password = field.Value
+					}
+				}
+				urls := make([]string, 0, len(item.Overview.URLs))
+				for _, sourceURL := range item.Overview.URLs {
+					if value := strings.TrimSpace(sourceURL.URL); value != "" {
+						urls = append(urls, value)
+					}
+				}
+				login := LoginItem{
+					ItemID:   itemID,
+					Name:     strings.TrimSpace(item.Overview.Title),
+					Username: username,
+					Password: password,
+					FolderID: folderID,
+					Favorite: item.Favorite > 0,
+					URLs:     urls,
+					Notes:    item.Details.Notes,
+				}
+				preview.Items = append(preview.Items, NativeItem{
+					Type:  NativeItemTypeLogin,
+					Login: &login,
+				})
+				preview.Counts.Logins++
+			}
+		}
+	}
+	return preview, nil
+}
+
+func onePasswordArchiveFile(
+	archive *zip.Reader,
+	name string,
+) *zip.File {
+	for _, file := range archive.File {
+		if file.Name == name {
+			return file
+		}
+	}
+	return nil
+}
+
+func decodeOnePasswordJSON(file *zip.File, destination any) error {
+	reader, err := file.Open()
+	if err != nil {
+		return fmt.Errorf(
+			"%w: open %s",
+			ErrInvalidOnePasswordExport,
+			file.Name,
+		)
+	}
+	defer reader.Close()
+	decoder := json.NewDecoder(reader)
+	if err := decoder.Decode(destination); err != nil {
+		return fmt.Errorf(
+			"%w: parse %s",
+			ErrInvalidOnePasswordExport,
+			file.Name,
+		)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return fmt.Errorf(
+			"%w: trailing JSON in %s",
+			ErrInvalidOnePasswordExport,
+			file.Name,
+		)
+	}
+	return nil
+}

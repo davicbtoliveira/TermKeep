@@ -26,25 +26,9 @@ var ErrBitwardenExportTooManyRecords = errors.New(
 	"Bitwarden export exceeds 10000 records",
 )
 
-type BitwardenImportCounts struct {
-	Logins      int
-	SecureNotes int
-	Folders     int
-	Generic     int
-}
-
-type BitwardenImportIssue struct {
-	Item    int
-	Field   string
-	Message string
-}
-
-type BitwardenImportPreview struct {
-	Items          []NativeItem
-	Counts         BitwardenImportCounts
-	UnmappedFields []BitwardenImportIssue
-	Errors         []BitwardenImportIssue
-}
+type BitwardenImportCounts = ImportCounts
+type BitwardenImportIssue = ImportIssue
+type BitwardenImportPreview = ImportPreview
 
 type bitwardenExport struct {
 	Encrypted bool              `json:"encrypted"`
