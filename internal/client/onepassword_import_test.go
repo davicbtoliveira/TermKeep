@@ -28,10 +28,7 @@ func TestPreviewOnePasswordImportNormalizesLogin(t *testing.T) {
 					"categoryUuid": "001",
 					"overview": {
 						"title": "Production database",
-						"urls": [{
-							"label": "database",
-							"url": "https://db.example.com"
-						}]
+						"url": "https://db.example.com"
 					},
 					"details": {
 						"loginFields": [{
