@@ -60,8 +60,6 @@ type importRequest struct {
 	confirm bool
 }
 
-type bitwardenImportRequest = importRequest
-
 func main() {
 	os.Exit(run(os.Args[1:]))
 }
@@ -545,7 +543,7 @@ func runImport(cfg client.Config, args []string) int {
 		30*time.Second,
 	)
 	defer cancel()
-	if err := runBitwardenImportAt(
+	if err := runImportAt(
 		ctx,
 		cfg,
 		scope.SocketPath,
@@ -559,11 +557,11 @@ func runImport(cfg client.Config, args []string) int {
 	return 0
 }
 
-func runBitwardenImportAt(
+func runImportAt(
 	ctx context.Context,
 	cfg client.Config,
 	socketPath string,
-	request bitwardenImportRequest,
+	request importRequest,
 	stdout io.Writer,
 	stderr io.Writer,
 ) error {
@@ -581,29 +579,50 @@ func runBitwardenImportAt(
 	}
 	file, err := os.Open(request.path)
 	if err != nil {
-		return errors.New("open Bitwarden export failed")
+		return errors.New("open import file failed")
 	}
 	defer file.Close()
-	preview, err := client.PreviewBitwardenImport(file, existing)
+	var (
+		preview client.ImportPreview
+		name    string
+	)
+	switch request.format {
+	case importFormatBitwarden:
+		name = "Bitwarden"
+		preview, err = client.PreviewBitwardenImport(file, existing)
+	case importFormatOnePassword:
+		name = "1Password"
+		info, statErr := file.Stat()
+		if statErr != nil {
+			return errors.New("read import file size failed")
+		}
+		preview, err = client.PreviewOnePasswordImport(
+			file,
+			info.Size(),
+			existing,
+		)
+	default:
+		return errImportUsage
+	}
 	if err != nil {
 		return err
 	}
 	fmt.Fprintln(
 		stderr,
-		"Warning: Bitwarden export probably contains plaintext secrets; "+
+		"Warning: "+name+" export probably contains plaintext secrets; "+
 			"delete the original file after import.",
 	)
-	writeBitwardenImportPreview(stdout, preview)
+	writeImportPreview(stdout, name, preview)
 	if !request.confirm {
 		fmt.Fprintln(stdout, "Preview only; rerun with --confirm to import.")
 		return nil
 	}
 	if len(preview.Errors) != 0 {
 		return errors.New(
-			"Bitwarden preview contains errors; import canceled",
+			name + " preview contains errors; import canceled",
 		)
 	}
-	if err := queueBitwardenImport(
+	if err := queueImport(
 		ctx,
 		cache,
 		socketPath,
@@ -631,7 +650,7 @@ func runBitwardenImportAt(
 	return nil
 }
 
-func queueBitwardenImport(
+func queueImport(
 	ctx context.Context,
 	cache *client.Cache,
 	socketPath string,
@@ -730,11 +749,12 @@ func cachedNativeItems(
 	return items, nil
 }
 
-func writeBitwardenImportPreview(
+func writeImportPreview(
 	writer io.Writer,
-	preview client.BitwardenImportPreview,
+	name string,
+	preview client.ImportPreview,
 ) {
-	fmt.Fprintln(writer, "Bitwarden import preview")
+	fmt.Fprintln(writer, name+" import preview")
 	fmt.Fprintf(writer, "Logins: %d\n", preview.Counts.Logins)
 	fmt.Fprintf(writer, "Secure Notes: %d\n", preview.Counts.SecureNotes)
 	fmt.Fprintf(writer, "Folders: %d\n", preview.Counts.Folders)
